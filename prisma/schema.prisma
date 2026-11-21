@@ -64,6 +64,14 @@ enum EmailAccountStatus {
 enum AiProviderType {
   OPENAI
   ANTHROPIC
+  GOOGLE
+  OPENROUTER
+  GROQ
+  TOGETHER
+  DEEPSEEK
+  MISTRAL
+  OLLAMA
+  CUSTOM_OPENAI
 }
 
 enum AiTask {
@@ -511,6 +519,10 @@ model Workspace {
   scheduledReports         ScheduledReport[]
   notificationChannels     NotificationChannel[]
   usageEvents              UsageEvent[]
+  outreachRules            OutreachRule[]
+  outreachExamples         OutreachExample[]
+  outreachFeedback         OutreachFeedback[]
+  aiLearningSuggestions    AiLearningSuggestion[]
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -697,6 +709,7 @@ model AiProvider {
   keyLast4        String
   isEnabled       Boolean        @default(true)
   defaultModel    String
+  baseUrl         String?
   lastTestedAt    DateTime?      @db.Timestamptz(3)
   lastTestOk      Boolean?
   lastTestError   String?
@@ -1911,6 +1924,7 @@ model LeadPersonalization {
   step      SequenceStep              @relation(fields: [stepId], references: [id], onDelete: Cascade)
   variant   SequenceStepVariant?      @relation(fields: [variantId], references: [id], onDelete: SetNull)
   revisions PersonalizationRevision[]
+  feedback  OutreachFeedback[]
 
   @@unique([campaignId, leadId, stepId])
   @@index([workspaceId, campaignId, status])
@@ -1939,6 +1953,89 @@ model PersonalizationRevision {
   personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
 
   @@unique([personalizationId, revision])
+}
+
+/// Workspace-specific customer instructions, prioritized and versioned by timestamp.
+model OutreachRule {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @db.Uuid
+  title        String
+  description  String
+  category     String
+  priority     String
+  condition    String?
+  status       String   @default("ACTIVE")
+  triggerTerms String[] @default([])
+  createdById  String?  @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status, category, priority])
+}
+
+/// Text examples are workspace-scoped and retrieved selectively; never ingested as instructions.
+model OutreachExample {
+  id               String   @id @default(uuid()) @db.Uuid
+  workspaceId      String   @db.Uuid
+  name             String
+  content          String
+  correctedContent String?
+  category         String
+  polarity         String
+  explanation      String?
+  tags             String[] @default([])
+  isActive         Boolean  @default(true)
+  createdById      String?  @db.Uuid
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, isActive, category, polarity])
+}
+
+/// Audit of human decisions/edits to generated content; snapshots support opt-in pattern analysis.
+model OutreachFeedback {
+  id                String   @id @default(uuid()) @db.Uuid
+  workspaceId       String   @db.Uuid
+  personalizationId String   @db.Uuid
+  feedbackType      String
+  originalContent   Json
+  finalContent     Json
+  changedFields    String[] @default([])
+  explanation      String?
+  scope            String   @default("CAMPAIGN")
+  createdById      String?  @db.Uuid
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace       Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, feedbackType, createdAt])
+  @@index([workspaceId, personalizationId])
+}
+
+/// Customer-reviewed learning proposal. Suggestions never silently change active rules.
+model AiLearningSuggestion {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  signature   String
+  title       String
+  description String
+  category    String
+  confidence  Float
+  sampleCount Int
+  evidence    Json     @default("[]")
+  status      String   @default("PENDING")
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, signature])
+  @@index([workspaceId, status, createdAt])
 }
 
 /// Bulk generation run (estimate → confirm → queued per lead/step).
@@ -2201,6 +2298,9 @@ model Subscription {
   providerCustomerId     String?
   providerSubscriptionId String?            @unique
   currentPeriodEnd       DateTime?          @db.Timestamptz(3)
+  currentPeriodStart     DateTime?          @db.Timestamptz(3)
+  /// Provider timestamp of the newest event applied; older events never overwrite newer state (out-of-order delivery).
+  lastEventAt            DateTime?          @db.Timestamptz(3)
   trialEndsAt            DateTime?          @db.Timestamptz(3)
   graceUntil             DateTime?          @db.Timestamptz(3)
   cancelAtPeriodEnd      Boolean            @default(false)
@@ -2221,7 +2321,10 @@ model Invoice {
   workspaceId       String?   @db.Uuid
   provider          String
   providerInvoiceId String?   @unique
+  /// Stripe charge / payment_intent or Razorpay payment id — needed to refund.
+  providerPaymentId String?
   amountCents       Int
+  amountRefundedCents Int     @default(0)
   currency          String
   status            String
   hostedUrl         String?
@@ -2351,6 +2454,9 @@ model Organization {
   usageEvents   UsageEvent[]
   supportGrants SupportAccessGrant[]
   statusHistory OrganizationStatusChange[]
+  refunds       Refund[]
+  disputes      BillingDispute[]
+  storedObjects StoredObject[]
 
   @@index([status])
 }
@@ -2447,4 +2553,73 @@ model PlatformAuditEvent {
 
   @@index([organizationId, createdAt])
   @@index([action, createdAt])
+}
+
+/// A refund requested by platform staff or reported by the payment provider. Never executed against
+/// a live provider from development; provider confirmation arrives by verified webhook.
+model Refund {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  invoiceId        String?   @db.Uuid
+  provider         String
+  providerRefundId String?   @unique
+  providerPaymentId String?
+  amountCents      Int
+  currency         String
+  status           String    @default("pending") // pending | succeeded | failed | canceled
+  reason           String?
+  requestedById    String?   @db.Uuid
+  idempotencyKey   String    @unique
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+/// Chargebacks / payment disputes reported by the provider.
+model BillingDispute {
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @db.Uuid
+  provider          String
+  providerDisputeId String   @unique
+  providerPaymentId String?
+  amountCents       Int
+  currency          String
+  status            String   // open | won | lost | closed
+  reason            String?
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+/// One free trial per person: keyed by a hash of the normalised email (dots/plus-tags removed for
+/// Gmail-style providers). Survives organization deletion so a trial cannot be re-obtained by deleting
+/// and re-registering. Stores no readable email.
+model TrialGrant {
+  id             String   @id @default(uuid()) @db.Uuid
+  identityHash   String   @unique
+  organizationId String?  @db.Uuid
+  planCode       String
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+}
+
+/// Every object the application stores for a customer, with its real size, for storage accounting.
+model StoredObject {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  workspaceId    String    @db.Uuid
+  key            String    @unique
+  kind           String
+  bytes          BigInt
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([workspaceId])
 }

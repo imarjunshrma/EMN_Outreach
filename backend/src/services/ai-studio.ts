@@ -84,7 +84,7 @@ export async function createDocument(workspaceId: string, input: { title: string
     const raw = input.file.buffer.toString('utf8');
     if (raw.includes('\u0000')) throw new AppError('VALIDATION_FAILED', 'File looks binary; upload a text file', 400);
     text = kind === 'html' ? htmlToText(raw).text : raw;
-    storageKey = await store().put(workspaceId, 'knowledge', input.file.buffer, input.file.originalname.split('.').pop()?.toLowerCase() ?? 'txt');
+    storageKey = await (await import('./storage-accounting.js')).putTracked(workspaceId, 'knowledge', input.file.buffer, input.file.originalname.split('.').pop()?.toLowerCase() ?? 'txt', { enforce: true });
   }
   text = text.replace(/\r\n/g, '\n').trim();
   if (!text) throw new AppError('VALIDATION_FAILED', 'Document is empty', 400);
@@ -103,7 +103,7 @@ export async function updateDocument(workspaceId: string, id: string, input: { t
 
 export async function deleteDocument(workspaceId: string, id: string, actor: Actor) {
   const d = await getDocument(workspaceId, id);
-  if (d.storageKey) await store().delete(d.storageKey).catch(() => undefined);
+  if (d.storageKey) await (await import('./storage-accounting.js')).deleteTracked(d.storageKey);
   await db().knowledgeDocument.delete({ where: { id: d.id } });
   await audit(workspaceId, actor, 'ai_studio.document_deleted', { type: 'knowledge_document', id });
 }
@@ -234,6 +234,8 @@ export interface AiSnapshot {
   writing: { versionId: string | null; version: number; data: Writing };
   research: { versionId: string | null; version: number; data: Research };
   documents: Array<{ id: string; title: string; text: string }>;
+  outreachRules: Array<{ id: string; title: string; description: string; category: string; priority: string; condition: string | null; triggerTerms: string[] }>;
+  outreachExamples: Array<{ id: string; name: string; content: string; correctedContent: string | null; category: string; polarity: string; explanation: string | null; tags: string[] }>;
   profile: { id: string; name: string; versionId: string; version: number; instructions: string; settings: WritingOverrides } | null;
   campaign: CampaignAiOverrides;
   icp: { id: string; name: string; aiInstructions: string | null } | null;
@@ -258,7 +260,11 @@ async function activeDocuments(workspaceId: string) {
 export async function buildSnapshot(workspaceId: string, campaignId: string): Promise<AiSnapshot> {
   const c = await db().campaign.findFirst({ where: { id: campaignId, workspaceId }, include: { aiProfile: true, icp: true } });
   if (!c) throw NotFound('Campaign');
-  const [knowledge, writing, research, documents] = await Promise.all([getConfig(workspaceId, 'KNOWLEDGE'), getConfig(workspaceId, 'WRITING'), getConfig(workspaceId, 'RESEARCH'), activeDocuments(workspaceId)]);
+  const [knowledge, writing, research, documents, outreachRules, outreachExamples] = await Promise.all([
+    getConfig(workspaceId, 'KNOWLEDGE'), getConfig(workspaceId, 'WRITING'), getConfig(workspaceId, 'RESEARCH'), activeDocuments(workspaceId),
+    db().outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE' }, orderBy: [{ priority: 'asc' }, { updatedAt: 'desc' }], take: 200, select: { id: true, title: true, description: true, category: true, priority: true, condition: true, triggerTerms: true } }),
+    db().outreachExample.findMany({ where: { workspaceId, isActive: true }, orderBy: { updatedAt: 'desc' }, take: 100, select: { id: true, name: true, content: true, correctedContent: true, category: true, polarity: true, explanation: true, tags: true } }),
+  ]);
   let profile: AiSnapshot['profile'] = null;
   if (c.aiProfile && !c.aiProfile.isArchived && c.aiProfile.activeVersionId) {
     const v = await db().promptProfileVersion.findUnique({ where: { id: c.aiProfile.activeVersionId } });
@@ -266,7 +272,7 @@ export async function buildSnapshot(workspaceId: string, campaignId: string): Pr
   }
   return {
     takenAt: new Date().toISOString(),
-    knowledge, writing, research, documents, profile,
+    knowledge, writing, research, documents, outreachRules, outreachExamples, profile,
     campaign: CampaignAiOverridesSchema.parse(c.aiOverrides ?? {}),
     icp: c.icp ? { id: c.icp.id, name: c.icp.name, aiInstructions: c.icp.aiInstructions } : null,
   };

@@ -139,12 +139,24 @@ export async function handleWebhook(provider: 'stripe' | 'razorpay', rawBody: st
   try { ev = paymentGateways()[provider].verifyAndParse(rawBody, headers); } catch (e) { throw new AppError('INVALID_SIGNATURE', (e as Error).message, 400); }
   try { await db().billingEvent.create({ data: { provider, eventId: ev.id, type: ev.type, payload: ev.raw as Prisma.InputJsonValue } }); } catch (e) { if ((e as { code?: string }).code === 'P2002') return { duplicate: true }; throw e; }
   if (ev.type === 'ignored') return { ignored: true };
+  if (ev.type === 'refund.updated') return applyRefundEvent(provider, ev);
+  if (ev.type === 'dispute.updated') return applyDisputeEvent(provider, ev);
   // Gateways carry our id in metadata as "workspaceId" (older checkouts) — accept either an organization or a workspace id.
   let orgFromMeta: string | null = null;
   if (ev.workspaceId) orgFromMeta = (await db().organization.findUnique({ where: { id: ev.workspaceId }, select: { id: true } }))?.id ?? (await db().workspace.findUnique({ where: { id: ev.workspaceId }, select: { organizationId: true } }))?.organizationId ?? null;
   const sub = await db().subscription.findFirst({ where: { OR: [...(ev.subscriptionId ? [{ providerSubscriptionId: ev.subscriptionId }] : []), ...(orgFromMeta ? [{ organizationId: orgFromMeta }] : []), ...(ev.customerId ? [{ providerCustomerId: ev.customerId }] : [])] } });
   if (!sub) return { unmatched: true };
+  // Out-of-order delivery: an event older than the newest one already applied must not roll state back.
+  // Its invoice (if any) is still recorded, because invoices are facts that do not depend on order.
+  const stale = !!(ev.occurredAt && sub.lastEventAt && ev.occurredAt < sub.lastEventAt);
+  if (stale) {
+    if (ev.invoice) await upsertInvoice(provider, sub.organizationId, ev.invoice);
+    await platformAudit({ action: 'billing.webhook_stale', organizationId: sub.organizationId, metadata: { provider, type: ev.type, eventId: ev.id, occurredAt: ev.occurredAt?.toISOString() } });
+    return { ok: true, stale: true };
+  }
   const data: Prisma.SubscriptionUpdateInput = { provider };
+  if (ev.occurredAt) data.lastEventAt = ev.occurredAt;
+  if (ev.currentPeriodStart) data.currentPeriodStart = ev.currentPeriodStart;
   if (ev.subscriptionId) data.providerSubscriptionId = ev.subscriptionId;
   if (ev.customerId) data.providerCustomerId = ev.customerId;
   if (ev.currentPeriodEnd) data.currentPeriodEnd = ev.currentPeriodEnd;
@@ -157,7 +169,7 @@ export async function handleWebhook(provider: 'stripe' | 'razorpay', rawBody: st
     if (w) await notifyWorkspace(w.id, 'OWNER', { type: 'billing.payment_failed', title: `Payment failed — update your payment method within ${GRACE_DAYS()} days`, link: '/billing' });
   } else if (ev.status) { data.status = ev.status; if (ev.status === 'ACTIVE') data.graceUntil = null; if (ev.status === 'CANCELED') data.canceledAt = new Date(); }
   await db().subscription.update({ where: { id: sub.id }, data });
-  if (ev.invoice) await db().invoice.upsert({ where: { providerInvoiceId: ev.invoice.id }, update: { status: ev.invoice.status }, create: { organizationId: sub.organizationId, provider, providerInvoiceId: ev.invoice.id, amountCents: ev.invoice.amountCents, currency: ev.invoice.currency, status: ev.invoice.status, hostedUrl: ev.invoice.hostedUrl ?? null, periodStart: ev.invoice.periodStart ?? null, periodEnd: ev.invoice.periodEnd ?? null } });
+  if (ev.invoice) await upsertInvoice(provider, sub.organizationId, ev.invoice);
   await (await import('./tenancy.js')).syncFromSubscription(sub.organizationId);
   await platformAudit({ action: 'billing.webhook', organizationId: sub.organizationId, metadata: { provider, type: ev.type, status: (data.status as string) ?? null, eventId: ev.id } });
   return { ok: true };
@@ -166,3 +178,128 @@ export async function handleWebhook(provider: 'stripe' | 'razorpay', rawBody: st
 // ------------------------------------------------------------------ legacy workspace audit helper (kept for older callers)
 export async function auditBilling(workspaceId: string, actor: Actor, action: string, meta?: Record<string, unknown>) { await audit(workspaceId, actor, action, undefined, meta); }
 export const entitlements = entWs;
+
+// ------------------------------------------------------------------ invoices, refunds, disputes, reconciliation
+
+type EvInvoice = NonNullable<import('../../../integrations/src/billing/gateways.js').NormalizedBillingEvent['invoice']>;
+async function upsertInvoice(provider: string, organizationId: string, inv: EvInvoice) {
+  await db().invoice.upsert({
+    where: { providerInvoiceId: inv.id },
+    update: { status: inv.status, ...(inv.paymentId ? { providerPaymentId: inv.paymentId } : {}) },
+    create: { organizationId, provider, providerInvoiceId: inv.id, providerPaymentId: inv.paymentId ?? null, amountCents: inv.amountCents, currency: inv.currency, status: inv.status, hostedUrl: inv.hostedUrl ?? null, periodStart: inv.periodStart ?? null, periodEnd: inv.periodEnd ?? null },
+  });
+}
+
+/** Re-derives an invoice's refunded total from succeeded refunds (idempotent, never double-counts). */
+async function recomputeInvoiceRefunds(invoiceId: string) {
+  const inv = await db().invoice.findUnique({ where: { id: invoiceId } });
+  if (!inv) return;
+  const sum = (await db().refund.aggregate({ where: { invoiceId, status: 'succeeded' }, _sum: { amountCents: true } }))._sum.amountCents ?? 0;
+  const status = sum <= 0 ? (inv.status.includes('refund') ? 'paid' : inv.status) : sum >= inv.amountCents ? 'refunded' : 'partially_refunded';
+  await db().invoice.update({ where: { id: invoiceId }, data: { amountRefundedCents: Math.min(sum, inv.amountCents), status } });
+}
+
+type Ev = import('../../../integrations/src/billing/gateways.js').NormalizedBillingEvent;
+async function applyRefundEvent(provider: 'stripe' | 'razorpay', ev: Ev) {
+  const r = ev.refund!;
+  const invoice = r.paymentId ? await db().invoice.findFirst({ where: { providerPaymentId: r.paymentId } }) : null;
+  let refund = await db().refund.findFirst({ where: { OR: [{ providerRefundId: r.id }, ...(r.metadataRefundId ? [{ idempotencyKey: r.metadataRefundId }] : [])] } });
+  if (!refund) {
+    if (!invoice) { await platformAudit({ action: 'billing.refund_unmatched', metadata: { provider, refundId: r.id, paymentId: r.paymentId } }); return { unmatched: true }; }
+    // Refund made in the provider's dashboard: record it.
+    refund = await db().refund.create({ data: { organizationId: invoice.organizationId, invoiceId: invoice.id, provider, providerRefundId: r.id, providerPaymentId: r.paymentId, amountCents: r.amountCents, currency: r.currency, status: r.status, reason: 'Issued in the payment provider dashboard', idempotencyKey: `provider:${provider}:${r.id}` } });
+  } else {
+    refund = await db().refund.update({ where: { id: refund.id }, data: { providerRefundId: r.id, status: r.status, amountCents: r.amountCents || refund.amountCents } });
+  }
+  if (refund.invoiceId) await recomputeInvoiceRefunds(refund.invoiceId);
+  await platformAudit({ action: `billing.refund_${r.status}`, organizationId: refund.organizationId, targetType: 'refund', targetId: refund.id, metadata: { provider, amountCents: refund.amountCents, currency: refund.currency } });
+  return { ok: true, refund: refund.status };
+}
+
+async function applyDisputeEvent(provider: 'stripe' | 'razorpay', ev: Ev) {
+  const d = ev.dispute!;
+  const invoice = d.paymentId ? await db().invoice.findFirst({ where: { providerPaymentId: d.paymentId } }) : null;
+  const existing = await db().billingDispute.findUnique({ where: { providerDisputeId: d.id } });
+  const organizationId = existing?.organizationId ?? invoice?.organizationId;
+  if (!organizationId) { await platformAudit({ action: 'billing.dispute_unmatched', metadata: { provider, disputeId: d.id, paymentId: d.paymentId } }); return { unmatched: true }; }
+  await db().billingDispute.upsert({ where: { providerDisputeId: d.id }, update: { status: d.status, reason: d.reason ?? undefined }, create: { organizationId, provider, providerDisputeId: d.id, providerPaymentId: d.paymentId, amountCents: d.amountCents, currency: d.currency, status: d.status, reason: d.reason ?? null } });
+  await platformAudit({ action: `billing.dispute_${d.status}`, organizationId, targetType: 'dispute', targetId: d.id, metadata: { provider, amountCents: d.amountCents, reason: d.reason } });
+  // Policy: a lost chargeback suspends the organization (read-only, data kept) until staff review it.
+  // Payment events do not lift this suspension; staff reactivate after resolving it with the customer.
+  if (d.status === 'lost') {
+    const org = await db().organization.findUniqueOrThrow({ where: { id: organizationId } });
+    if (['TRIAL', 'ACTIVE', 'PAST_DUE', 'PENDING_SETUP'].includes(org.status)) {
+      const { setOrgStatus } = await import('./tenancy.js');
+      await setOrgStatus(organizationId, 'SUSPENDED', `Payment dispute ${d.id} was lost — contact billing support`, { system: true });
+      await db().organization.update({ where: { id: organizationId }, data: { settings: { ...((org.settings ?? {}) as object), adminSuspended: true } as Prisma.InputJsonValue } });
+    }
+  }
+  return { ok: true, dispute: d.status };
+}
+
+export const RefundSchema = z.object({
+  invoiceId: z.string().uuid(), amountCents: z.number().int().positive().optional(), reason: z.string().trim().min(5).max(500),
+  cancelSubscription: z.boolean().default(false), requestKey: z.string().uuid(),
+});
+
+/**
+ * Staff-initiated refund. Idempotent on `requestKey` (a double-click or retry returns the same refund).
+ * The provider call uses the same key as its idempotency key. The refund is only marked succeeded when
+ * the provider confirms it by verified webhook.
+ */
+export async function requestRefund(organizationId: string, input: z.infer<typeof RefundSchema>, admin: { userId: string; ip?: string | null }) {
+  const idempotencyKey = `staff:${input.requestKey}`;
+  const prior = await db().refund.findUnique({ where: { idempotencyKey } });
+  if (prior) return prior;
+  const inv = await db().invoice.findFirst({ where: { id: input.invoiceId, organizationId } });
+  if (!inv) throw NotFound('Invoice');
+  if (!['paid', 'partially_refunded'].includes(inv.status)) throw new AppError('CONFLICT', `Only paid invoices can be refunded (this one is ${inv.status})`, 409);
+  if (!inv.providerPaymentId) throw new AppError('CONFLICT', 'This invoice has no provider payment reference to refund against', 409);
+  const pending = (await db().refund.aggregate({ where: { invoiceId: inv.id, status: { in: ['pending', 'succeeded'] } }, _sum: { amountCents: true } }))._sum.amountCents ?? 0;
+  const amount = input.amountCents ?? inv.amountCents - pending;
+  if (amount <= 0 || pending + amount > inv.amountCents) throw new AppError('VALIDATION_FAILED', `At most ${(inv.amountCents - pending) / 100} ${inv.currency} can still be refunded on this invoice`, 400);
+  const g = paymentGateways()[inv.provider as 'stripe' | 'razorpay'];
+  if (!g?.configured) throw new AppError('PROVIDER_NOT_CONFIGURED', `${inv.provider} is not configured on this server`, 400);
+  const refund = await db().refund.create({ data: { organizationId, invoiceId: inv.id, provider: inv.provider, providerPaymentId: inv.providerPaymentId, amountCents: amount, currency: inv.currency, status: 'pending', reason: input.reason, requestedById: admin.userId, idempotencyKey } });
+  try {
+    const r = await g.refund({ paymentId: inv.providerPaymentId, amountCents: amount === inv.amountCents ? undefined : amount, idempotencyKey, reason: input.reason });
+    await db().refund.update({ where: { id: refund.id }, data: { providerRefundId: r.id, status: r.status === 'succeeded' || r.status === 'processed' ? 'succeeded' : r.status === 'failed' ? 'failed' : 'pending' } });
+  } catch (e) {
+    await db().refund.update({ where: { id: refund.id }, data: { status: 'failed' } });
+    await platformAudit({ actorUserId: admin.userId, action: 'billing.refund_request_failed', organizationId, targetType: 'refund', targetId: refund.id, reason: input.reason, ip: admin.ip ?? null, metadata: { error: (e as Error).message.slice(0, 300) } });
+    throw e;
+  }
+  await recomputeInvoiceRefunds(inv.id);
+  if (input.cancelSubscription) {
+    const sub = await db().subscription.findUnique({ where: { organizationId } });
+    if (sub?.providerSubscriptionId && sub.provider === inv.provider) await g.cancel({ subscriptionId: sub.providerSubscriptionId, atPeriodEnd: false });
+    if (sub) await db().subscription.update({ where: { id: sub.id }, data: { status: 'CANCELED', canceledAt: new Date() } });
+    await (await import('./tenancy.js')).syncFromSubscription(organizationId);
+  }
+  await platformAudit({ actorUserId: admin.userId, action: 'billing.refund_requested', organizationId, targetType: 'refund', targetId: refund.id, reason: input.reason, ip: admin.ip ?? null, metadata: { amountCents: amount, currency: inv.currency, cancelSubscription: input.cancelSubscription } });
+  return db().refund.findUniqueOrThrow({ where: { id: refund.id } });
+}
+
+/** Compares local subscription state with the provider and repairs drift (missed webhooks). Runs every 6 hours. */
+export async function reconcileSubscriptions() {
+  const subs = await db().subscription.findMany({ where: { provider: { in: ['stripe', 'razorpay'] }, providerSubscriptionId: { not: null }, status: { not: 'CANCELED' } } });
+  let checked = 0; let repaired = 0; let failed = 0;
+  for (const sub of subs) {
+    const g = paymentGateways()[sub.provider as 'stripe' | 'razorpay'];
+    if (!g?.configured) continue;
+    try {
+      const remote = await g.fetchSubscription(sub.providerSubscriptionId!);
+      checked++;
+      const drift = remote.status !== sub.status || remote.cancelAtPeriodEnd !== sub.cancelAtPeriodEnd || (remote.currentPeriodEnd?.getTime() ?? null) !== (sub.currentPeriodEnd?.getTime() ?? null);
+      if (!drift) continue;
+      await db().subscription.update({ where: { id: sub.id }, data: { status: remote.status, cancelAtPeriodEnd: remote.cancelAtPeriodEnd, currentPeriodEnd: remote.currentPeriodEnd, currentPeriodStart: remote.currentPeriodStart, ...(remote.status === 'ACTIVE' ? { graceUntil: null } : {}) } });
+      await (await import('./tenancy.js')).syncFromSubscription(sub.organizationId);
+      await platformAudit({ action: 'billing.reconciled', organizationId: sub.organizationId, metadata: { provider: sub.provider, from: sub.status, to: remote.status } });
+      repaired++;
+    } catch (e) {
+      failed++;
+      await platformAudit({ action: 'billing.reconcile_failed', organizationId: sub.organizationId, metadata: { provider: sub.provider, error: (e as Error).message.slice(0, 200) } });
+    }
+  }
+  return { checked, repaired, failed };
+}

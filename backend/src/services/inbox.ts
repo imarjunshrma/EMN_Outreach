@@ -31,8 +31,10 @@ export const sanitizeEmailHtml = (html: string) => sanitizeHtml(html, SANITIZE);
 
 /** Ingest messages from a mailbox sync. Idempotent per (account, providerMessageId). */
 export async function ingestMessages(workspaceId: string, accountId: string, messages: NormalizedMessage[]) {
-  const account = await db().emailAccount.findUniqueOrThrow({ where: { id: accountId } });
+  const account = await db().emailAccount.findFirst({ where: { id: accountId, workspaceId } });
+  if (!account) throw NotFound('Email account');
   const stats = { inbound: 0, outbound: 0, bounces: 0, replies: 0, skipped: 0 };
+  let failed = 0;
   const sorted = [...messages].sort((a, b) => a.date.getTime() - b.date.getTime());
   for (const m of sorted) {
     try {
@@ -73,7 +75,7 @@ export async function ingestMessages(workspaceId: string, accountId: string, mes
       });
       for (const att of m.attachments.slice(0, 20)) {
         let storageKey: string | null = null;
-        if (att.content && att.size <= 10 * 1024 * 1024) storageKey = await store().put(workspaceId, 'attachments', att.content, (att.filename.split('.').pop() ?? 'bin').slice(0, 8));
+        if (att.content && att.size <= 10 * 1024 * 1024) storageKey = await (await import('./storage-accounting.js')).putTracked(workspaceId, 'attachments', att.content, (att.filename.split('.').pop() ?? 'bin').slice(0, 8), { enforce: false }); // inbound mail is never refused
         await db().emailAttachment.create({ data: { workspaceId, messageId: message.id, filename: att.filename.slice(0, 200), contentType: att.contentType, sizeBytes: att.size, storageKey } });
       }
       await db().conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: m.date > conversation.lastMessageAt ? m.date : conversation.lastMessageAt, ...(outbound ? {} : { isUnread: true, status: 'OPEN' }), ...(lead && !conversation.leadId ? { leadId: lead.id } : {}) } });
@@ -83,9 +85,13 @@ export async function ingestMessages(workspaceId: string, accountId: string, mes
       if (m.bounce) { stats.bounces++; await handleBounce(workspaceId, accountId, message.id, m); continue; }
       if (lead) { stats.replies++; await handleReply(workspaceId, accountId, conversation.id, message.id, lead.id, m); }
     } catch (e) {
+      failed++;
       logger.error({ err: e, providerMessageId: m.providerMessageId }, 'ingest failed for message');
     }
   }
+  // Do not let the provider cursor advance past messages that failed local
+  // persistence. The retry will skip already-ingested IDs and retry failures.
+  if (failed) throw new AppError('INBOX_INGEST_FAILED', `${failed} message(s) could not be stored; mailbox sync will retry.`, 503);
   return stats;
 }
 
@@ -99,6 +105,7 @@ async function handleBounce(workspaceId: string, accountId: string, messageId: s
   const type = b.hard ? 'BOUNCED_HARD' : 'BOUNCED_SOFT';
   const key = `${type}:${ob?.id ?? lead?.id}:${b.hard ? '' : messageId}`;
   await db().emailEvent.upsert({ where: { dedupeKey: key }, update: {}, create: { workspaceId, type, leadId: lead?.id ?? null, campaignId: ob?.campaignId, enrollmentId: ob?.enrollmentId, outboundEmailId: ob?.id, emailMessageId: messageId, emailAccountId: accountId, dedupeKey: key, metadata: { status: b.status, recipient } } });
+  await maybeAutoPauseMailboxOnBounce(workspaceId, accountId);
   if (!lead) return;
   const soft = b.hard ? 0 : await db().emailEvent.count({ where: { leadId: lead.id, type: 'BOUNCED_SOFT' } });
   if (b.hard || soft >= 3) {
@@ -108,10 +115,30 @@ async function handleBounce(workspaceId: string, accountId: string, messageId: s
   }
 }
 
+async function maybeAutoPauseMailboxOnBounce(workspaceId: string, accountId: string) {
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  if (!ws) return;
+  const settings = readSettings(ws.settings);
+  const threshold = settings.mailboxAutoPauseBounceRatePct;
+  if (threshold === null) return;
+  const since = new Date(Date.now() - 30 * 86400_000);
+  const [sent, bounced] = await Promise.all([
+    db().emailEvent.count({ where: { workspaceId, emailAccountId: accountId, type: 'SENT', occurredAt: { gte: since } } }),
+    db().emailEvent.count({ where: { workspaceId, emailAccountId: accountId, type: 'BOUNCED_HARD', occurredAt: { gte: since } } }),
+  ]);
+  if (sent < settings.mailboxAutoPauseMinSends || bounced / sent * 100 < threshold) return;
+  const reason = `Auto-paused: hard-bounce rate ${(bounced / sent * 100).toFixed(1)}% exceeded workspace threshold ${threshold}% over the last 30 days (${bounced}/${sent}).`;
+  const r = await db().emailAccount.updateMany({ where: { id: accountId, workspaceId, status: 'CONNECTED' }, data: { status: 'PAUSED', statusReason: reason } });
+  if (!r.count) return;
+  await audit(workspaceId, WORKER_ACTOR, 'email_account.auto_paused_bounce_rate', { type: 'email_account', id: accountId }, { sent30d: sent, hardBounces30d: bounced, thresholdPct: threshold });
+  await notifyWorkspace(workspaceId, 'ADMIN', { type: 'account.bounce_pause', title: 'Mailbox paused after elevated hard bounces', body: reason, link: '/mailbox-health' });
+}
+
 async function handleReply(workspaceId: string, accountId: string, conversationId: string, messageId: string, leadId: string, m: NormalizedMessage) {
-  const enrollments = await db().sequenceEnrollment.findMany({ where: { workspaceId, leadId, emailAccountId: accountId }, include: { campaign: true } });
   const conv = await db().conversation.findUniqueOrThrow({ where: { id: conversationId } });
-  if (!conv.campaignId && enrollments[0]) await db().conversation.update({ where: { id: conversationId }, data: { campaignId: enrollments[0].campaignId } });
+  // Only attribute a reply to a campaign when threading established that
+  // campaign. Choosing the first enrollment can falsely stop another sequence.
+  const enrollments = conv.campaignId ? await db().sequenceEnrollment.findMany({ where: { workspaceId, leadId, emailAccountId: accountId, campaignId: conv.campaignId }, include: { campaign: true } }) : [];
   for (const e of enrollments) {
     if (m.isAutoReply) {
       await db().emailEvent.upsert({ where: { dedupeKey: `AUTO:${messageId}:${e.id}` }, update: {}, create: { workspaceId, type: 'AUTO_REPLIED', leadId, campaignId: e.campaignId, enrollmentId: e.id, emailMessageId: messageId, emailAccountId: accountId, dedupeKey: `AUTO:${messageId}:${e.id}` } });

@@ -1,6 +1,6 @@
 # EMN Outreach OS — API documentation
 
-Generated from the route registry by `npm run api-docs` (317 operations). The machine-readable
+Generated from the route registry by `npm run api-docs` (336 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -84,18 +84,35 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
 | GET | `/w/:workspaceId/ai/providers` | session/API key · ADMIN+ | — | — | — | Configured AI providers (key shown as last 4 only) |
-| PUT | `/w/:workspaceId/ai/providers` | session/API key · ADMIN+ | — | `provider`: OPENAI\|ANTHROPIC, `apiKey?`: string, `defaultModel`: string, `isEnabled?`: boolean | — | Add/update an AI provider key and default model |
+| PUT | `/w/:workspaceId/ai/providers` | session/API key · ADMIN+ | — | `provider`: OPENAI\|ANTHROPIC\|GOOGLE\|OPENROUTER\|GROQ\|TOGETHER…, `apiKey?`: string, `defaultModel`: string, `baseUrl?`: object, `isEnabled?`: boolean | — | Add/update an AI provider key and default model |
 | DELETE | `/w/:workspaceId/ai/providers/:provider` | session/API key · ADMIN+ | — | — | — | Remove an AI provider |
 | POST | `/w/:workspaceId/ai/providers/:provider/test` | session/API key · ADMIN+ | 20/600s per workspace | — | — | Test an AI provider connection |
+| GET | `/w/:workspaceId/ai/providers/:provider/models` | session/API key · ADMIN+ | 30/600s per workspace | — | — | List models available to a configured provider |
 | GET | `/w/:workspaceId/ai/routes` | session/API key · ADMIN+ | — | — | — | Model routing per task |
-| PUT | `/w/:workspaceId/ai/routes` | session/API key · ADMIN+ | — | `task`: PERSONALIZATION\|COPILOT\|ICP_FROM_TEXT\|FACT_EXTRACTION\|LEAD_QUALIFICATION\|EMAIL_WRITING…, `provider`: OPENAI\|ANTHROPIC, `model`: string, `fallbackProvider?`: object, `fallbackModel?`: string\|null, `temperature?`: object, `maxOutputTokens?`: integer, `maxInputTokens?`: object, `monthlyBudgetUsd?`: object | — | Set model, fallback and budget for a task |
+| PUT | `/w/:workspaceId/ai/routes` | session/API key · ADMIN+ | — | `task`: PERSONALIZATION\|COPILOT\|ICP_FROM_TEXT\|FACT_EXTRACTION\|LEAD_QUALIFICATION\|EMAIL_WRITING…, `provider`: OPENAI\|ANTHROPIC\|GOOGLE\|OPENROUTER\|GROQ\|TOGETHER…, `model`: string, `fallbackProvider?`: object, `fallbackModel?`: string\|null, `temperature?`: object, `maxOutputTokens?`: integer, `maxInputTokens?`: object, `monthlyBudgetUsd?`: object | — | Set model, fallback and budget for a task |
 | GET | `/w/:workspaceId/ai/prompts` | session/API key · ADMIN+ | — | — | `task?`: PERSONALIZATION\|COPILOT\|ICP_FROM_TEXT\|FACT_EXTRACTION\|LEAD_QUALIFICATION\|EMAIL_WRITING… | Prompt versions |
 | POST | `/w/:workspaceId/ai/prompts` | session/API key · ADMIN+ | — | `task`: PERSONALIZATION\|COPILOT\|ICP_FROM_TEXT\|FACT_EXTRACTION\|LEAD_QUALIFICATION\|EMAIL_WRITING…, `systemPrompt`: string, `userPromptTemplate`: string, `changeNote?`: string, `activate?`: boolean | — | Create a new prompt version (immutable history) |
 | POST | `/w/:workspaceId/ai/prompts/:id/activate` | session/API key · ADMIN+ | — | — | — | Activate a prompt version |
 | GET | `/w/:workspaceId/ai/usage` | session/API key · MANAGER+ | — | — | `days?`: integer | Token usage and estimated cost |
 | GET | `/w/:workspaceId/ai/executions` | session/API key · ADMIN+ | — | — | `page?`: integer, `pageSize?`: integer, `task?`: PERSONALIZATION\|COPILOT\|ICP_FROM_TEXT\|FACT_EXTRACTION\|LEAD_QUALIFICATION\|EMAIL_WRITING…, `status?`: string | AI response logs |
 | GET | `/w/:workspaceId/ai/prices` | session/API key · ADMIN+ | — | — | — | Model price table (USD per million tokens) |
-| POST | `/w/:workspaceId/ai/prices` | session/API key · OWNER+ | — | `provider`: OPENAI\|ANTHROPIC, `model`: string, `inputPerMTokUsd`: number, `outputPerMTokUsd`: number, `cachedInputPerMTokUsd?`: object | — | Add a model price (owner only; applies to cost estimates) |
+| POST | `/w/:workspaceId/ai/prices` | session/API key · OWNER+ | — | `provider`: OPENAI\|ANTHROPIC\|GOOGLE\|OPENROUTER\|GROQ\|TOGETHER…, `model`: string, `inputPerMTokUsd`: number, `outputPerMTokUsd`: number, `cachedInputPerMTokUsd?`: object | — | Add a model price (owner only; applies to cost estimates) |
+
+## AI Outreach Brain
+
+| Method | Path | Auth · role | Rate limit | Body | Query | Summary |
+|---|---|---|---|---|---|---|
+| GET | `/w/:workspaceId/ai-outreach-brain/overview` | session/API key · VIEWER+ | — | — | — | Training status, rules, examples, draft decisions and pending learning suggestions |
+| GET | `/w/:workspaceId/ai-outreach-brain/rules` | session/API key · VIEWER+ | — | — | — | List workspace rules with conflict warnings |
+| POST | `/w/:workspaceId/ai-outreach-brain/rules` | session/API key · ADMIN+ | — | `title`: string, `description`: string, `category`: PROSPECT_RESEARCH\|PROSPECT_QUALIFICATION\|OPPORTUNITY_IDENTIFICATION\|PERSONALIZATION\|EMAIL_OPENING\|VALUE_PROPOSITION…, `priority`: MANDATORY\|PREFERRED\|AVOID\|CONDITIONAL, `condition?`: object, `status?`: ACTIVE\|INACTIVE, `triggerTerms?`: array | — | Create an outreach rule |
+| PATCH | `/w/:workspaceId/ai-outreach-brain/rules/:id` | session/API key · ADMIN+ | — | `title`: string, `description`: string, `category`: PROSPECT_RESEARCH\|PROSPECT_QUALIFICATION\|OPPORTUNITY_IDENTIFICATION\|PERSONALIZATION\|EMAIL_OPENING\|VALUE_PROPOSITION…, `priority`: MANDATORY\|PREFERRED\|AVOID\|CONDITIONAL, `condition?`: object, `status?`: ACTIVE\|INACTIVE, `triggerTerms?`: array | — | Update an outreach rule |
+| DELETE | `/w/:workspaceId/ai-outreach-brain/rules/:id` | session/API key · ADMIN+ | — | — | — | Delete an outreach rule |
+| GET | `/w/:workspaceId/ai-outreach-brain/examples` | session/API key · VIEWER+ | — | — | — | List workspace examples |
+| POST | `/w/:workspaceId/ai-outreach-brain/examples` | session/API key · ADMIN+ | — | `name`: string, `content`: string, `correctedContent?`: object, `category`: EMAIL\|RESEARCH\|CONVERSATION, `polarity`: POSITIVE\|NEGATIVE, `explanation?`: object, `tags?`: array, `isActive?`: boolean | — | Add a positive or negative text example |
+| PATCH | `/w/:workspaceId/ai-outreach-brain/examples/:id` | session/API key · ADMIN+ | — | `name`: string, `content`: string, `correctedContent?`: object, `category`: EMAIL\|RESEARCH\|CONVERSATION, `polarity`: POSITIVE\|NEGATIVE, `explanation?`: object, `tags?`: array, `isActive?`: boolean | — | Update a workspace example |
+| DELETE | `/w/:workspaceId/ai-outreach-brain/examples/:id` | session/API key · ADMIN+ | — | — | — | Delete a workspace example |
+| GET | `/w/:workspaceId/ai-outreach-brain/suggestions` | session/API key · VIEWER+ | — | — | — | Learning suggestions from repeated customer edits |
+| POST | `/w/:workspaceId/ai-outreach-brain/suggestions/:id/decision` | session/API key · ADMIN+ | — | `decision`: ACCEPT\|REJECT | — | Accept or reject a learning suggestion |
 
 ## AI Studio
 
@@ -371,9 +388,10 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 |---|---|---|---|---|---|---|
 | GET | `/w/:workspaceId/email-accounts` | session/API key · VIEWER+ | — | — | — | Connected mailboxes with today’s usage and health |
 | POST | `/w/:workspaceId/email-accounts/oauth/:provider` | session/API key · ADMIN+ | — | `loginHint?`: string | — | Start Google / Microsoft OAuth (returns the consent URL) |
-| POST | `/w/:workspaceId/email-accounts/smtp` | session/API key · ADMIN+ | — | `emailAddress`: string, `displayName?`: string, `password`: string, `smtpHost`: string, `smtpPort`: integer, `smtpSecure`: boolean, `imapHost`: string, `imapPort`: integer, `imapSecure`: boolean, `username`: string, `sentFolder?`: string, `appendToSent?`: boolean | — | Connect an SMTP/IMAP mailbox (only where the provider permits it) |
+| POST | `/w/:workspaceId/email-accounts/smtp` | session/API key · ADMIN+ | — | `emailAddress`: string, `displayName?`: string, `password?`: string, `smtpPassword?`: string, `imapPassword?`: string, `smtpHost`: string, `smtpPort`: integer, `smtpSecure`: boolean, `imapHost`: string, `imapPort`: integer, `imapSecure`: boolean, `username?`: string, `smtpUsername?`: string, `imapUsername?`: string, `sentFolder?`: string, `appendToSent?`: boolean | — | Connect an SMTP/IMAP mailbox (only where the provider permits it) |
 | PATCH | `/w/:workspaceId/email-accounts/:id` | session/API key · ADMIN+ | — | `displayName?`: object, `replyTo?`: object, `signatureText?`: object, `dailySendLimit?`: integer, `minSecondsBetweenSends?`: integer, `sendingWindow?`: object | — | Sender identity, limits and sending window |
 | POST | `/w/:workspaceId/email-accounts/:id/test` | session/API key · ADMIN+ | — | — | — | Test mailbox connection |
+| POST | `/w/:workspaceId/email-accounts/:id/delivery-diagnostic` | session/API key · ADMIN+ | 1/900s per workspace | — | — | Send one clearly labeled diagnostic message from an authorized mailbox to itself |
 | POST | `/w/:workspaceId/email-accounts/:id/pause` | session/API key · ADMIN+ | — | — | — | Pause sending from a mailbox |
 | POST | `/w/:workspaceId/email-accounts/:id/resume` | session/API key · ADMIN+ | — | — | — | Resume a paused mailbox |
 | POST | `/w/:workspaceId/email-accounts/:id/resync` | session/API key · ADMIN+ | — | — | — | Full resync of the mailbox |
@@ -406,6 +424,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/orgs/:organizationId/workspaces/:workspaceId/archive` | session/API key · VIEWER+ | — | — | — | Archive a workspace (data kept; hidden from members) |
 | GET | `/orgs/:organizationId/onboarding` | session/API key · VIEWER+ | — | — | — | Setup checklist computed from real configuration |
 | POST | `/orgs/:organizationId/onboarding/:step/skip` | session/API key · VIEWER+ | — | `skip?`: boolean | — | Skip (or un-skip) an optional setup step |
+| GET | `/orgs/:organizationId/support-access` | session/API key · VIEWER+ | — | — | — | When EMN support accessed this organization, why, and how many pages they viewed |
 | GET | `/orgs/:organizationId/usage` | session/API key · VIEWER+ | — | — | — | Usage this period and the last 6 months |
 | POST | `/orgs/:organizationId/export` | session/API key · VIEWER+ | 3/3600s per user | — | — | Download a JSON export of the organization and all its workspaces (secrets excluded) |
 | POST | `/orgs/:organizationId/deletion` | session/API key · VIEWER+ | — | `confirmName`: string | — | Schedule permanent deletion of the organization (grace period, then erased) |
@@ -428,7 +447,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/campaigns/:id/personalizations/retry-failed` | session/API key · MANAGER+ | — | — | — | Re-queue failed generations |
 | POST | `/w/:workspaceId/campaigns/:id/personalizations/research-missing` | session/API key · MEMBER+ | — | `maxAgeDays?`: integer | — | Queue research for recipients without recent research |
 | GET | `/w/:workspaceId/personalizations/:pid` | session/API key · VIEWER+ | — | — | — | One generated email with revisions, evidence and quality report |
-| PATCH | `/w/:workspaceId/personalizations/:pid` | session/API key · MEMBER+ | — | `subject?`: object, `openingLine?`: object, `body?`: string, `cta?`: object, `rerunFactCheck?`: boolean | — | Manually edit (preserved; re-checked; needs approval again) |
+| PATCH | `/w/:workspaceId/personalizations/:pid` | session/API key · MEMBER+ | — | `subject?`: object, `openingLine?`: object, `body?`: string, `cta?`: object, `rerunFactCheck?`: boolean, `feedbackNote?`: string, `feedbackScope?`: GLOBAL\|CAMPAIGN\|PROSPECT\|FACTUAL | — | Manually edit (preserved; re-checked; needs approval again) |
 | POST | `/w/:workspaceId/personalizations/approve` | session/API key · MANAGER+ | — | `ids`: array | — | Approve one or many (only when quality checks pass) |
 | POST | `/w/:workspaceId/personalizations/:pid/reject` | session/API key · MANAGER+ | — | `reason`: string | — | Reject |
 
@@ -436,12 +455,16 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
-| GET | `/platform/me` | session/API key · VIEWER+ | — | — | — | My platform role and permissions |
+| GET | `/platform/me` | session/API key · VIEWER+ | — | — | — | My platform role, permissions and whether 2FA is on (required for every other platform route) |
+| GET | `/platform/users` | session/API key · VIEWER+ | — | — | `q`: string, `page?`: integer | Find user accounts by email or name |
+| POST | `/platform/users/:id/status` | session/API key · VIEWER+ | — | `status`: ACTIVE\|DISABLED, `reason`: string | — | Disable (signs out everywhere) or re-enable a user account; reason required |
 | GET | `/platform/metrics` | session/API key · VIEWER+ | — | — | — | SaaS metrics: tenants by status, MRR/ARR, churn, plan and usage distribution, operations |
 | GET | `/platform/tenants` | session/API key · VIEWER+ | — | — | `q?`: string, `status?`: PENDING_SETUP\|TRIAL\|ACTIVE\|PAST_DUE\|SUSPENDED\|CANCELLED…, `plan?`: string, `page?`: integer, `pageSize?`: integer, `sort?`: createdAt\|name | Search and filter tenants |
 | GET | `/platform/tenants/:id` | session/API key · VIEWER+ | — | — | — | Tenant detail: subscription, usage, workspaces, users, integration status (no secrets), audit |
 | POST | `/platform/tenants/:id/lifecycle` | session/API key · VIEWER+ | — | `action`: suspend\|reactivate\|cancel\|schedule_deletion\|restore\|purge_now, `reason`: string | — | Suspend, reactivate, cancel, schedule deletion, restore or purge (reason required) |
 | POST | `/platform/tenants/:id/subscription` | session/API key · VIEWER+ | — | `planCode?`: string, `status?`: TRIALING\|ACTIVE\|PAST_DUE\|CANCELED\|INCOMPLETE, `trialEndsAt?`: object, `graceUntil?`: object, `overrides?`: object, `reason`: string | — | Override plan, status, trial, grace or entitlements (reason required) |
+| POST | `/platform/tenants/:id/refunds` | session/API key · VIEWER+ | 20/3600s per user | `invoiceId`: string, `amountCents?`: integer, `reason`: string, `cancelSubscription?`: boolean, `requestKey`: string | — | Refund all or part of a paid invoice (optionally cancelling the subscription); idempotent on requestKey |
+| GET | `/platform/tenants/:id/billing` | session/API key · VIEWER+ | — | — | — | Invoices, refunds and disputes of a tenant (no payment secrets) |
 | GET | `/platform/plans` | session/API key · VIEWER+ | — | — | — | All plans including archived, with subscriber counts |
 | POST | `/platform/plans` | session/API key · VIEWER+ | — | `code`: string, `name`: string, `description?`: string, `priceMonthlyCents`: integer, `priceYearlyCents`: integer, `currency?`: string, `trialDays?`: integer, `isPublic?`: boolean, `isActive?`: boolean, `sortOrder?`: integer, `providerPriceIds?`: object, `entitlements`: object | — | Create a plan |
 | PUT | `/platform/plans/:id` | session/API key · VIEWER+ | — | `code`: string, `name`: string, `description?`: string, `priceMonthlyCents`: integer, `priceYearlyCents`: integer, `currency?`: string, `trialDays?`: integer, `isPublic?`: boolean, `isActive?`: boolean, `sortOrder?`: integer, `providerPriceIds?`: object, `entitlements`: object | — | Update a plan (prices, limits, features, provider price ids) |
@@ -602,6 +625,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | GET | `/w/:workspaceId` | session/API key · VIEWER+ | — | — | — | Workspace details & settings |
 | PATCH | `/w/:workspaceId` | session/API key · ADMIN+ | — | `name?`: string, `timezone?`: string, `senderLegalName?`: object, `postalAddress?`: object, `settings?`: object | — | Update workspace settings (sender identity, postal address, retention, providers) |
 | GET | `/w/:workspaceId/dashboard` | session/API key · VIEWER+ | — | — | — | Overview dashboard counters |
+| GET | `/w/:workspaceId/access` | session/API key · VIEWER+ | — | — | — | How the caller is accessing this workspace (member, organization admin, or audited support access) and the tenant status |
 
 ## Writing
 

@@ -29,7 +29,7 @@ export default function Models() {
       )}
       <div className="mt-4">
         <Card title="Model per task (with fallback, token limits and per-task budget)">
-          <QueryView q={routes} isEmpty={(d) => !d.length} empty={<Notice>Add an OpenAI or Anthropic key in AI settings first.</Notice>}>
+          <QueryView q={routes} isEmpty={(d) => !d.length} empty={<Notice>Add an AI model provider in AI settings first.</Notice>}>
             {(d) => <Table head={['Task', 'Provider / model', 'Fallback', 'Max input tokens', 'Max output tokens', 'Monthly budget $', '']}>{d.map((r: any) => {
               const e = edits[r.task] ?? r;
               const set = (k: string, v: any) => setEdits({ ...edits, [r.task]: { ...e, [k]: v } });

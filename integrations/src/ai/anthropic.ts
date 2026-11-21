@@ -10,10 +10,16 @@ interface AnthropicResponse {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
   stop_reason?: string;
 }
+interface AnthropicModelsResponse { data?: Array<{ id?: string }>; has_more?: boolean; last_id?: string | null }
 
 export class AnthropicAdapter implements AiProviderAdapter {
   readonly name = 'ANTHROPIC' as const;
   constructor(private readonly fetchImpl?: FetchLike, private readonly baseUrl = 'https://api.anthropic.com') {}
+
+  async listModels(apiKey: string): Promise<string[]> {
+    const res = await httpJson<AnthropicModelsResponse>(`${this.baseUrl}/v1/models?limit=100`, { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } }, { provider: 'anthropic', fetchImpl: this.fetchImpl, timeoutMs: 20_000, retries: 0 });
+    return [...new Set((res.data ?? []).map((m) => m.id).filter((id): id is string => !!id))].sort();
+  }
 
   async generateStructured(apiKey: string, req: StructuredRequest): Promise<StructuredResponse> {
     const started = Date.now();

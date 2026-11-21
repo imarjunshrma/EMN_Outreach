@@ -4,6 +4,7 @@ import * as intel from '../services/intelligence.js';
 import * as ai from '../services/ai.js';
 import * as integrations from '../services/integrations.js';
 import { AI_TASKS, type AiTaskName } from '../../../shared/src/ai-schemas.js';
+import { AI_PROVIDER_NAMES } from '../../../integrations/src/ai/types.js';
 
 const TaskEnum = z.enum(AI_TASKS as [AiTaskName, ...AiTaskName[]]);
 
@@ -37,10 +38,11 @@ route({ method: 'post', path: '/w/:workspaceId/writing/fact-check', tag: 'Writin
 // ---------------------------------------------------------------- AI configuration
 route({ method: 'get', path: '/w/:workspaceId/ai/providers', tag: 'AI', summary: 'Configured AI providers (key shown as last 4 only)', auth: 'workspace', role: 'ADMIN', handler: async (c) => ({ providers: await ai.listProviders(c.workspaceId), suggestions: ai.SUGGESTED_MODELS }) });
 route({ method: 'put', path: '/w/:workspaceId/ai/providers', tag: 'AI', summary: 'Add/update an AI provider key and default model', auth: 'workspace', role: 'ADMIN',
-  body: z.object({ provider: z.enum(['OPENAI', 'ANTHROPIC']), apiKey: z.string().min(10).max(300).optional(), defaultModel: z.string().min(1).max(100), isEnabled: z.boolean().optional() }),
+  body: z.object({ provider: z.enum(AI_PROVIDER_NAMES), apiKey: z.string().min(1).max(500).optional(), defaultModel: z.string().min(1).max(150), baseUrl: z.string().max(500).nullable().optional(), isEnabled: z.boolean().optional() }),
   handler: (c) => ai.upsertProvider(c.workspaceId, c.body, c.actor) });
-route({ method: 'delete', path: '/w/:workspaceId/ai/providers/:provider', tag: 'AI', summary: 'Remove an AI provider', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await ai.deleteProvider(c.workspaceId, z.enum(['OPENAI', 'ANTHROPIC']).parse(c.params.provider), c.actor); return { ok: true }; } });
-route({ method: 'post', path: '/w/:workspaceId/ai/providers/:provider/test', tag: 'AI', summary: 'Test an AI provider connection', auth: 'workspace', role: 'ADMIN', status: 200, rateLimit: { limit: 20, windowSec: 600, key: 'workspace' }, handler: (c) => ai.testProvider(c.workspaceId, z.enum(['OPENAI', 'ANTHROPIC']).parse(c.params.provider)) });
+route({ method: 'delete', path: '/w/:workspaceId/ai/providers/:provider', tag: 'AI', summary: 'Remove an AI provider', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await ai.deleteProvider(c.workspaceId, z.enum(AI_PROVIDER_NAMES).parse(c.params.provider), c.actor); return { ok: true }; } });
+route({ method: 'post', path: '/w/:workspaceId/ai/providers/:provider/test', tag: 'AI', summary: 'Test an AI provider connection', auth: 'workspace', role: 'ADMIN', status: 200, rateLimit: { limit: 20, windowSec: 600, key: 'workspace' }, handler: (c) => ai.testProvider(c.workspaceId, z.enum(AI_PROVIDER_NAMES).parse(c.params.provider)) });
+route({ method: 'get', path: '/w/:workspaceId/ai/providers/:provider/models', tag: 'AI', summary: 'List models available to a configured provider', auth: 'workspace', role: 'ADMIN', rateLimit: { limit: 30, windowSec: 600, key: 'workspace' }, handler: (c) => ai.providerModels(c.workspaceId, z.enum(AI_PROVIDER_NAMES).parse(c.params.provider)) });
 route({ method: 'get', path: '/w/:workspaceId/ai/routes', tag: 'AI', summary: 'Model routing per task', auth: 'workspace', role: 'ADMIN', handler: (c) => ai.listRoutes(c.workspaceId) });
 route({ method: 'put', path: '/w/:workspaceId/ai/routes', tag: 'AI', summary: 'Set model, fallback and budget for a task', auth: 'workspace', role: 'ADMIN', body: ai.RouteUpdateSchema, handler: (c) => ai.updateRoute(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/ai/prompts', tag: 'AI', summary: 'Prompt versions', auth: 'workspace', role: 'ADMIN', query: z.object({ task: TaskEnum.optional() }), handler: (c) => ai.listPrompts(c.workspaceId, c.query.task) });
@@ -53,7 +55,7 @@ route({ method: 'get', path: '/w/:workspaceId/ai/executions', tag: 'AI', summary
   handler: async (c) => { const r = await ai.listExecutions(c.workspaceId, c.query); return paged(r.items, r.total, c.query.page, c.query.pageSize); } });
 route({ method: 'get', path: '/w/:workspaceId/ai/prices', tag: 'AI', summary: 'Model price table (USD per million tokens)', auth: 'workspace', role: 'ADMIN', handler: () => ai.listPrices() });
 route({ method: 'post', path: '/w/:workspaceId/ai/prices', tag: 'AI', summary: 'Add a model price (owner only; applies to cost estimates)', auth: 'workspace', role: 'OWNER',
-  body: z.object({ provider: z.enum(['OPENAI', 'ANTHROPIC']), model: z.string().min(1).max(100), inputPerMTokUsd: z.number().min(0), outputPerMTokUsd: z.number().min(0), cachedInputPerMTokUsd: z.number().min(0).nullable().optional() }),
+  body: z.object({ provider: z.enum(AI_PROVIDER_NAMES), model: z.string().min(1).max(150), inputPerMTokUsd: z.number().min(0), outputPerMTokUsd: z.number().min(0), cachedInputPerMTokUsd: z.number().min(0).nullable().optional() }),
   handler: (c) => ai.upsertPrice(c.body, c.actor) });
 
 // ---------------------------------------------------------------- provider integrations

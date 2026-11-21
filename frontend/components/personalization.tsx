@@ -32,6 +32,15 @@ export function ScoreBox({ score, explanation }: { score: number | null; explana
       <div className="mb-1 font-semibold">Personalization score {score}/100</div>
       <ul>{(explanation?.factors ?? []).map((f: any) => <li key={f.factor}>{f.points}/{f.max} · {f.factor} — {f.note}</li>)}</ul>
       {explanation?.basis && <p className="mt-1">Observation used: <i>{explanation.basis}</i></p>}
+      {explanation?.opportunityAnalysis && <div className="mt-2 border-t border-slate-200 pt-2">
+        <p><b>Opportunity analysis (heuristic)</b> · {explanation.opportunityAnalysis.qualification?.replaceAll('_', ' ').toLowerCase()} · {Math.round((explanation.opportunityAnalysis.confidence ?? 0) * 100)}% confidence</p>
+        {explanation.opportunityAnalysis.businessModel?.statement && <p>Business model ({explanation.opportunityAnalysis.businessModel.basis.toLowerCase()}): {explanation.opportunityAnalysis.businessModel.statement}</p>}
+        {explanation.opportunityAnalysis.opportunity && <p>Potential opportunity: {explanation.opportunityAnalysis.opportunity}</p>}
+        {explanation.opportunityAnalysis.serviceFit && <p>Service fit: {explanation.opportunityAnalysis.serviceFit}</p>}
+        {explanation.opportunityAnalysis.recommendedApproach && <p>Suggested approach: {explanation.opportunityAnalysis.recommendedApproach}</p>}
+        {!!explanation.opportunityAnalysis.unknowns?.length && <p>Unknown: {explanation.opportunityAnalysis.unknowns.join('; ')}</p>}
+        {!!explanation.opportunityAnalysis.missingInformation?.length && <p>Missing information: {explanation.opportunityAnalysis.missingInformation.join('; ')}</p>}
+      </div>}
       <p className="mt-1 text-slate-500">{explanation?.disclaimer}</p>
     </div>
   );
@@ -241,11 +250,13 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
           {row.subject !== null && <Field label="Subject"><Input value={edit.subject ?? ''} onChange={(e) => setEdit({ ...edit, subject: e.target.value })} /></Field>}
           <Field label="Opening line"><Input value={edit.openingLine ?? ''} onChange={(e) => setEdit({ ...edit, openingLine: e.target.value })} /></Field>
           <Field label="Body"><Textarea rows={10} value={edit.body} onChange={(e) => setEdit({ ...edit, body: e.target.value })} /></Field>
+          <Field label="Feedback scope" hint="Only global feedback can create a reviewable learning suggestion."><Select value={edit.feedbackScope ?? 'CAMPAIGN'} onChange={(e) => setEdit({ ...edit, feedbackScope: e.target.value })} options={o(['CAMPAIGN', 'PROSPECT', 'FACTUAL', 'GLOBAL'])} /></Field>
+          <Field label="Why did you change it? (optional)"><Input value={edit.feedbackNote ?? ''} onChange={(e) => setEdit({ ...edit, feedbackNote: e.target.value })} maxLength={1000} /></Field>
           <div className="flex gap-2"><Button loading={save.isPending} onClick={() => save.mutate()}>Save edit (re-checks; preserved from regeneration)</Button><Button variant="ghost" onClick={() => setEdit(null)}>Cancel</Button></div>
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-end gap-2">
-        {row?.body && !edit && <Button variant="secondary" onClick={() => setEdit({ subject: row.subject, openingLine: row.openingLine, body: row.body })}>Edit</Button>}
+        {row?.body && !edit && <Button variant="secondary" onClick={() => setEdit({ subject: row.subject, openingLine: row.openingLine, body: row.body, feedbackScope: 'CAMPAIGN', feedbackNote: '' })}>Edit</Button>}
         {row && ['GENERATED', 'BLOCKED'].includes(row.status) && <Button disabled={!row.qualityPassed} loading={approve.isPending} onClick={() => approve.mutate()} title={row.qualityPassed ? '' : 'Fix failing checks first'}>Approve</Button>}
         {row && ['GENERATED', 'BLOCKED', 'APPROVED'].includes(row.status) && <Button variant="ghost" onClick={() => reject.mutate()}>Reject</Button>}
         <Input className="w-72" placeholder="Optional note for regeneration" value={note} onChange={(e) => setNote(e.target.value)} />

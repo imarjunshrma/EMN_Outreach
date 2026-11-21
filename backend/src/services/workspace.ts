@@ -23,6 +23,11 @@ export const WorkspaceSettingsSchema = z.object({
   trackingBaseUrl: z.string().url().nullable().default(null),
   aiMonthlyBudgetUsd: z.number().min(0).max(100000).nullable().default(null),
   aiMaxCostPerLeadUsd: z.number().min(0).max(100).nullable().default(null),
+  /** Optional cap for actual campaign sends across every mailbox in this workspace. */
+  dailyEmailSendLimit: z.number().int().min(1).max(100000).nullable().default(null),
+  /** Auto-pause a mailbox after enough recent hard bounces; null disables this guard. */
+  mailboxAutoPauseBounceRatePct: z.number().min(0.5).max(50).nullable().default(5),
+  mailboxAutoPauseMinSends: z.number().int().min(5).max(10000).default(20),
   requireMfa: z.boolean().default(false),
   replyMode: z.enum(['suggest', 'draft', 'auto_narrow']).default('draft'),
   autoReplyCategories: z.array(z.string()).default([]),

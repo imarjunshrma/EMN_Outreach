@@ -37,6 +37,15 @@ route({ method: 'post', path: '/orgs/:organizationId/workspaces/:workspaceId/arc
 route({ method: 'get', path: '/orgs/:organizationId/onboarding', tag: 'Organizations', summary: 'Setup checklist computed from real configuration', auth: 'org', handler: (c) => tenancy.onboardingStatus(c.organizationId) });
 route({ method: 'post', path: '/orgs/:organizationId/onboarding/:step/skip', tag: 'Organizations', summary: 'Skip (or un-skip) an optional setup step', auth: 'org', orgPermission: 'manage', status: 200,
   body: z.object({ skip: z.boolean().default(true) }), handler: (c) => tenancy.skipOnboardingStep(c.organizationId, c.params.step as (typeof ONBOARDING_STEPS)[number]['id'], c.body.skip) });
+route({ method: 'get', path: '/orgs/:organizationId/support-access', tag: 'Organizations', summary: 'When EMN support accessed this organization, why, and how many pages they viewed', auth: 'org', orgPermission: 'manage', allowWhenInactive: true,
+  handler: (c) => platform.supportAccessForOrg(c.organizationId) });
+route({ method: 'get', path: '/w/:workspaceId/access', tag: 'Workspaces', summary: 'How the caller is accessing this workspace (member, organization admin, or audited support access) and the tenant status', auth: 'workspace', allowWhenInactive: true,
+  handler: async (c) => {
+    const m = await c.res.locals.resolveMembership(c.workspaceId);
+    const grant = m?.supportGrantId ? await db().supportAccessGrant.findUnique({ where: { id: m.supportGrantId }, select: { expiresAt: true, reason: true } }) : null;
+    const ws = await db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId }, select: { name: true, organization: { select: { name: true } } } });
+    return { role: c.role, via: m?.via ?? 'member', workspaceName: ws.name, organizationId: c.organizationId, organizationName: ws.organization.name, orgStatus: m?.orgStatus, support: grant };
+  } });
 route({ method: 'get', path: '/orgs/:organizationId/usage', tag: 'Organizations', summary: 'Usage this period and the last 6 months', auth: 'org', allowWhenInactive: true,
   handler: async (c) => ({ current: await currentUsage(c.organizationId), history: await usageHistory(c.organizationId, 6) }) });
 
@@ -68,7 +77,11 @@ route({ method: 'delete', path: '/orgs/:organizationId/deletion', tag: 'Organiza
   handler: async (c) => { await tenancy.cancelDeletion(c.organizationId, c.actor); return { ok: true }; } });
 
 // ---------------------------------------------------------------- platform administration (EMN staff; invisible to tenants)
-route({ method: 'get', path: '/platform/me', tag: 'Platform', summary: 'My platform role and permissions', auth: 'platform', handler: async (c) => ({ role: c.platformRole, permissions: (await import('../../../shared/src/tenancy.js')).PLATFORM_PERMISSIONS[c.platformRole!] }) });
+route({ method: 'get', path: '/platform/me', tag: 'Platform', summary: 'My platform role, permissions and whether 2FA is on (required for every other platform route)', auth: 'platform', allowWithoutMfa: true,
+  handler: async (c) => ({ role: c.platformRole, mfaEnabled: !!c.res.locals.mfaEnabled, permissions: (await import('../../../shared/src/tenancy.js')).PLATFORM_PERMISSIONS[c.platformRole!] }) });
+route({ method: 'get', path: '/platform/users', tag: 'Platform', summary: 'Find user accounts by email or name', auth: 'platform', platformPermission: 'tenants:read', query: platform.UserQuery, handler: (c) => platform.searchUsers(c.query) });
+route({ method: 'post', path: '/platform/users/:id/status', tag: 'Platform', summary: 'Disable (signs out everywhere) or re-enable a user account; reason required', auth: 'platform', platformPermission: 'tenants:lifecycle', status: 200,
+  body: platform.UserStatusSchema, handler: (c) => platform.setUserStatus(c.params.id, c.body, { ...admin(c), role: c.platformRole! }) });
 route({ method: 'get', path: '/platform/metrics', tag: 'Platform', summary: 'SaaS metrics: tenants by status, MRR/ARR, churn, plan and usage distribution, operations', auth: 'platform', platformPermission: 'metrics:read', handler: () => platform.saasMetrics() });
 route({ method: 'get', path: '/platform/tenants', tag: 'Platform', summary: 'Search and filter tenants', auth: 'platform', platformPermission: 'tenants:read', query: platform.TenantQuery, handler: (c) => platform.listTenants(c.query) });
 route({ method: 'get', path: '/platform/tenants/:id', tag: 'Platform', summary: 'Tenant detail: subscription, usage, workspaces, users, integration status (no secrets), audit', auth: 'platform', platformPermission: 'tenants:read',
@@ -77,6 +90,14 @@ route({ method: 'post', path: '/platform/tenants/:id/lifecycle', tag: 'Platform'
   body: platform.LifecycleSchema, handler: (c) => platform.tenantLifecycle(c.params.id, c.body, admin(c)) });
 route({ method: 'post', path: '/platform/tenants/:id/subscription', tag: 'Platform', summary: 'Override plan, status, trial, grace or entitlements (reason required)', auth: 'platform', platformPermission: 'tenants:lifecycle', status: 200,
   body: platform.SubscriptionOverrideSchema, handler: (c) => platform.overrideSubscription(c.params.id, c.body, admin(c)) });
+route({ method: 'post', path: '/platform/tenants/:id/refunds', tag: 'Platform', summary: 'Refund all or part of a paid invoice (optionally cancelling the subscription); idempotent on requestKey', auth: 'platform', platformPermission: 'billing:refund', status: 200, rateLimit: { limit: 20, windowSec: 3600, key: 'user' },
+  body: billing.RefundSchema, handler: (c) => billing.requestRefund(c.params.id, c.body, admin(c)) });
+route({ method: 'get', path: '/platform/tenants/:id/billing', tag: 'Platform', summary: 'Invoices, refunds and disputes of a tenant (no payment secrets)', auth: 'platform', platformPermission: 'billing:read',
+  handler: async (c) => ({
+    invoices: await db().invoice.findMany({ where: { organizationId: c.params.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
+    refunds: await db().refund.findMany({ where: { organizationId: c.params.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
+    disputes: await db().billingDispute.findMany({ where: { organizationId: c.params.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
+  }) });
 route({ method: 'get', path: '/platform/plans', tag: 'Platform', summary: 'All plans including archived, with subscriber counts', auth: 'platform', platformPermission: 'tenants:read', handler: () => platform.adminPlans() });
 route({ method: 'post', path: '/platform/plans', tag: 'Platform', summary: 'Create a plan', auth: 'platform', platformPermission: 'plans:write', body: platform.PlanSchema, handler: (c) => platform.savePlan(null, c.body, admin(c)) });
 route({ method: 'put', path: '/platform/plans/:id', tag: 'Platform', summary: 'Update a plan (prices, limits, features, provider price ids)', auth: 'platform', platformPermission: 'plans:write', body: platform.PlanSchema, handler: (c) => platform.savePlan(c.params.id, c.body, admin(c)) });

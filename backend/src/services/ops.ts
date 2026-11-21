@@ -162,7 +162,7 @@ export async function processPrivacyRequest(workspaceId: string, requestId: stri
   const suppressions = await db().suppressionEntry.findMany({ where: { workspaceId, value: email } });
   if (r.type === 'EXPORT') {
     const data = Buffer.from(JSON.stringify({ subject: email, exportedAt: new Date().toISOString(), lead, messages, suppressions }, null, 2));
-    const key = await store().put(workspaceId, 'privacy', data, 'json');
+    const key = await (await import('./storage-accounting.js')).putTracked(workspaceId, 'privacy', data, 'json', { enforce: false }); // legal requests are never refused
     await db().privacyRequest.update({ where: { id: r.id }, data: { status: 'COMPLETED', completedAt: new Date(), resultStorageKey: key } });
   } else {
     await db().$transaction(async (tx) => {
@@ -207,7 +207,7 @@ export async function runRetention(now = new Date()) {
     const r = readSettings(ws.settings).retentionDays;
     result.aiOutputs += (await db().aiExecution.updateMany({ where: { workspaceId: ws.id, createdAt: { lt: new Date(now.getTime() - r.aiOutputs * 86400_000) }, NOT: { output: { equals: Prisma.DbNull } } }, data: { output: Prisma.DbNull, inputPreview: null } })).count;
     const oldImports = await db().importJob.findMany({ where: { workspaceId: ws.id, createdAt: { lt: new Date(now.getTime() - r.importFiles * 86400_000) }, storageKey: { not: '' } } });
-    for (const j of oldImports) { await store().delete(j.storageKey).catch(() => undefined); await db().importJob.update({ where: { id: j.id }, data: { storageKey: '' } }); result.importFiles++; }
+    for (const j of oldImports) { await (await import('./storage-accounting.js')).deleteTracked(j.storageKey); await db().importJob.update({ where: { id: j.id }, data: { storageKey: '' } }); result.importFiles++; }
     result.domainChecks += (await db().domainHealthCheck.deleteMany({ where: { workspaceId: ws.id, checkedAt: { lt: new Date(now.getTime() - r.domainChecks * 86400_000) } } })).count;
     const auditCutoff = new Date(now.getTime() - r.auditLogs * 86400_000);
     result.auditLogs += await db().$transaction(async (tx) => {

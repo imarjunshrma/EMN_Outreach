@@ -7,6 +7,7 @@ import { AppError, NotFound } from '../core/errors.js';
 import { audit } from '../core/audit.js';
 import * as studio from '../services/ai-studio.js';
 import * as pz from '../services/personalization.js';
+import * as brain from '../services/outreach-brain.js';
 import * as engine from '../services/engine.js';
 import { KnowledgeSchema, WritingSchema, ResearchSchema } from '../../../shared/src/ai-studio.js';
 import { PROMPT_VARIABLES, lintPromptTemplate, EXAMPLE_PROFILE_PROMPT } from '../../../shared/src/prompt-builder.js';
@@ -24,15 +25,44 @@ const KindParam = z.enum(['knowledge', 'writing', 'research']);
 const kindOf = (k: string) => KindParam.parse(k).toUpperCase() as 'KNOWLEDGE' | 'WRITING' | 'RESEARCH';
 const SaveBody = z.object({ data: z.unknown(), changeNote: z.string().max(500).optional() });
 
+// ---------------------------------------------------------------- AI Outreach Brain (workspace-specific rules, examples and explicit feedback)
+route({ method: 'get', path: '/w/:workspaceId/ai-outreach-brain/overview', tag: 'AI Outreach Brain', summary: 'Training status, rules, examples, draft decisions and pending learning suggestions', auth: 'workspace', role: 'VIEWER', handler: async (c) => {
+  const [rules, examples, suggestions, generated, approved, rejected, latency] = await Promise.all([
+    db().outreachRule.count({ where: { workspaceId: c.workspaceId, status: 'ACTIVE' } }),
+    db().outreachExample.count({ where: { workspaceId: c.workspaceId, isActive: true } }),
+    db().aiLearningSuggestion.count({ where: { workspaceId: c.workspaceId, status: 'PENDING' } }),
+    db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: { in: ['GENERATED', 'BLOCKED', 'NEEDS_RESEARCH'] } } }),
+    db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: 'APPROVED' } }),
+    db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: 'REJECTED' } }),
+    db().aiExecution.aggregate({ where: { workspaceId: c.workspaceId, task: 'PERSONALIZATION', status: 'SUCCEEDED' }, _avg: { latencyMs: true } }),
+  ]);
+  return { activeRules: rules, activeExamples: examples, pendingSuggestions: suggestions, generatedDrafts: generated, approvedDrafts: approved, rejectedDrafts: rejected, averageGenerationLatencyMs: latency._avg.latencyMs };
+} });
+route({ method: 'get', path: '/w/:workspaceId/ai-outreach-brain/rules', tag: 'AI Outreach Brain', summary: 'List workspace rules with conflict warnings', auth: 'workspace', role: 'VIEWER', handler: (c) => brain.listRules(c.workspaceId) });
+route({ method: 'post', path: '/w/:workspaceId/ai-outreach-brain/rules', tag: 'AI Outreach Brain', summary: 'Create an outreach rule', auth: 'workspace', role: 'ADMIN', body: brain.RuleInputSchema, handler: (c) => brain.createRule(c.workspaceId, c.body, c.actor) });
+route({ method: 'patch', path: '/w/:workspaceId/ai-outreach-brain/rules/:id', tag: 'AI Outreach Brain', summary: 'Update an outreach rule', auth: 'workspace', role: 'ADMIN', body: brain.RuleInputSchema, handler: (c) => brain.updateRule(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'delete', path: '/w/:workspaceId/ai-outreach-brain/rules/:id', tag: 'AI Outreach Brain', summary: 'Delete an outreach rule', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await brain.deleteRule(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
+route({ method: 'get', path: '/w/:workspaceId/ai-outreach-brain/examples', tag: 'AI Outreach Brain', summary: 'List workspace examples', auth: 'workspace', role: 'VIEWER', handler: (c) => brain.listExamples(c.workspaceId) });
+route({ method: 'post', path: '/w/:workspaceId/ai-outreach-brain/examples', tag: 'AI Outreach Brain', summary: 'Add a positive or negative text example', auth: 'workspace', role: 'ADMIN', body: brain.ExampleInputSchema, handler: (c) => brain.createExample(c.workspaceId, c.body, c.actor) });
+route({ method: 'patch', path: '/w/:workspaceId/ai-outreach-brain/examples/:id', tag: 'AI Outreach Brain', summary: 'Update a workspace example', auth: 'workspace', role: 'ADMIN', body: brain.ExampleInputSchema, handler: (c) => brain.updateExample(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'delete', path: '/w/:workspaceId/ai-outreach-brain/examples/:id', tag: 'AI Outreach Brain', summary: 'Delete a workspace example', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await brain.deleteExample(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
+route({ method: 'get', path: '/w/:workspaceId/ai-outreach-brain/suggestions', tag: 'AI Outreach Brain', summary: 'Learning suggestions from repeated customer edits', auth: 'workspace', role: 'VIEWER', handler: (c) => brain.listSuggestions(c.workspaceId) });
+route({ method: 'post', path: '/w/:workspaceId/ai-outreach-brain/suggestions/:id/decision', tag: 'AI Outreach Brain', summary: 'Accept or reject a learning suggestion', auth: 'workspace', role: 'ADMIN', body: z.object({ decision: z.enum(['ACCEPT', 'REJECT']) }), handler: (c) => brain.decideSuggestion(c.workspaceId, c.params.id, c.body.decision, c.actor) });
+
 // ---------------------------------------------------------------- workspace AI configuration
 route({ method: 'get', path: '/w/:workspaceId/ai-studio/overview', tag: 'AI Studio', summary: 'Active configuration versions, documents, profiles and AI spend this month', auth: 'workspace', role: 'VIEWER',
   handler: async (c) => {
-    const [k, w, r, docs, profiles] = await Promise.all([studio.getConfig(c.workspaceId, 'KNOWLEDGE'), studio.getConfig(c.workspaceId, 'WRITING'), studio.getConfig(c.workspaceId, 'RESEARCH'), studio.listDocuments(c.workspaceId), studio.listProfiles(c.workspaceId)]);
+    const [k, w, r, docs, profiles, activeRules, activeExamples, pendingSuggestions, approvedDrafts, rejectedDrafts, generatedDrafts] = await Promise.all([
+      studio.getConfig(c.workspaceId, 'KNOWLEDGE'), studio.getConfig(c.workspaceId, 'WRITING'), studio.getConfig(c.workspaceId, 'RESEARCH'), studio.listDocuments(c.workspaceId), studio.listProfiles(c.workspaceId),
+      db().outreachRule.count({ where: { workspaceId: c.workspaceId, status: 'ACTIVE' } }), db().outreachExample.count({ where: { workspaceId: c.workspaceId, isActive: true } }),
+      db().aiLearningSuggestion.count({ where: { workspaceId: c.workspaceId, status: 'PENDING' } }), db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: 'APPROVED' } }),
+      db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: 'REJECTED' } }), db().leadPersonalization.count({ where: { workspaceId: c.workspaceId, status: { in: ['GENERATED', 'BLOCKED', 'NEEDS_RESEARCH'] } } }),
+    ]);
     const start = new Date(); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
     const spend = await db().aiExecution.aggregate({ where: { workspaceId: c.workspaceId, createdAt: { gte: start } }, _sum: { costUsd: true } });
     const ws = await db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId } });
     const settings = (ws.settings ?? {}) as Record<string, unknown>;
-    return { knowledgeVersion: k.version, writingVersion: w.version, researchVersion: r.version, documents: docs.length, activeDocuments: docs.filter((d) => d.isActive).length, profiles: profiles.length, monthSpendUsd: Number(spend._sum.costUsd ?? 0), aiMonthlyBudgetUsd: settings.aiMonthlyBudgetUsd ?? null, aiMaxCostPerLeadUsd: settings.aiMaxCostPerLeadUsd ?? null, companyName: k.data.companyName };
+    return { knowledgeVersion: k.version, writingVersion: w.version, researchVersion: r.version, documents: docs.length, activeDocuments: docs.filter((d) => d.isActive).length, profiles: profiles.length, activeRules, activeExamples, pendingSuggestions, approvedDrafts, rejectedDrafts, generatedDrafts, monthSpendUsd: Number(spend._sum.costUsd ?? 0), aiMonthlyBudgetUsd: settings.aiMonthlyBudgetUsd ?? null, aiMaxCostPerLeadUsd: settings.aiMaxCostPerLeadUsd ?? null, companyName: k.data.companyName };
   } });
 route({ method: 'get', path: '/w/:workspaceId/ai-studio/config/:kind', tag: 'AI Studio', summary: 'Active business knowledge / writing / research configuration', auth: 'workspace', role: 'VIEWER', handler: (c) => studio.getConfig(c.workspaceId, kindOf(c.params.kind) as 'KNOWLEDGE') });
 route({ method: 'put', path: '/w/:workspaceId/ai-studio/config/:kind', tag: 'AI Studio', summary: 'Save a new version (validated; becomes active)', auth: 'workspace', role: 'ADMIN', status: 200, body: SaveBody,

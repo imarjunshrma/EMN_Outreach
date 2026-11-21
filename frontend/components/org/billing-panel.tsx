@@ -33,7 +33,7 @@ export function BillingPanel({ orgId, checkoutReturned }: { orgId: string; check
     ['Members', b.usage.users, b.entitlements.maxUsers], ['Workspaces', b.usage.workspaces, b.entitlements.maxWorkspaces], ['Mailboxes', b.usage.mailboxes, b.entitlements.maxMailboxes],
     ['Running campaigns', b.usage.runningCampaigns, b.entitlements.maxActiveCampaigns], ['Leads', b.usage.leads, b.entitlements.maxLeads],
     ['Emails sent this month', b.usage.email_sends ?? 0, b.entitlements.monthlyEmailSends], ['AI spend this month (USD)', (b.usage.aiUsdThisMonth ?? 0).toFixed(2), b.entitlements.monthlyAiUsd],
-    ['Verifications this month', b.usage.enrichments ?? 0, b.entitlements.monthlyEnrichments], ['API calls this month', b.usage.api_calls ?? 0, b.entitlements.monthlyApiCalls], ['Workflow runs this month', b.usage.workflow_runs ?? 0, b.entitlements.monthlyWorkflowRuns],
+    ['Verifications this month', b.usage.enrichments ?? 0, b.entitlements.monthlyEnrichments], ['Storage (MB)', b.usage.storageMb ?? 0, b.entitlements.storageMb], ['API calls this month', b.usage.api_calls ?? 0, b.entitlements.monthlyApiCalls], ['Workflow runs this month', b.usage.workflow_runs ?? 0, b.entitlements.monthlyWorkflowRuns],
   ];
   return (
     <div className="grid gap-4 lg:grid-cols-3" data-testid="billing-panel">

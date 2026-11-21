@@ -4,7 +4,7 @@ section: Getting started
 order: 2
 description: From sign-up to your first approved email in about thirty minutes.
 ---
-This guide takes you from a new account to a small, approved campaign. You need a mailbox you own (Google Workspace, Microsoft 365 or any SMTP/IMAP account), an API key from OpenAI or Anthropic, and a short list of prospects.
+This guide takes you from a new account to a small, approved campaign. You need a mailbox you own (Google Workspace, Microsoft 365 or any SMTP/IMAP account), access to a supported hosted or local text model, and a short list of prospects.
 
 :::steps
 ### Create your account
@@ -16,7 +16,7 @@ We send a confirmation link to your email. Confirm it before inviting teammates 
 After sign-up you land on **Set up your organization**. Each item shows its real state, read from your configuration. Two items are required: **Organization details** (your postal address, which appears in every email footer by law in most countries) and **Business profile** (what you sell and to whom). The rest can be skipped and done later.
 
 ### Add an AI provider
-Open **Settings → AI providers**, choose OpenAI or Anthropic, and paste your API key. Keys are encrypted at rest and never shown again. Set a monthly budget under **AI Studio → Models & budgets** so spending can never surprise you.
+Open **Settings → AI providers**, choose a provider, enter its model ID and credentials, then test the connection. Keys are encrypted at rest and never shown again. OpenAI-compatible endpoints include OpenRouter, Groq, Together AI, DeepSeek, Mistral and Ollama, as well as custom compatible servers. Set a monthly budget under **AI Studio → Models & budgets**.
 
 ### Connect a mailbox
 Open **Deliverability → Mailboxes → Add mailbox**. Google and Microsoft use a secure sign-in window; for other providers enter SMTP and IMAP details. Set a daily limit — start at 20–30 emails a day for a mailbox that has not sent cold email before.

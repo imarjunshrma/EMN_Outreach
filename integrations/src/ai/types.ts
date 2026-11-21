@@ -1,4 +1,5 @@
-export type AiProviderName = 'OPENAI' | 'ANTHROPIC';
+export const AI_PROVIDER_NAMES = ['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENROUTER', 'GROQ', 'TOGETHER', 'DEEPSEEK', 'MISTRAL', 'OLLAMA', 'CUSTOM_OPENAI'] as const;
+export type AiProviderName = typeof AI_PROVIDER_NAMES[number];
 
 export interface AiUsage {
   inputTokens: number;
@@ -24,6 +25,7 @@ export interface StructuredResponse {
 
 export interface AiProviderAdapter {
   readonly name: AiProviderName;
-  generateStructured(apiKey: string, req: StructuredRequest): Promise<StructuredResponse>;
-  testConnection(apiKey: string, model: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  listModels?(apiKey: string, options?: { baseUrl?: string | null }): Promise<string[]>;
+  generateStructured(apiKey: string, req: StructuredRequest, options?: { baseUrl?: string | null }): Promise<StructuredResponse>;
+  testConnection(apiKey: string, model: string, options?: { baseUrl?: string | null }): Promise<{ ok: true } | { ok: false; error: string }>;
 }

@@ -86,6 +86,7 @@ export async function enableMfa(userId: string, code: string, actor: Actor) {
 export async function disableMfa(userId: string, password: string, code: string, actor: Actor) {
   const u = await db().user.findUniqueOrThrow({ where: { id: userId } });
   if (!u.mfaEnabled) return { enabled: false };
+  if (u.platformRole) throw new AppError('FORBIDDEN', 'Platform staff accounts must keep two-factor authentication on. Ask a super admin to remove your platform role first.', 403);
   if (!(await argon2.verify(u.passwordHash, password))) throw BadRequest('INVALID_PASSWORD', 'Password is incorrect');
   if (!(await checkSecondFactor(u, code))) throw BadRequest('INVALID_CODE', 'Invalid authentication or recovery code');
   await db().user.update({ where: { id: userId }, data: { mfaEnabled: false, mfaSecretEnc: null, mfaRecoveryHashes: [], mfaEnabledAt: null } });

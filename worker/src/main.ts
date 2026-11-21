@@ -44,6 +44,8 @@ async function schedules() {
   await queue(QUEUES.maintenance).upsertJobScheduler('retention-nightly', { pattern: '43 2 * * *' }, { name: 'maintenance.retention', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('reports-daily', { pattern: '29 7 * * *' }, { name: 'reports.daily', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('tenant-sync', { every: 15 * 60_000 }, { name: 'tenant.sync', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('storage-reconcile', { pattern: '37 0 * * *' }, { name: 'storage.reconcile', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('billing-reconcile', { pattern: '53 */6 * * *' }, { name: 'billing.reconcile', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('tenant-purge', { pattern: '23 1 * * *' }, { name: 'tenant.purge', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('task-reminders', { every: 300_000 }, { name: 'maintenance.taskReminders', data: {} });
 }

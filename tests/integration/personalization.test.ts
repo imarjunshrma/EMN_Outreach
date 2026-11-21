@@ -174,7 +174,7 @@ describe('AI personalization engine', () => {
     const r = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     expect(r.status).toBe('BLOCKED');
     await expect(pz.approvePersonalizations(s.workspaceId, [r.id!], ACTOR)).rejects.toMatchObject({ code: 'QUALITY_CHECK_FAILED' });
-    const edited = await pz.editPersonalization(s.workspaceId, r.id!, { body: 'Hi there,\n\nSaw that Studio A launched a weekly podcast on hiring designers. We help teams turn that kind of content into qualified enquiries. Open to a quick idea?', rerunFactCheck: true }, ACTOR);
+    const edited = await pz.editPersonalization(s.workspaceId, r.id!, { body: 'Hi there,\n\nSaw that Studio A launched a weekly podcast on hiring designers. We help teams turn that kind of content into qualified enquiries. Open to a quick idea?', rerunFactCheck: true, feedbackScope: 'CAMPAIGN' }, ACTOR);
     expect(edited.status).toBe('GENERATED');
     expect((await pz.approvePersonalizations(s.workspaceId, [r.id!], ACTOR)).approved).toBe(1);
   });
@@ -206,7 +206,7 @@ describe('AI personalization engine', () => {
     const { campaignId, steps, leads } = await setup(s);
     const r = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     const mine = 'Hi Asha,\n\nSaw that Studio A launched a weekly podcast on hiring designers — clever way to reach candidates. We turn shows like that into steady enquiries. Want the two-line outline?';
-    await pz.editPersonalization(s.workspaceId, r.id!, { body: mine, rerunFactCheck: true }, ACTOR);
+    await pz.editPersonalization(s.workspaceId, r.id!, { body: mine, rerunFactCheck: true, feedbackScope: 'CAMPAIGN' }, ACTOR);
     const callsBefore = personalizationCalls().length;
     // Non-forced generation and bulk planning both skip the edited row
     expect((await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id)).preserved).toMatch(/manually edited/);

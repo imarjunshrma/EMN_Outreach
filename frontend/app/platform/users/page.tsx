@@ -1,0 +1,46 @@
+'use client';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Search } from 'lucide-react';
+import { api, describeError, qs } from '@/lib/api';
+import { fmtDate } from '@/lib/format';
+import { Badge, Button, Field, Input, Loading, Modal, PageHeader, Table, Textarea } from '@/components/ui';
+import { useToast } from '@/components/toast';
+import { usePlatform } from '@/components/platform/shell';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export default function Users() {
+  const me = usePlatform(); const toast = useToast(); const qc = useQueryClient();
+  const [term, setTerm] = useState('');
+  const q = useQuery({ queryKey: ['platform-users', term], queryFn: () => api<{ data: any[] }>(`/platform/users${qs({ q: term })}`), enabled: term.trim().length >= 2 });
+  const [target, setTarget] = useState<any | null>(null); const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false);
+  const canChange = me.permissions.includes('tenants:lifecycle');
+  async function apply() {
+    setBusy(true);
+    try { await api(`/platform/users/${target.id}/status`, { body: { status: target.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE', reason } }); toast.success(target.status === 'ACTIVE' ? 'Account disabled and signed out everywhere' : 'Account enabled'); setTarget(null); setReason(''); void qc.invalidateQueries({ queryKey: ['platform-users'] }); }
+    catch (e) { toast.error(describeError(e)); } finally { setBusy(false); }
+  }
+  return (
+    <>
+      <PageHeader title="User accounts" subtitle="Find a person across all organizations. Disabling an account signs it out everywhere and blocks sign-in; their organizations and data are untouched." />
+      <div className="mb-4 max-w-md"><Input icon={Search} placeholder="Email or name (at least 2 characters)" value={term} onChange={(e) => setTerm(e.target.value)} aria-label="Search users" /></div>
+      {term.trim().length < 2 ? <p className="text-sm text-slate-500">Type to search.</p> : q.isLoading ? <Loading /> : (
+        <Table head={['Person', 'Organizations', 'Security', 'Last sign-in', 'Status', '']}>
+          {(q.data?.data ?? []).map((u) => (
+            <tr key={u.id}>
+              <td className="td"><b>{u.name}</b><p className="text-xs text-slate-500">{u.email}{u.platformRole ? ` · staff: ${u.platformRole.toLowerCase()}` : ''}</p></td>
+              <td className="td text-xs">{u.orgMemberships.map((m: any) => `${m.organization.name} (${m.role.toLowerCase()})`).join(', ') || '—'}</td>
+              <td className="td text-xs">{u.mfaEnabled ? <Badge color="green">2FA</Badge> : <Badge>no 2FA</Badge>} {!u.emailVerifiedAt && <Badge color="yellow">unverified</Badge>}</td>
+              <td className="td text-xs">{u.lastLoginAt ? fmtDate(u.lastLoginAt) : 'never'}</td>
+              <td className="td">{u.status === 'ACTIVE' ? <Badge color="green">active</Badge> : <Badge color="red">disabled</Badge>}</td>
+              <td className="td text-right">{canChange && <Button size="sm" variant={u.status === 'ACTIVE' ? 'danger' : 'secondary'} onClick={() => setTarget(u)}>{u.status === 'ACTIVE' ? 'Disable' : 'Enable'}</Button>}</td>
+            </tr>
+          ))}
+        </Table>
+      )}
+      <Modal open={!!target} title={`${target?.status === 'ACTIVE' ? 'Disable' : 'Enable'} ${target?.email ?? ''}`} onClose={() => setTarget(null)} footer={<><Button variant="ghost" onClick={() => setTarget(null)}>Back</Button><Button variant={target?.status === 'ACTIVE' ? 'danger' : 'primary'} loading={busy} disabled={reason.trim().length < 5} onClick={apply}>{target?.status === 'ACTIVE' ? 'Disable account' : 'Enable account'}</Button></>}>
+        <Field label="Reason" hint="Required; recorded in the platform audit trail."><Textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      </Modal>
+    </>
+  );
+}

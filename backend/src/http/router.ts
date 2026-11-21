@@ -45,6 +45,8 @@ export interface RouteDef<B = unknown, Q = unknown> {
   platformPermission?: PlatformPermission;
   /** Allowed while the tenant is suspended/cancelled (read-only states): billing, export, account management. */
   allowWhenInactive?: boolean;
+  /** Platform routes only: reachable by staff who have not turned on 2FA yet (so the console can tell them to). */
+  allowWithoutMfa?: boolean;
   body?: ZodType<B>;
   query?: ZodType<Q>;
   rateLimit?: { limit: number; windowSec: number; key?: 'ip' | 'user' | 'workspace' };
@@ -103,6 +105,11 @@ export function mountRoutes(app: Express) {
         if (def.auth !== 'public') {
           if (!auth?.userId && !auth?.apiKeyWorkspaceId) throw Unauthorized();
         }
+        // API keys represent a workspace principal, even though authentication
+        // stores their creator's user id for audit attribution. Never let that
+        // attribution grant access to account, workspace-creation, or platform
+        // administrator endpoints that require a user session.
+        if (def.auth === 'user' && auth?.apiKeyWorkspaceId) throw Forbidden('API keys cannot access user-level endpoints');
         if (def.auth === 'workspace') {
           const wsId = String(req.params.workspaceId ?? '');
           const membership = res.locals.resolveMembership ? await res.locals.resolveMembership(wsId) : null;
@@ -143,6 +150,9 @@ export function mountRoutes(app: Express) {
           if (!auth?.userId || auth.apiKeyWorkspaceId) throw Unauthorized();
           const pr = res.locals.platformRole as PlatformRole | null;
           if (!pr || (def.platformPermission && !PLATFORM_PERMISSIONS[pr].includes(def.platformPermission))) throw new AppError('NOT_FOUND', 'Not found', 404); // platform area is invisible to tenants
+          // Privileged staff must use two-factor sign-in. Disable only for local development (never in production).
+          const mfaOptional = process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production';
+          if (!res.locals.mfaEnabled && !def.allowWithoutMfa && !mfaOptional) throw new AppError('MFA_REQUIRED', 'Platform staff must turn on two-factor authentication (My account → Security) before using the platform console.', 403, { platform: true });
           ctx.platformRole = pr;
         }
 

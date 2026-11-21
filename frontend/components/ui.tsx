@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { describeError } from '@/lib/api';
 import { titleCase } from '@/lib/format';
+import ianaTimeZones from '@/lib/timezones.json';
 import { AlertTriangle, CheckCircle2, Info, Inbox as InboxIcon, Loader2, Search, X, type LucideIcon } from 'lucide-react';
 import { iconFor } from './action-icons';
 import { usePageMeta } from './shell/page-context';
@@ -53,6 +54,12 @@ export function Select({ options, ...props }: SelectHTMLAttributes<HTMLSelectEle
       {options.map((o) => (typeof o === 'string' ? <option key={o} value={o}>{titleCase(o)}</option> : <option key={o.value} value={o.value}>{o.label}</option>))}
     </select>
   );
+}
+
+export function TimezoneSelect(props: SelectHTMLAttributes<HTMLSelectElement>) {
+  const current = props.value == null ? '' : String(props.value);
+  const options = current && !ianaTimeZones.includes(current) ? [current, ...ianaTimeZones] : ianaTimeZones;
+  return <Select {...props} options={options} />;
 }
 
 export function Field({ label, hint, error, children }: { label: string; hint?: string; error?: string; children: ReactNode }) {

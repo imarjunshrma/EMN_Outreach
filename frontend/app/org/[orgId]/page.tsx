@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Building2 } from 'lucide-react';
 import { api, describeError } from '@/lib/api';
 import { fmtDate, fmtDay } from '@/lib/format';
-import { Badge, Button, Card, ConfirmButton, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Tabs } from '@/components/ui';
+import { Badge, Button, Card, ConfirmButton, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Tabs, TimezoneSelect } from '@/components/ui';
 import { useToast } from '@/components/toast';
 import { BillingPanel } from '@/components/org/billing-panel';
 
@@ -28,7 +28,7 @@ function OrgInner() {
   const role = me.data?.organizations.find((o) => o.id === orgId)?.role ?? 'MEMBER';
   const manage = role === 'OWNER' || role === 'ADMIN';
   const o = org.data;
-  const tabs = [{ id: 'profile', label: 'Profile' }, { id: 'members', label: 'Members' }, { id: 'workspaces', label: 'Workspaces' }, { id: 'billing', label: 'Billing' }, { id: 'usage', label: 'Usage' }, ...(manage ? [{ id: 'danger', label: 'Data & deletion' }] : [])];
+  const tabs = [{ id: 'profile', label: 'Profile' }, { id: 'members', label: 'Members' }, { id: 'workspaces', label: 'Workspaces' }, { id: 'billing', label: 'Billing' }, { id: 'usage', label: 'Usage' }, ...(manage ? [{ id: 'access', label: 'Support access log' }, { id: 'danger', label: 'Data & deletion' }] : [])];
   const go = (t: string) => { setTab(t); router.replace(`/org/${orgId}?tab=${t}`, { scroll: false }); };
   return (
     <div className="min-h-screen bg-paper">
@@ -45,6 +45,7 @@ function OrgInner() {
           {tab === 'workspaces' && <Workspaces orgId={orgId} canManage={manage} />}
           {tab === 'billing' && <BillingPanel orgId={orgId} checkoutReturned={params.get('checkout') === 'success'} />}
           {tab === 'usage' && <Usage orgId={orgId} />}
+          {tab === 'access' && manage && <AccessLog orgId={orgId} />}
           {tab === 'danger' && manage && <Danger org={o} isOwner={role === 'OWNER'} />}
         </div>
       </main>
@@ -68,7 +69,7 @@ function Profile({ org, canEdit }: { org: any; canEdit: boolean }) {
       <Card title="Organization">
         <fieldset disabled={!canEdit} className="space-y-0">
           <Field label="Name"><Input value={f.name} onChange={set('name')} /></Field>
-          <Field label="Time zone" hint="Default for new workspaces and reports (IANA name, e.g. Asia/Kolkata)."><Input value={f.timezone} onChange={set('timezone')} /></Field>
+          <Field label="Time zone" hint="Default for new workspaces and reports."><TimezoneSelect value={f.timezone} onChange={set('timezone')} /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Language"><Select value={f.locale} onChange={set('locale')} options={[{ value: 'en', label: 'English' }, { value: 'en-IN', label: 'English (India)' }, { value: 'en-GB', label: 'English (UK)' }, { value: 'hi', label: 'Hindi' }]} /></Field>
             <Field label="Currency"><Select value={f.currency} onChange={set('currency')} options={['USD', 'INR', 'EUR', 'GBP', 'AUD']} /></Field>
@@ -207,6 +208,22 @@ function Danger({ org, isOwner }: { org: any; isOwner: boolean }) {
         ) : <p className="text-sm text-slate-600">Only the organization owner can delete it.</p>}
       </Card>
     </div>
+  );
+}
+
+function AccessLog({ orgId }: { orgId: string }) {
+  const q = useQuery({ queryKey: ['org-support', orgId], queryFn: () => api<any[]>(`/orgs/${orgId}/support-access`) });
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <ErrorState error={q.error} />;
+  return (
+    <Card title="When EMN support looked at your data">
+      <p className="mb-3 text-sm text-slate-600">EMN staff can only open your workspaces read-only, for a limited time, with a written reason. Every page they open is recorded.</p>
+      {q.data!.length === 0 ? <p className="text-sm text-slate-500">EMN support has never accessed this organization.</p> : (
+        <Table head={['Started', 'Staff member', 'Reason', 'Pages viewed', 'Status']}>
+          {q.data!.map((g) => <tr key={g.id}><td className="td text-xs">{fmtDate(g.createdAt)}</td><td className="td">{g.staffName}</td><td className="td text-sm">{g.reason}</td><td className="td tnum">{g.pagesViewed}</td><td className="td">{g.active ? <Badge color="red">active until {new Date(g.expiresAt).toLocaleTimeString()}</Badge> : <Badge>{g.revokedAt ? 'ended early' : 'expired'}</Badge>}</td></tr>)}
+        </Table>
+      )}
+    </Card>
   );
 }
 

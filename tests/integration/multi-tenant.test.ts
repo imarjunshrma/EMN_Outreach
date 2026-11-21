@@ -39,7 +39,10 @@ async function login(email: string) {
 }
 async function staff(email: string, role: 'SUPER_ADMIN' | 'SUPPORT' | 'FINANCE') {
   const u = await db().user.create({ data: { email, name: role, passwordHash: await hashPassword(PW), platformRole: role, isPlatformAdmin: role === 'SUPER_ADMIN', emailVerifiedAt: new Date() } });
-  return { ...(await login(email)), userId: u.id };
+  const session = await login(email);
+  // Platform staff must have 2FA; mark it on after the password sign-in (the TOTP flow itself is covered elsewhere).
+  await db().user.update({ where: { id: u.id }, data: { mfaEnabled: true } });
+  return { ...session, userId: u.id };
 }
 const lead = (t: { agent: T['agent']; csrf: string }, ws: string, email: string) => t.agent.post(`/api/v1/w/${ws}/leads`).set('x-csrf-token', t.csrf).send({ email });
 
@@ -297,6 +300,35 @@ describe('lifecycle', () => {
 });
 
 describe('platform administration', () => {
+  it('platform staff without two-factor are blocked from the console and from support access', async () => {
+    const s = await staff('nomfa@emn.test', 'SUPER_ADMIN');
+    await db().user.update({ where: { id: s.userId }, data: { mfaEnabled: false } });
+    const me = await s.agent.get('/api/v1/platform/me');
+    expect(me.status).toBe(200);
+    expect(me.body.mfaEnabled).toBe(false);
+    const r = await s.agent.get('/api/v1/platform/tenants');
+    expect(r.status).toBe(403);
+    expect(r.body.error.code).toBe('MFA_REQUIRED');
+    await db().supportAccessGrant.create({ data: { organizationId: A.orgId, adminUserId: s.userId, reason: 'direct insert for test', scope: 'read', expiresAt: new Date(Date.now() + 600_000) } });
+    expect((await s.agent.get(`/api/v1/w/${A.wsId}/leads`)).status).toBe(404);
+  });
+
+  it('staff cannot turn off their own two-factor', async () => {
+    const { disableMfa } = await import('../../backend/src/services/security.js');
+    await expect(disableMfa(root.userId, 'x', '000000', { type: 'USER', userId: root.userId })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('disabling a user signs them out everywhere and blocks sign-in; re-enabling restores it', async () => {
+    expect((await B.agent.get('/api/v1/auth/me')).status).toBe(200);
+    expect((await root.agent.post(`/api/v1/platform/users/${B.userId}/status`).set('x-csrf-token', root.csrf).send({ status: 'DISABLED', reason: 'Abuse report #77' })).status).toBe(200);
+    expect((await B.agent.get('/api/v1/auth/me')).status).toBe(401);
+    expect((await request(getApp()).post('/api/v1/auth/login').send({ email: B.email, password: PW })).status).toBe(401);
+    expect((await root.agent.post(`/api/v1/platform/users/${root.userId}/status`).set('x-csrf-token', root.csrf).send({ status: 'DISABLED', reason: 'myself' })).status).toBe(409);
+    expect((await root.agent.post(`/api/v1/platform/users/${B.userId}/status`).set('x-csrf-token', root.csrf).send({ status: 'ACTIVE', reason: 'Resolved' })).status).toBe(200);
+    expect((await request(getApp()).post('/api/v1/auth/login').send({ email: B.email, password: PW })).status).toBe(200);
+    expect(await db().platformAuditEvent.count({ where: { action: 'user.disabled', targetId: B.userId } })).toBe(1);
+  });
+
   it('tenant owners cannot see the platform area; staff permissions are separated', async () => {
     for (const path of ['/api/v1/platform/tenants', '/api/v1/platform/metrics', '/api/v1/platform/plans', '/api/v1/platform/audit']) {
       expect((await A.agent.get(path)).status).toBe(404);
@@ -341,6 +373,13 @@ describe('platform administration', () => {
     expect((await sup.agent.get(`/api/v1/w/${B.wsId}/leads`)).status).toBe(404); // grant is for A only
     expect(await db().platformAuditEvent.count({ where: { action: 'support.read', organizationId: A.orgId, actorUserId: sup.userId } })).toBeGreaterThan(0);
     expect(await db().auditLog.count({ where: { workspaceId: A.wsId, action: 'support.access_granted' } })).toBeGreaterThan(0); // visible to the customer
+    const access = await sup.agent.get(`/api/v1/w/${A.wsId}/access`);
+    expect(access.body).toMatchObject({ via: 'support', role: 'VIEWER' });
+    expect(access.body.support.reason).toContain('#1881');
+    const hist = await A.agent.get(`/api/v1/orgs/${A.orgId}/support-access`);
+    expect(hist.body[0]).toMatchObject({ staffName: 'SUPPORT', active: true });
+    expect(hist.body[0].pagesViewed).toBeGreaterThan(0);
+    expect((await B.agent.get(`/api/v1/orgs/${A.orgId}/support-access`)).status).toBe(404);
     await db().supportAccessGrant.update({ where: { id: g.body.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
     expect((await sup.agent.get(`/api/v1/w/${A.wsId}/leads`)).status).toBe(404);
     // the platform audit trail is append-only

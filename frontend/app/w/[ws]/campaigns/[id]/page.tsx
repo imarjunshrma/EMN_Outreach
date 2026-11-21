@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { qs, type Paged } from '@/lib/api';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fullName } from '@/lib/format';
-import { Badge, Button, Card, Checkbox, ConfirmButton, Empty, Field, Input, Notice, PageHeader, Pagination, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Checkbox, ConfirmButton, Empty, Field, Input, Notice, PageHeader, Pagination, QueryView, Select, Table, Tabs, Textarea, TimezoneSelect } from '@/components/ui';
 import { ReviewPanel } from '@/components/review-panel';
 import { CampaignAiPanel, VersionsPanel, PreviewPanel } from '@/components/personalization';
 
@@ -126,7 +126,7 @@ function SettingsForm({ campaign }: { campaign: any }) {
     <Card title="Settings & schedule">
       <div className="grid gap-4 md:grid-cols-3">
         <Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="Fallback time zone (IANA)" hint="Used when a lead has no time zone"><Input value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} /></Field>
+        <Field label="Fallback time zone (IANA)" hint="Used when a lead has no time zone"><TimezoneSelect value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} /></Field>
         <div className="pt-6"><Checkbox label="Send in each recipient’s local time" checked={f.useLeadTimezone} onChange={(v) => setF({ ...f, useLeadTimezone: v })} /></div>
         <Field label="Sending days"><div className="flex flex-wrap gap-2">{DAYS.map((d) => <label key={d.v} className="flex items-center gap-1 text-sm"><input type="checkbox" checked={w.days.includes(d.v)} onChange={(e) => setF({ ...f, sendingWindow: { ...w, days: e.target.checked ? [...w.days, d.v].sort() : w.days.filter((x: number) => x !== d.v) } })} />{d.l}</label>)}</div></Field>
         <Field label="Window start"><Input type="time" value={w.start} onChange={(e) => setF({ ...f, sendingWindow: { ...w, start: e.target.value } })} /></Field>

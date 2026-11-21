@@ -50,6 +50,16 @@ export interface ProvisionInput { userId: string; organizationName: string; work
  * existing tenant instead of creating a second one. If seeding fails the tenant stays PENDING_SETUP and
  * ensureProvisioned() finishes it on the next sign-in.
  */
+/** Normalises an email to the person behind it for trial accounting: lowercase, drop +tags, and drop dots for Gmail. */
+export function trialIdentity(email: string) {
+  const [local0, domain0] = email.trim().toLowerCase().split('@');
+  const domain = domain0 === 'googlemail.com' ? 'gmail.com' : domain0;
+  let local = (local0 ?? '').split('+')[0];
+  if (domain === 'gmail.com') local = local.replace(/\./g, '');
+  return sha256(`trial:${local}@${domain}`);
+}
+const MAX_ORGS_PER_USER = () => Number(process.env.MAX_ORGS_PER_USER ?? 5);
+
 export async function provisionTenant(input: ProvisionInput) {
   if (input.registrationKey) {
     const existing = await db().organization.findUnique({ where: { registrationKey: input.registrationKey }, include: { workspaces: { orderBy: { createdAt: 'asc' }, take: 1 } } });
@@ -58,9 +68,16 @@ export async function provisionTenant(input: ProvisionInput) {
   const plans = billingEnabled() ? await (await import('./billing.js')).ensurePlans() : null;
   void plans;
   const plan = billingEnabled() ? await db().plan.findFirst({ where: { code: input.planCode ?? 'starter', isActive: true, archivedAt: null } }) ?? await db().plan.findFirstOrThrow({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } }) : null;
+  const owner = await db().user.findUniqueOrThrow({ where: { id: input.userId }, select: { email: true, platformRole: true } });
   let result;
+  let trialGranted = false;
   try {
     result = await db().$transaction(async (tx) => {
+      // Abuse limits: a person can own a limited number of organizations, and gets one free trial ever
+      // (keyed by normalised email, kept even after deletion). Staff and platform overrides are exempt.
+      if (!owner.platformRole && (await tx.organization.count({ where: { ownerId: input.userId, status: { notIn: ['DELETED', 'DELETION_PENDING'] } } })) >= MAX_ORGS_PER_USER()) {
+        throw new AppError('QUOTA_EXCEEDED', `You already own ${MAX_ORGS_PER_USER()} organizations. Add workspaces to an existing organization instead, or contact support.`, 402);
+      }
       const organization = await tx.organization.create({ data: {
         name: input.organizationName, slug: await uniqueSlug('organization', input.organizationName, tx), status: 'PENDING_SETUP', ownerId: input.userId, billingOwnerId: input.userId,
         registrationKey: input.registrationKey ?? null, timezone: input.timezone ?? 'UTC',
@@ -69,7 +86,13 @@ export async function provisionTenant(input: ProvisionInput) {
       } });
       await tx.organizationStatusChange.create({ data: { organizationId: organization.id, fromStatus: null, toStatus: 'PENDING_SETUP', reason: 'Registered', actorUserId: input.userId } });
       const workspace = await tx.workspace.create({ data: { organizationId: organization.id, name: input.workspaceName ?? input.organizationName, slug: await uniqueSlug('workspace', input.workspaceName ?? input.organizationName, tx), timezone: input.timezone ?? 'UTC', members: { create: { userId: input.userId, role: 'OWNER' } } } });
-      if (plan) await tx.subscription.create({ data: { organizationId: organization.id, planId: plan.id, status: 'TRIALING', trialEndsAt: new Date(Date.now() + plan.trialDays * 86400_000) } });
+      if (plan) {
+        const granted = await tx.$queryRaw<Array<{ id: string }>>`INSERT INTO "TrialGrant" (id, "identityHash", "organizationId", "planCode") VALUES (gen_random_uuid(), ${trialIdentity(owner.email)}, ${organization.id}::uuid, ${plan.code}) ON CONFLICT ("identityHash") DO NOTHING RETURNING id`;
+        trialGranted = granted.length > 0 && plan.trialDays > 0;
+        await tx.subscription.create({ data: trialGranted
+          ? { organizationId: organization.id, planId: plan.id, status: 'TRIALING', trialEndsAt: new Date(Date.now() + plan.trialDays * 86400_000) }
+          : { organizationId: organization.id, planId: plan.id, status: 'INCOMPLETE', overrides: {} } });
+      }
       return { organization, workspace };
     });
   } catch (e) {
@@ -81,7 +104,8 @@ export async function provisionTenant(input: ProvisionInput) {
   }
   const organization = await ensureProvisioned(result.organization.id, input.userId);
   await audit(result.workspace.id, { type: 'USER', userId: input.userId }, 'tenant.provisioned', { type: 'organization', id: result.organization.id }, { plan: plan?.code ?? null });
-  return { organization, workspace: result.workspace, created: true };
+  if (plan && !trialGranted) await platformAudit({ actorUserId: input.userId, action: 'tenant.trial_denied', organizationId: organization.id, reason: 'Free trial already used by this person' });
+  return { organization, workspace: result.workspace, created: true, trialGranted };
 }
 
 /** Finishes provisioning (idempotent): workspace defaults, then PENDING_SETUP → TRIAL/ACTIVE. */
@@ -139,13 +163,16 @@ export async function signup(res: import('express').Response, input: z.infer<typ
       return existing;
     }
     const first = (await tx.user.count()) === 0;
+    // Re-check under the lock: a concurrent first sign-up may have just closed registration.
+    if (!first && !(await registrationOpen())) throw new AppError('REGISTRATION_CLOSED', 'Registration is closed. Ask an administrator for an invitation.', 403);
     return tx.user.create({ data: { email, name: input.name, passwordHash, isPlatformAdmin: first, platformRole: first ? 'SUPER_ADMIN' : null, termsAcceptedAt: new Date(), termsVersion: input.termsVersion, emailVerifiedAt: first ? new Date() : null } });
   });
-  const { organization, workspace, created } = await provisionTenant({ userId: user.id, organizationName: input.organizationName, planCode: input.planCode, registrationKey: key, timezone: input.timezone });
+  const prov = await provisionTenant({ userId: user.id, organizationName: input.organizationName, planCode: input.planCode, registrationKey: key, timezone: input.timezone });
+  const { organization, workspace, created } = prov;
   if (created && !user.emailVerifiedAt) await sendVerificationEmail(user.id);
   const { csrfToken } = await createSession(res, user.id, meta, workspace.id);
   await platformAudit({ actorUserId: user.id, action: 'tenant.registered', organizationId: organization.id, ip: meta.ip ?? null, metadata: { plan: input.planCode ?? null, created } });
-  return { user: publicUser(user), organization: { id: organization.id, name: organization.name, status: organization.status }, workspace: { id: workspace.id, name: workspace.name }, csrfToken, emailVerificationRequired: !user.emailVerifiedAt };
+  return { user: publicUser(user), organization: { id: organization.id, name: organization.name, status: organization.status }, workspace: { id: workspace.id, name: workspace.name }, csrfToken, emailVerificationRequired: !user.emailVerifiedAt, trialGranted: (prov as { trialGranted?: boolean }).trialGranted ?? false };
 }
 
 // ------------------------------------------------------------------ email verification
@@ -364,6 +391,7 @@ export async function purgeTenant(organizationId: string) {
     await tx.organizationMember.deleteMany({ where: { organizationId } });
     await tx.usageEvent.deleteMany({ where: { organizationId } });
     await tx.supportAccessGrant.deleteMany({ where: { organizationId } });
+    await tx.storedObject.deleteMany({ where: { organizationId } }); // files were removed from storage above
     await tx.organization.update({ where: { id: organizationId }, data: { name: 'Deleted organization', slug: `deleted-${organizationId.slice(0, 8)}`, branding: {}, settings: {}, onboarding: {}, registrationKey: null, ownerId: null, billingOwnerId: null, deletedAt: new Date() } });
   });
   await setOrgStatus(organizationId, 'DELETED', 'Data erased after deletion grace period', { system: true });

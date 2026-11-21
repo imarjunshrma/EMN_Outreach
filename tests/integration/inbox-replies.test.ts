@@ -66,6 +66,19 @@ describe('reply synchronization & stop rules', () => {
     expect(await db().outboundEmail.count({ where: { campaignId } })).toBe(1);
   });
 
+  it('serializes overlapping mailbox sync jobs and does not duplicate stored replies', async () => {
+    const { mailbox, sentMsg } = await sentCampaign();
+    fakes.gmail.inbox.push(await parseRawMessage(raw([
+      'From: Jane <jane@acme.io>', 'To: sender@ourco.com', 'Subject: Re: Hello', 'Message-ID: <sync-lock-reply@acme.io>',
+      `In-Reply-To: ${sentMsg.messageId}`, `References: ${sentMsg.messageId}`, '', 'Thanks for the details.',
+    ]), { providerMessageId: 'sync-lock-reply' }));
+    const results = await Promise.all([syncAccount(mailbox.id), syncAccount(mailbox.id)]);
+    expect(results.filter((r) => 'inbound' in r && r.inbound === 1)).toHaveLength(1);
+    expect(results.filter((r) => r.skipped === true)).toHaveLength(1);
+    expect(await db().emailMessage.count({ where: { providerMessageId: 'sync-lock-reply' } })).toBe(1);
+    expect(await db().conversation.count({ where: { emailAccountId: mailbox.id } })).toBe(1);
+  });
+
   it('processes hard bounces: suppression, lead BOUNCED, sequence stopped', async () => {
     const { mailbox, lead, campaignId, sentMsg } = await sentCampaign();
     const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });

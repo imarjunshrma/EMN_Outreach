@@ -7,6 +7,7 @@ import { OpenAiAdapter, toStrictSchema } from '../../integrations/src/ai/openai.
 import { ApolloProvider, MillionVerifierProvider } from '../../integrations/src/providers/index.js';
 import { checkDomain } from '../../integrations/src/research/dns.js';
 import { httpRequest, ProviderError } from '../../integrations/src/http.js';
+import { smtpError } from '../../integrations/src/email/smtp-imap.js';
 
 type Call = { url: string; init?: RequestInit };
 function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
@@ -54,6 +55,18 @@ describe('MIME building & parsing', () => {
     ].join('\r\n'));
     const m = await parseRawMessage(raw, { providerMessageId: 'b' });
     expect(m.bounce).toMatchObject({ hard: true, status: '5.1.1', recipient: 'jane@acme.io', outboundId: '11111111-1111-1111-1111-111111111111' });
+  });
+});
+
+describe('SMTP/IMAP safe errors', () => {
+  it('maps SMTP auth and transient failures without exposing provider text', () => {
+    const authErr = smtpError(Object.assign(new Error('password=secret-token'), { code: 'EAUTH' }));
+    expect(authErr).toMatchObject({ status: 401, retryable: false });
+    expect(authErr.message).toContain('SMTP authentication failed');
+    expect(authErr.message).not.toContain('secret-token');
+    const transient = smtpError(Object.assign(new Error('secret diagnostic'), { responseCode: 451 }));
+    expect(transient).toMatchObject({ status: 503, retryable: true });
+    expect(transient.message).not.toContain('secret diagnostic');
   });
 });
 

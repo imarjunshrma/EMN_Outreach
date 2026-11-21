@@ -17,8 +17,8 @@ export default function AiStudio() {
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-4">
               <Stat label="Business knowledge" value={d.knowledgeVersion ? `v${d.knowledgeVersion}` : 'not set'} hint={d.companyName || undefined} />
-              <Stat label="Writing rules" value={d.writingVersion ? `v${d.writingVersion}` : 'defaults'} />
-              <Stat label="Research rules" value={d.researchVersion ? `v${d.researchVersion}` : 'defaults'} />
+              <Stat label="Active outreach rules" value={d.activeRules} hint={`${d.activeExamples} active examples`} />
+              <Stat label="Draft decisions" value={`${d.approvedDrafts} approved`} hint={`${d.rejectedDrafts} rejected · ${d.generatedDrafts} need review`} />
               <Stat label="AI spend this month" value={`$${d.monthSpendUsd.toFixed(2)}`} hint={d.aiMonthlyBudgetUsd ? `budget $${d.aiMonthlyBudgetUsd}` : 'no workspace budget'} />
             </div>
             {!d.knowledgeVersion && <Notice kind="warning">Business knowledge is not set. The AI can only state facts about your company that you enter here.</Notice>}
@@ -27,6 +27,7 @@ export default function AiStudio() {
                 {link('/knowledge', 'Business knowledge', `Company, services, offers, verified case studies and achievements, competitors, documents (${d.activeDocuments} active).`)}
                 {link('/writing', 'Writing instructions', 'Tone, style, length, CTA, words to avoid, forbidden claims, examples and a large custom-instructions editor.')}
                 {link('/research', 'Research instructions', 'What to research about people and companies, permitted sources, signals, evidence rules and what never to infer.')}
+                {link('/training', 'AI Outreach Training', `${d.pendingSuggestions} learning suggestion(s) · manage customer rules, examples and feedback.`)}
                 {link('/profiles', 'Prompt library', `Reusable prompt profiles with variables, conditionals, versions, folders, tags, import/export and tests (${d.profiles}).`)}
                 {link('/models', 'Models & budgets', 'Model per task, fallback, token limits, monthly budget, maximum cost per lead and cost tracking.')}
               </div>

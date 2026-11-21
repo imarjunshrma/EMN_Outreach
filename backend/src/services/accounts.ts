@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { db, Prisma } from '../core/db.js';
 import { adapters } from '../core/container.js';
 import { pkcePair, randomToken, sha256 } from '../core/crypto.js';
@@ -8,13 +9,21 @@ import { audit, notifyWorkspace, publish, type Actor } from '../core/audit.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { ProviderError } from '../../../integrations/src/http.js';
-import type { AuthHandle, SmtpImapConfig } from '../../../integrations/src/email/types.js';
+import type { AuthHandle, ConnectionCheck, SmtpImapConfig } from '../../../integrations/src/email/types.js';
 import { decryptSecret, encryptSecret } from './workspace.js';
 import { SendingWindowSchema, startOfDayIn } from '../../../shared/src/schedule.js';
 
 type OAuthProvider = 'GMAIL' | 'MICROSOFT';
 
 export const AccountWindowSchema = SendingWindowSchema.extend({ enabled: z.boolean().default(false), timezone: z.string().default('UTC') });
+
+// connectionConfig contains SMTP/IMAP usernames and host details. Keep it inside
+// the service boundary; API callers receive only the mailbox's public metadata.
+function publicAccount<T extends { connectionConfig: unknown }>(account: T) {
+  const { connectionConfig: _privateConfig, ...safe } = account;
+  const connectionHealth = (_privateConfig as { connectionHealth?: unknown } | null)?.connectionHealth ?? null;
+  return { ...safe, connectionHealth };
+}
 
 function redirectUri(provider: OAuthProvider) {
   return `${process.env.APP_URL}/api/v1/oauth/callback/${provider === 'GMAIL' ? 'google' : 'microsoft'}`;
@@ -59,35 +68,65 @@ export async function oauthCallback(provider: OAuthProvider, code: string, state
 export const SmtpConnectSchema = z.object({
   emailAddress: z.string().email(),
   displayName: z.string().max(100).optional(),
-  password: z.string().min(1).max(500),
+  password: z.string().min(1).max(500).optional(),
+  smtpPassword: z.string().min(1).max(500).optional(),
+  imapPassword: z.string().min(1).max(500).optional(),
   smtpHost: z.string().min(1), smtpPort: z.number().int().min(1).max(65535), smtpSecure: z.boolean(),
   imapHost: z.string().min(1), imapPort: z.number().int().min(1).max(65535), imapSecure: z.boolean(),
-  username: z.string().min(1),
+  username: z.string().min(1).optional(),
+  smtpUsername: z.string().min(1).optional(),
+  imapUsername: z.string().min(1).optional(),
   sentFolder: z.string().default('Sent'),
   appendToSent: z.boolean().default(false),
-});
+}).refine((v) => (v.smtpUsername || v.username) && (v.imapUsername || v.username) && (v.smtpPassword || v.password) && (v.imapPassword || v.password), { message: 'SMTP and IMAP each require a username and password (or provide shared credentials)' });
 
 export async function connectSmtp(workspaceId: string, input: z.infer<typeof SmtpConnectSchema>, actor: Actor) {
   await (await import('./billing.js')).assertEntitled(workspaceId, 'mailboxes');
   const email = input.emailAddress.toLowerCase();
-  const config: SmtpImapConfig = { smtpHost: input.smtpHost, smtpPort: input.smtpPort, smtpSecure: input.smtpSecure, imapHost: input.imapHost, imapPort: input.imapPort, imapSecure: input.imapSecure, username: input.username, sentFolder: input.sentFolder, appendToSent: input.appendToSent };
+  const smtpUsername = input.smtpUsername ?? input.username!;
+  const imapUsername = input.imapUsername ?? input.username!;
+  const smtpPassword = input.smtpPassword ?? input.password!;
+  const imapPassword = input.imapPassword ?? input.password!;
+  const config: SmtpImapConfig = { smtpHost: input.smtpHost, smtpPort: input.smtpPort, smtpSecure: input.smtpSecure, imapHost: input.imapHost, imapPort: input.imapPort, imapSecure: input.imapSecure, username: smtpUsername, smtpUsername, imapUsername, sentFolder: input.sentFolder, appendToSent: input.appendToSent };
+  // The username is a credential too. Encrypt it in the existing JSON column so
+  // this connection does not require a schema migration.
+  let connectionCheck: ConnectionCheck | null = null;
   try {
-    await adapters().email.SMTP_IMAP.testConnection({ kind: 'password', email, password: input.password, config });
+    const provider = adapters().email.SMTP_IMAP;
+    const auth: AuthHandle = { kind: 'password', email, password: smtpPassword, smtpPassword, imapPassword, config };
+    if (provider.testConnectionDetailed) {
+      connectionCheck = await provider.testConnectionDetailed(auth);
+      if (!connectionCheck.smtp.ok || !connectionCheck.imap.ok) {
+        const failures = [!connectionCheck.smtp.ok && connectionCheck.smtp.error, !connectionCheck.imap.ok && connectionCheck.imap.error].filter(Boolean).join('; ');
+        throw new ProviderError('smtp-imap', failures || 'Connection verification failed', 400, false);
+      }
+    } else await provider.testConnection(auth);
   } catch (e) {
-    throw new AppError('PROVIDER_ERROR', `Connection test failed: ${(e as Error).message}`, 400);
+    const safeMessage = e instanceof ProviderError ? e.message : 'SMTP/IMAP connection verification failed. Check host, port, TLS settings, and provider status.';
+    const existing = await db().emailAccount.findFirst({ where: { workspaceId, emailAddress: email, provider: 'SMTP_IMAP' } });
+    if (existing) {
+      const oldConfig = existing.connectionConfig as Record<string, unknown>;
+      const failedHealth = connectionCheck ?? { smtp: { ok: false, error: safeMessage }, imap: { ok: false, error: safeMessage } };
+      await db().emailAccount.update({ where: { id: existing.id }, data: { status: 'ERROR', statusReason: safeMessage, lastError: safeMessage, lastErrorAt: new Date(), connectionConfig: { ...oldConfig, connectionHealth: { ...failedHealth, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
+    }
+    await audit(workspaceId, actor, 'email_account.connection_failed', { type: 'email_account', id: existing?.id ?? email }, { provider: 'SMTP_IMAP', reason: safeMessage });
+    throw new AppError('PROVIDER_ERROR', safeMessage, 400, connectionCheck ? { connection: connectionCheck } : undefined);
   }
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
+  const priorAccount = await db().emailAccount.findUnique({ where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } }, select: { id: true, status: true, statusReason: true } });
+  const verifiedHealth = connectionCheck ?? { smtp: { ok: true, error: null }, imap: { ok: true, error: null } };
+  const persistedConfig = { ...config, username: encryptSecret(smtpUsername), smtpUsername: encryptSecret(smtpUsername), imapUsername: encryptSecret(imapUsername), usernameEncrypted: true, smtpUsernameEncrypted: true, imapUsernameEncrypted: true, smtpPasswordEncrypted: encryptSecret(smtpPassword), imapPasswordEncrypted: encryptSecret(imapPassword), connectionHealth: { ...verifiedHealth, checkedAt: new Date().toISOString() } } as unknown as Prisma.InputJsonValue;
   const domainName = email.split('@')[1];
   const domain = await db().domain.upsert({ where: { workspaceId_name: { workspaceId, name: domainName } }, update: {}, create: { workspaceId, name: domainName } });
   const account = await db().emailAccount.upsert({
     where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } },
-    update: { provider: 'SMTP_IMAP', status: 'CONNECTED', connectionConfig: config as unknown as Prisma.InputJsonValue, displayName: input.displayName },
-    create: { workspaceId, provider: 'SMTP_IMAP', emailAddress: email, displayName: input.displayName, domainId: domain.id, connectionConfig: config as unknown as Prisma.InputJsonValue, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
+    update: { provider: 'SMTP_IMAP', status: priorAccount?.status === 'PAUSED' ? 'PAUSED' : 'CONNECTED', statusReason: priorAccount?.status === 'PAUSED' ? priorAccount.statusReason : null, lastError: null, lastErrorAt: null, connectionConfig: persistedConfig, displayName: input.displayName },
+    create: { workspaceId, provider: 'SMTP_IMAP', emailAddress: email, displayName: input.displayName, domainId: domain.id, connectionConfig: persistedConfig, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
   });
-  await db().providerCredential.upsert({ where: { emailAccountId: account.id }, update: { encryptedPassword: encryptSecret(input.password) }, create: { workspaceId, emailAccountId: account.id, encryptedPassword: encryptSecret(input.password), scopes: [] } });
+  await db().providerCredential.upsert({ where: { emailAccountId: account.id }, update: { encryptedPassword: encryptSecret(input.password ?? smtpPassword) }, create: { workspaceId, emailAccountId: account.id, encryptedPassword: encryptSecret(input.password ?? smtpPassword), scopes: [] } });
   await audit(workspaceId, actor, 'email_account.connected', { type: 'email_account', id: account.id }, { provider: 'SMTP_IMAP', email });
   await enqueue(QUEUES.sync, 'sync.account', { workspaceId, accountId: account.id });
-  return account;
+  return publicAccount(account);
 }
 
 /** Decrypt credentials, refreshing OAuth tokens under a lock when they expire within 5 minutes. */
@@ -95,7 +134,26 @@ export async function getAuth(accountId: string): Promise<AuthHandle> {
   const account = await db().emailAccount.findUnique({ where: { id: accountId }, include: { credential: true } });
   if (!account?.credential) throw new AppError('ACCOUNT_NOT_CONNECTED', 'Mailbox credentials missing', 400);
   if (account.provider === 'SMTP_IMAP') {
-    return { kind: 'password', email: account.emailAddress, password: decryptSecret(account.credential.encryptedPassword!), config: account.connectionConfig as unknown as SmtpImapConfig };
+    let stored = account.connectionConfig as unknown as SmtpImapConfig & { usernameEncrypted?: boolean; smtpUsernameEncrypted?: boolean; imapUsernameEncrypted?: boolean; smtpPasswordEncrypted?: string; imapPasswordEncrypted?: string };
+    if (!stored.usernameEncrypted) {
+      // Upgrade mailboxes created before usernames were encrypted, without a
+      // migration or downtime. The version flag keeps this operation idempotent.
+      stored = { ...stored, username: encryptSecret(stored.username), usernameEncrypted: true };
+      await db().emailAccount.update({ where: { id: accountId }, data: { connectionConfig: stored as unknown as Prisma.InputJsonValue } });
+    }
+    const sharedPassword = decryptSecret(account.credential.encryptedPassword!);
+    const config = {
+      ...stored,
+      username: stored.usernameEncrypted ? decryptSecret(stored.username) : stored.username,
+      smtpUsername: stored.smtpUsername ? (stored.smtpUsernameEncrypted ? decryptSecret(stored.smtpUsername) : stored.smtpUsername) : undefined,
+      imapUsername: stored.imapUsername ? (stored.imapUsernameEncrypted ? decryptSecret(stored.imapUsername) : stored.imapUsername) : undefined,
+    };
+    return {
+      kind: 'password', email: account.emailAddress, password: sharedPassword,
+      smtpPassword: stored.smtpPasswordEncrypted ? decryptSecret(stored.smtpPasswordEncrypted) : sharedPassword,
+      imapPassword: stored.imapPasswordEncrypted ? decryptSecret(stored.imapPasswordEncrypted) : sharedPassword,
+      config,
+    };
   }
   const cred = account.credential;
   const fresh = cred.accessTokenExpiresAt && cred.accessTokenExpiresAt.getTime() > Date.now() + 5 * 60_000;
@@ -145,7 +203,7 @@ export async function listAccounts(workspaceId: string) {
   return accounts.map((a) => {
     const s30 = sent30.find((x) => x.emailAccountId === a.id)?._count._all ?? 0;
     const b30 = bounces.find((x) => x.emailAccountId === a.id)?._count._all ?? 0;
-    return { ...a, sentToday: sent.find((x) => x.emailAccountId === a.id)?._count._all ?? 0, sent30d: s30, bounces30d: b30, bounceRate30d: s30 ? b30 / s30 : null };
+    return { ...publicAccount(a), sentToday: sent.find((x) => x.emailAccountId === a.id)?._count._all ?? 0, sent30d: s30, bounces30d: b30, bounceRate30d: s30 ? b30 / s30 : null };
   });
 }
 
@@ -166,7 +224,7 @@ export async function updateAccount(workspaceId: string, id: string, input: z.in
   if (input.dailySendLimit && input.dailySendLimit > ceiling) throw new AppError('VALIDATION_FAILED', `Daily limit cannot exceed the provider maximum (${ceiling})`, 400);
   const updated = await db().emailAccount.update({ where: { id }, data: { ...input, sendingWindow: input.sendingWindow as Prisma.InputJsonValue | undefined } });
   await audit(workspaceId, actor, 'email_account.updated', { type: 'email_account', id }, { fields: Object.keys(input) });
-  return updated;
+  return publicAccount(updated);
 }
 
 export async function setPaused(workspaceId: string, id: string, paused: boolean, actor: Actor) {
@@ -175,20 +233,62 @@ export async function setPaused(workspaceId: string, id: string, paused: boolean
   if (!paused && a.status !== 'PAUSED') throw new AppError('CONFLICT', `Account is ${a.status}; reconnect it instead`, 409);
   const updated = await db().emailAccount.update({ where: { id }, data: { status: paused ? 'PAUSED' : 'CONNECTED', statusReason: paused ? 'Paused by user' : null } });
   await audit(workspaceId, actor, paused ? 'email_account.paused' : 'email_account.resumed', { type: 'email_account', id });
-  return updated;
+  return publicAccount(updated);
 }
 
 export async function testAccount(workspaceId: string, id: string) {
   const a = await db().emailAccount.findFirst({ where: { id, workspaceId } });
   if (!a) throw NotFound('Email account');
   try {
-    const profile = await adapters().email[a.provider].testConnection(await getAuth(id));
-    if (a.status === 'ERROR' || a.status === 'NEEDS_REAUTH') await db().emailAccount.update({ where: { id }, data: { status: 'CONNECTED', statusReason: null, lastError: null } });
-    return { ok: true, profile };
+    const provider = adapters().email[a.provider];
+    const auth = await getAuth(id);
+    const details = provider.testConnectionDetailed ? await provider.testConnectionDetailed(auth) : null;
+    if (details && (!details.smtp.ok || !details.imap.ok)) {
+      const safeError = [!details.smtp.ok && details.smtp.error, !details.imap.ok && details.imap.error].filter(Boolean).join('; ');
+      const oldConfig = a.connectionConfig as Record<string, unknown>;
+      await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date(), connectionConfig: { ...oldConfig, connectionHealth: { ...details, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
+      return { ok: false, provider: a.provider, emailAddress: a.emailAddress, error: safeError, connection: details };
+    }
+    if (!details) await provider.testConnection(auth);
+    const oldConfig = a.connectionConfig as Record<string, unknown>;
+    const connection = details ?? { smtp: { ok: true, error: null }, imap: { ok: true, error: null } };
+    await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'CONNECTED', statusReason: a.status === 'PAUSED' ? a.statusReason : null, lastError: null, lastErrorAt: null, connectionConfig: { ...oldConfig, connectionHealth: { ...connection, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
+    return { ok: true, provider: a.provider, emailAddress: a.emailAddress, connection };
   } catch (e) {
-    await db().emailAccount.update({ where: { id }, data: { lastError: (e as Error).message.slice(0, 500), lastErrorAt: new Date() } });
-    return { ok: false, error: (e as Error).message };
+    const safeError = e instanceof ProviderError && e.status === 401 ? 'Mailbox authentication failed. Recheck credentials and provider access.' : 'Mailbox connection verification failed. Check provider settings and try again.';
+    if (a.provider !== 'SMTP_IMAP' && e instanceof ProviderError && (e.status === 401 || e.status === 403)) {
+      await markNeedsReauth(workspaceId, id, safeError);
+    } else {
+      await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date() } });
+    }
+    return { ok: false, provider: a.provider, emailAddress: a.emailAddress, error: safeError };
   }
+}
+
+/** One explicit, clearly labeled delivery diagnostic addressed only to the same authorized mailbox. */
+export async function sendMailboxDiagnostic(workspaceId: string, id: string, actor: Actor) {
+  const account = await db().emailAccount.findFirst({ where: { id, workspaceId } });
+  if (!account) throw NotFound('Email account');
+  if (account.status !== 'CONNECTED') throw new AppError('CONFLICT', `Mailbox is ${account.status}; reconnect or resume it before testing`, 409);
+  const messageId = `<${randomUUID()}@${account.emailAddress.split('@')[1]}>`;
+  const now = new Date();
+  let result;
+  try {
+    result = await adapters().email[account.provider].send(await getAuth(id), {
+      from: { address: account.emailAddress, name: account.displayName ?? undefined },
+      to: account.emailAddress,
+      replyTo: account.replyTo ?? undefined,
+      subject: '[EMN mailbox diagnostic] Explicit self-test',
+      text: `This is an automated mailbox delivery diagnostic requested by an administrator in EMN Outreach OS at ${now.toISOString()}. It was sent from this mailbox to itself to verify provider submission and mailbox synchronization. It is not a prospect message. No reply or engagement action is requested.`,
+      messageId,
+      headers: { 'X-EMN-Mailbox-Diagnostic': '1' },
+    });
+  } catch (e) {
+    await db().emailAccount.update({ where: { id }, data: { lastError: (e as Error).message.slice(0, 500), lastErrorAt: now } });
+    throw e;
+  }
+  await audit(workspaceId, actor, 'email_account.delivery_diagnostic_sent', { type: 'email_account', id }, { provider: account.provider, recipient: account.emailAddress, providerMessageId: result.providerMessageId, internetMessageId: result.internetMessageId });
+  return { acceptedByProvider: true, providerMessageId: result.providerMessageId, internetMessageId: result.internetMessageId, sentAt: now.toISOString(), recipient: account.emailAddress, note: 'Provider accepted the explicit self-test. Run mailbox sync to check whether a copy appears; this does not measure inbox placement.' };
 }
 
 export async function disconnectAccount(workspaceId: string, id: string, actor: Actor) {
@@ -219,6 +319,8 @@ export async function resync(workspaceId: string, id: string, actor: Actor) {
 export async function syncAccount(accountId: string) {
   const a = await db().emailAccount.findUnique({ where: { id: accountId } });
   if (!a || !['CONNECTED', 'PAUSED'].includes(a.status)) return { skipped: true };
+  const releaseSyncLock = await acquireLock(`mailbox-sync:${accountId}`, 10 * 60_000);
+  if (!releaseSyncLock) return { skipped: true, reason: 'sync already running' };
   const provider = adapters().email[a.provider];
   try {
     const auth = await getAuth(accountId);
@@ -231,9 +333,18 @@ export async function syncAccount(accountId: string) {
     if (stats.inbound) await publish(a.workspaceId, 'inbox.updated', { accountId, ...stats });
     return stats;
   } catch (e) {
-    await db().emailAccount.update({ where: { id: accountId }, data: { lastError: (e as Error).message.slice(0, 500), lastErrorAt: new Date() } });
-    if (e instanceof ProviderError && (e.status === 401 || e.status === 403)) await markNeedsReauth(a.workspaceId, accountId, e.message);
-    throw e;
+    const authFailure = e instanceof ProviderError && (e.status === 401 || e.status === 403);
+    const safeMessage = authFailure ? 'Mailbox authentication failed during synchronization. Reconnect this mailbox.' : e instanceof AppError ? e.message : 'Mailbox synchronization failed. The worker will retry; check provider settings if this persists.';
+    const failedAt = new Date();
+    await db().emailAccount.update({ where: { id: accountId }, data: { lastError: safeMessage.slice(0, 500), lastErrorAt: failedAt } });
+    if (authFailure) {
+      if (a.status !== 'NEEDS_REAUTH') await markNeedsReauth(a.workspaceId, accountId, safeMessage);
+    } else if (!a.lastErrorAt || failedAt.getTime() - a.lastErrorAt.getTime() >= 6 * 3600_000) {
+      await notifyWorkspace(a.workspaceId, 'ADMIN', { type: 'account.sync_error', title: 'Mailbox synchronization is failing', body: 'EMN could not complete mailbox synchronization. Check Mailbox Health and the provider connection settings.', link: '/mailbox-health' });
+    }
+    throw new ProviderError('mailbox-sync', safeMessage, authFailure ? 401 : 503, !authFailure);
+  } finally {
+    await releaseSyncLock();
   }
 }
 

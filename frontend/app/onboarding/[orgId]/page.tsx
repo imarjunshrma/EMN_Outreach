@@ -15,7 +15,7 @@ const HELP: Record<string, { what: string; path: string; cta: string }> = {
   organization: { what: 'Your sender name and postal address. Most anti-spam laws require the address in every email.', path: '/settings/general', cta: 'Add workspace details' },
   business: { what: 'What you sell, who it is for and the proof points the AI may use. Without it, drafts stay generic.', path: '/ai-studio/knowledge', cta: 'Write business knowledge' },
   team: { what: 'Invite the people who will review drafts and handle replies.', path: '/settings/team', cta: 'Invite teammates' },
-  ai: { what: 'Connect your OpenAI or Anthropic key for research and writing. You pay the provider directly.', path: '/settings/ai', cta: 'Add an AI provider' },
+  ai: { what: 'Connect a hosted or local text model for research and writing. Provider usage is billed by your model provider.', path: '/settings/ai', cta: 'Add an AI provider' },
   mailbox: { what: 'Connect the Gmail, Microsoft 365 or SMTP mailbox you will send from.', path: '/email-accounts', cta: 'Connect a mailbox' },
   domain: { what: 'Check SPF, DKIM and DMARC for your sending domain and prove you own it.', path: '/domains', cta: 'Check a domain' },
   leads: { what: 'Upload a CSV or find prospects that match your ideal customer.', path: '/leads/import', cta: 'Import leads' },

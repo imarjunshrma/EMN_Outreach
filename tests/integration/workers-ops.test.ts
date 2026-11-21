@@ -9,7 +9,7 @@ import { runDomainCheck, runRetention, processPrivacyRequest, createPrivacyReque
 import { buildOpenApi } from '../../backend/src/http/openapi.js';
 import { routes } from '../../backend/src/http/router.js';
 import { hmac } from '../../backend/src/core/crypto.js';
-import { resetDb, installFakes, createUserSession, addLead, getApp } from '../helpers/harness.js';
+import { resetDb, installFakes, createUserSession, addLead, addMailbox, getApp } from '../helpers/harness.js';
 import { fakeDns } from '../helpers/fakes.js';
 
 beforeEach(async () => { await resetDb(); installFakes(); });
@@ -17,6 +17,17 @@ const SYS = { type: 'SYSTEM' as const };
 const job = (name: string, data: Record<string, unknown>) => ({ id: 'j1', name, data, attemptsMade: 0 }) as unknown as Job<Record<string, unknown>>;
 
 describe('background workers', () => {
+  it('runs mailbox sync through the registered BullMQ processor', async () => {
+    const s = await createUserSession('sync-worker@example.test');
+    const mailbox = await addMailbox(s.workspaceId);
+    const result = await processorFor('mailbox-sync')(job('sync.account', { workspaceId: s.workspaceId, accountId: mailbox.id }));
+    expect(result).toMatchObject({ inbound: 0, outbound: 0 });
+    expect((await db().emailAccount.findUniqueOrThrow({ where: { id: mailbox.id } })).lastSyncedAt).toBeInstanceOf(Date);
+    // sync.account is intentionally excluded from success JobRun rows because
+    // it is a frequent polling job; lastSyncedAt proves the handler executed.
+    expect(await db().jobRun.count({ where: { workspaceId: s.workspaceId, queue: 'mailbox-sync', status: 'FAILED' } })).toBe(0);
+  });
+
   it('records successful and failed job runs and error logs', async () => {
     const s = await createUserSession('o@x.com');
     const domain = await db().domain.create({ data: { workspaceId: s.workspaceId, name: 'ourco.com', dkimSelectors: ['google'] } });

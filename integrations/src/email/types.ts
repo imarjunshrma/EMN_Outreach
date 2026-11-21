@@ -16,7 +16,7 @@ export interface MailboxProfile {
 /** Credentials handed to an adapter for one call. Built by the backend after decryption/refresh. */
 export type AuthHandle =
   | { kind: 'oauth'; accessToken: string; email: string }
-  | { kind: 'password'; email: string; password: string; config: SmtpImapConfig };
+  | { kind: 'password'; email: string; password: string; smtpPassword?: string; imapPassword?: string; config: SmtpImapConfig };
 
 export interface SmtpImapConfig {
   smtpHost: string;
@@ -26,6 +26,8 @@ export interface SmtpImapConfig {
   imapPort: number;
   imapSecure: boolean;
   username: string;
+  smtpUsername?: string;
+  imapUsername?: string;
   sentFolder?: string;
   appendToSent?: boolean;
 }
@@ -90,9 +92,15 @@ export interface SyncResult {
   fullResyncRequired?: boolean;
 }
 
+export interface ConnectionCheck {
+  smtp: { ok: boolean; error: string | null };
+  imap: { ok: boolean; error: string | null };
+}
+
 export interface EmailProvider {
   readonly name: EmailProviderName;
   testConnection(auth: AuthHandle): Promise<MailboxProfile>;
+  testConnectionDetailed?(auth: AuthHandle): Promise<ConnectionCheck>;
   send(auth: AuthHandle, msg: OutgoingMessage): Promise<SentResult>;
   /** Crash recovery: find a message we may already have sent, by our X-EMN-Outbound-Id header. */
   findSentByOutboundId(auth: AuthHandle, q: { outboundId: string; to: string; since: Date }): Promise<SentResult | null>;

@@ -147,6 +147,18 @@ describe('sending engine', () => {
     expect(third.lastError).toMatch(/daily limit/);
   });
 
+  it('enforces the optional workspace-wide daily campaign send cap', async () => {
+    const s = await createUserSession('workspace-cap@x.com');
+    const { campaignId } = await setupCampaign(s, { leads: 3 });
+    await db().workspace.update({ where: { id: s.workspaceId }, data: { settings: { dailyEmailSendLimit: 1 } } });
+    await approveAndStart(s, campaignId);
+    const results = await runPipeline(MONDAY_10_UTC);
+    expect(results.map((r) => r.outcome).sort()).toEqual(['deferred', 'deferred', 'sent']);
+    expect(fakes.gmail.sent).toHaveLength(1);
+    expect(await db().outboundEmail.count({ where: { workspaceId: s.workspaceId, status: 'SENT' } })).toBe(1);
+    expect(await db().outboundEmail.count({ where: { workspaceId: s.workspaceId, lastError: { contains: 'workspace daily send limit' } } })).toBe(2);
+  });
+
   it('skips ineligible recipients (unverified, suppressed, blocked country) at enrollment and at send time', async () => {
     const s = await createUserSession('owner@x.com');
     const { campaignId, leads } = await setupCampaign(s, { leads: 4 });

@@ -10,6 +10,7 @@ interface OpenAiResponse {
   usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   status?: string;
 }
+interface OpenAiModelsResponse { data?: Array<{ id?: string }> }
 
 /** OpenAI strict mode requires every property to be listed in `required` and additionalProperties=false. */
 export function toStrictSchema(schema: unknown): unknown {
@@ -31,6 +32,11 @@ export function toStrictSchema(schema: unknown): unknown {
 export class OpenAiAdapter implements AiProviderAdapter {
   readonly name = 'OPENAI' as const;
   constructor(private readonly fetchImpl?: FetchLike, private readonly baseUrl = 'https://api.openai.com') {}
+
+  async listModels(apiKey: string): Promise<string[]> {
+    const res = await httpJson<OpenAiModelsResponse>(`${this.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` } }, { provider: 'openai', fetchImpl: this.fetchImpl, timeoutMs: 20_000, retries: 0 });
+    return [...new Set((res.data ?? []).map((m) => m.id).filter((id): id is string => !!id))].sort();
+  }
 
   async generateStructured(apiKey: string, req: StructuredRequest): Promise<StructuredResponse> {
     const started = Date.now();

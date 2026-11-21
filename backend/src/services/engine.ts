@@ -6,11 +6,12 @@ import { randomToken, sha256 } from '../core/crypto.js';
 import { AppError, BadRequest, NotFound } from '../core/errors.js';
 import { audit, notifyWorkspace, publish, WORKER_ACTOR, type Actor } from '../core/audit.js';
 import { enqueue, QUEUES } from '../core/queues.js';
+import { acquireLock } from '../core/redis.js';
 import { logger } from '../core/logger.js';
 import { ProviderError } from '../../../integrations/src/http.js';
 import { OUTBOUND_HEADER, type OutgoingMessage } from '../../../integrations/src/email/types.js';
 import { renderTemplate, lintTemplate } from '../../../shared/src/template.js';
-import { DEFAULT_WINDOW, SendingWindowSchema, computeNextStepAt, isInWindow, isValidZone, nextWindowStart, startOfDayIn, type SendingWindow } from '../../../shared/src/schedule.js';
+import { DEFAULT_WINDOW, SendingWindowSchema, computeNextStepAt, isInWindow, isValidZone, nextWindowStart, startOfDayIn, startOfNextDayIn, type SendingWindow } from '../../../shared/src/schedule.js';
 import { canContact } from './compliance.js';
 import { getAuth, markNeedsReauth } from './accounts.js';
 import { readSettings, unsubscribeToken } from './workspace.js';
@@ -687,8 +688,22 @@ async function applyTracking(workspaceId: string, outboundId: string, text: stri
   return html;
 }
 
-async function sentCountSince(where: Prisma.OutboundEmailWhereInput, since: Date) {
-  return db().outboundEmail.count({ where: { ...where, status: 'SENT', sentAt: { gte: since } } });
+/** Counts accepted sends plus in-flight reservations so concurrent workers cannot overshoot a cap. */
+async function reservedSendCountSince(where: Prisma.OutboundEmailWhereInput, since: Date) {
+  return db().outboundEmail.count({ where: { ...where, OR: [{ status: 'SENT', sentAt: { gte: since } }, { status: 'SENDING', sendStartedAt: { gte: since } }] } });
+}
+
+async function maybePauseMailboxAfterProviderErrors(workspaceId: string, accountId: string, now: Date, error: string) {
+  const recent = await db().outboundEmail.findMany({
+    where: { workspaceId, emailAccountId: accountId, status: 'SENDING', lastError: { not: null }, updatedAt: { gte: new Date(now.getTime() - 15 * 60_000) } },
+    select: { attempts: true },
+  });
+  const attempts = recent.reduce((n, row) => n + row.attempts, 0);
+  if (attempts < 3) return;
+  const paused = await db().emailAccount.updateMany({ where: { id: accountId, workspaceId, status: 'CONNECTED' }, data: { status: 'PAUSED', statusReason: 'Auto-paused after repeated transient provider send errors (3 attempts within 15 minutes).', lastError: error.slice(0, 500), lastErrorAt: now } });
+  if (!paused.count) return;
+  await audit(workspaceId, WORKER_ACTOR, 'email_account.auto_paused_provider_errors', { type: 'email_account', id: accountId }, { attempts, windowMinutes: 15 });
+  await notifyWorkspace(workspaceId, 'ADMIN', { type: 'account.provider_error_pause', title: 'Mailbox paused after repeated provider errors', body: 'Review mailbox health and provider status before resuming.', link: '/mailbox-health' });
 }
 
 export type SendOutcome = 'sent' | 'reconciled' | 'deferred' | 'cancelled' | 'failed' | 'skipped';
@@ -766,17 +781,29 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     if (w.success && !isInWindow(now, w.data, w.data.timezone ?? 'UTC')) return defer(nextWindowStart(now, w.data, w.data.timezone ?? 'UTC'), 'outside mailbox sending window');
   }
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-  const accountToday = await sentCountSince({ emailAccountId: o.emailAccountId }, startOfDayIn(accWin.timezone ?? ws.timezone, now));
-  if (accountToday >= o.emailAccount.dailySendLimit) return defer(nextWindowStart(new Date(startOfDayIn(accWin.timezone ?? ws.timezone, now).getTime() + 86400_000), window, zone), 'mailbox daily limit reached');
-  const campaignToday = await sentCountSince({ campaignId: o.campaignId }, startOfDayIn(o.campaign.timezone, now));
-  if (campaignToday >= o.campaign.dailySendLimit) return defer(nextWindowStart(new Date(startOfDayIn(o.campaign.timezone, now).getTime() + 86400_000), window, zone), 'campaign daily limit reached');
   if (o.emailAccount.lastSentAt && now.getTime() - o.emailAccount.lastSentAt.getTime() < o.emailAccount.minSecondsBetweenSends * 1000) {
     return defer(new Date(o.emailAccount.lastSentAt.getTime() + o.emailAccount.minSecondsBetweenSends * 1000), 'minimum spacing between sends');
   }
 
-  // ---- Atomic claim: only one worker can move QUEUED → SENDING.
-  const claim = await db().outboundEmail.updateMany({ where: { id: o.id, status: 'QUEUED' }, data: { status: 'SENDING', sendStartedAt: now, attempts: { increment: 1 } } });
-  if (claim.count === 0) return { outcome: 'skipped', detail: 'claimed by another worker' };
+  // Serialize quota checks and SENDING reservations per workspace across worker instances.
+  const releaseQuotaLock = await acquireLock(`send-quota:${workspaceId}`, 15_000);
+  if (!releaseQuotaLock) return defer(new Date(now.getTime() + 2_000), 'workspace send quota is being checked');
+  try {
+    const accountToday = await reservedSendCountSince({ workspaceId, emailAccountId: o.emailAccountId }, startOfDayIn(accWin.timezone ?? ws.timezone, now));
+    if (accountToday >= o.emailAccount.dailySendLimit) return defer(nextWindowStart(startOfNextDayIn(accWin.timezone ?? ws.timezone, now), window, zone), 'mailbox daily limit reached');
+    const campaignToday = await reservedSendCountSince({ workspaceId, campaignId: o.campaignId }, startOfDayIn(o.campaign.timezone, now));
+    if (campaignToday >= o.campaign.dailySendLimit) return defer(nextWindowStart(startOfNextDayIn(o.campaign.timezone, now), window, zone), 'campaign daily limit reached');
+    const workspaceLimit = readSettings(ws.settings).dailyEmailSendLimit;
+    if (workspaceLimit !== null) {
+      const workspaceToday = await reservedSendCountSince({ workspaceId }, startOfDayIn(ws.timezone, now));
+      if (workspaceToday >= workspaceLimit) return defer(nextWindowStart(startOfNextDayIn(ws.timezone, now), window, zone), 'workspace daily send limit reached');
+    }
+    // The reservation is visible to the next lock holder before this lock is released.
+    const claim = await db().outboundEmail.updateMany({ where: { id: o.id, status: 'QUEUED' }, data: { status: 'SENDING', sendStartedAt: now, attempts: { increment: 1 } } });
+    if (claim.count === 0) return { outcome: 'skipped', detail: 'claimed by another worker' };
+  } finally {
+    await releaseQuotaLock();
+  }
   await db().emailAccount.update({ where: { id: o.emailAccountId }, data: { lastSentAt: now } });
 
   // ---- Build message (threading + compliance headers)
@@ -812,6 +839,7 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   } catch (e) {
     const err = e as ProviderError;
     const status = err instanceof ProviderError ? err.status : undefined;
+    await db().emailAccount.update({ where: { id: o.emailAccountId }, data: { lastError: (err as Error).message.slice(0, 500), lastErrorAt: now } }).catch(() => undefined);
     if (status === 401 || (err instanceof Error && /invalid_grant/.test(err.message))) {
       await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'QUEUED', lastError: err.message.slice(0, 500) } });
       await markNeedsReauth(workspaceId, o.emailAccountId, err.message);
@@ -825,6 +853,7 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     }
     // Ambiguous/transient (network, 5xx, 429): leave SENDING so the retry reconciles before resending.
     await db().outboundEmail.update({ where: { id: o.id }, data: { lastError: (err as Error).message.slice(0, 500), sendStartedAt: new Date(now.getTime() - 3 * 60_000) } });
+    if (status === undefined || status === 408 || status === 429 || status >= 500) await maybePauseMailboxAfterProviderErrors(workspaceId, o.emailAccountId, now, (err as Error).message);
     throw e;
   }
 }

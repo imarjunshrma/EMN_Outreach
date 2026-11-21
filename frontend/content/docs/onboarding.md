@@ -11,7 +11,7 @@ The setup checklist appears after sign-up and stays available from **Organizatio
 | Organization details | The first workspace has a postal address and time zone | Yes |
 | Business profile | Business knowledge or offer facts are written in AI Studio | Yes |
 | Invite your team | At least one other member has joined | No |
-| AI provider | An OpenAI or Anthropic key is enabled | No |
+| AI provider | A supported hosted or local text model is enabled | No |
 | Connect a mailbox | At least one mailbox is connected | No |
 | Sending domain & DNS | A domain is added and its records verified | No |
 | Import leads | The workspace has at least one lead | No |

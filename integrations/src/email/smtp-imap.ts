@@ -5,15 +5,15 @@ import { buildMime, parseRawMessage } from './mime.js';
 import {
   OUTBOUND_HEADER,
   type AuthHandle, type EmailProvider, type MailboxProfile, type NormalizedMessage, type OutgoingMessage,
-  type SentResult, type SmtpImapConfig, type SyncResult,
+  type ConnectionCheck, type SentResult, type SmtpImapConfig, type SyncResult,
 } from './types.js';
 
 // SMTP (send) + IMAP (sync) adapter for providers that permit app-password / password access.
 // Use only where the mailbox provider's terms and security policy allow it.
 
-function creds(auth: AuthHandle): { config: SmtpImapConfig; password: string; email: string } {
+function creds(auth: AuthHandle): { config: SmtpImapConfig; password: string; smtpPassword: string; imapPassword: string; email: string } {
   if (auth.kind !== 'password') throw new ProviderError('smtp', 'password credentials required');
-  return auth;
+  return { ...auth, smtpPassword: auth.smtpPassword ?? auth.password, imapPassword: auth.imapPassword ?? auth.password };
 }
 
 /**
@@ -25,10 +25,17 @@ function creds(auth: AuthHandle): { config: SmtpImapConfig; password: string; em
  */
 export function smtpError(err: Error & { responseCode?: number; code?: string }): ProviderError {
   const c = err.responseCode;
-  if (err.code === 'EAUTH' || c === 530 || c === 534 || c === 535) return new ProviderError('smtp', `SMTP authentication failed: ${err.message}`, 401, false);
-  if (c && c >= 500) return new ProviderError('smtp', `SMTP permanent rejection ${c}: ${err.message}`, 400, false);
-  if (c && c >= 400) return new ProviderError('smtp', `SMTP temporary failure ${c}: ${err.message}`, 503, true);
-  return new ProviderError('smtp', err.message, undefined, true);
+  if (err.code === 'EAUTH' || c === 530 || c === 534 || c === 535) return new ProviderError('smtp', 'SMTP authentication failed', 401, false);
+  if (c && c >= 500) return new ProviderError('smtp', `SMTP provider rejected the message (${c})`, 400, false);
+  if (c && c >= 400) return new ProviderError('smtp', `SMTP provider temporarily unavailable (${c})`, 503, true);
+  return new ProviderError('smtp', 'SMTP connection failed or timed out', undefined, true);
+}
+
+function imapError(err: unknown): ProviderError {
+  const e = err as { code?: string; responseText?: string; message?: string };
+  const hint = `${e?.code ?? ''} ${e?.responseText ?? ''} ${e?.message ?? ''}`;
+  if (/auth|login|credential|password|invalid.*user|not authenticated/i.test(hint)) return new ProviderError('imap', 'IMAP authentication failed', 401, false);
+  return new ProviderError('imap', 'IMAP connection or synchronization failed', undefined, true);
 }
 
 export interface ImapCursor { [folder: string]: { uidValidity: string; lastUid: number } }
@@ -37,24 +44,39 @@ export class SmtpImapProvider implements EmailProvider {
   readonly name = 'SMTP_IMAP' as const;
 
   private imap(auth: AuthHandle) {
-    const { config, password } = creds(auth);
-    return new ImapFlow({ host: config.imapHost, port: config.imapPort, secure: config.imapSecure, auth: { user: config.username, pass: password }, logger: false });
+    const { config, imapPassword } = creds(auth);
+    return new ImapFlow({ host: config.imapHost, port: config.imapPort, secure: config.imapSecure, auth: { user: config.imapUsername ?? config.username, pass: imapPassword }, logger: false });
   }
 
   async testConnection(auth: AuthHandle): Promise<MailboxProfile> {
-    const { config, password, email } = creds(auth);
-    const transport = nodemailer.createTransport({ host: config.smtpHost, port: config.smtpPort, secure: config.smtpSecure, auth: { user: config.username, pass: password } });
-    await transport.verify().catch((e: Error) => { throw new ProviderError('smtp', `SMTP login failed: ${e.message}`); });
+    const { config, email } = creds(auth);
+    const check = await this.testConnectionDetailed(auth);
+    if (!check.smtp.ok || !check.imap.ok) {
+      const failures = [!check.smtp.ok && `SMTP: ${check.smtp.error}`, !check.imap.ok && `IMAP: ${check.imap.error}`].filter(Boolean).join('; ');
+      throw new ProviderError('smtp-imap', failures, 400, false);
+    }
+    return { email: email.toLowerCase(), providerAccountId: `${config.imapUsername ?? config.username}@${config.imapHost}` };
+  }
+
+  async testConnectionDetailed(auth: AuthHandle): Promise<ConnectionCheck> {
+    const { config, smtpPassword } = creds(auth);
+    let smtp: ConnectionCheck['smtp'];
+    const transport = nodemailer.createTransport({ host: config.smtpHost, port: config.smtpPort, secure: config.smtpSecure, auth: { user: config.smtpUsername ?? config.username, pass: smtpPassword } });
+    try { await transport.verify(); smtp = { ok: true, error: null }; }
+    catch (e) { smtp = { ok: false, error: smtpError(e as Error & { responseCode?: number; code?: string }).message }; }
+
+    let imap: ConnectionCheck['imap'];
     const client = this.imap(auth);
-    await client.connect().catch((e: Error) => { throw new ProviderError('imap', `IMAP login failed: ${e.message}`); });
-    await client.logout();
-    return { email: email.toLowerCase(), providerAccountId: `${config.username}@${config.imapHost}` };
+    try { await client.connect(); imap = { ok: true, error: null }; }
+    catch (e) { imap = { ok: false, error: imapError(e).message }; }
+    finally { await client.logout().catch(() => undefined); }
+    return { smtp, imap };
   }
 
   async send(auth: AuthHandle, msg: OutgoingMessage): Promise<SentResult> {
-    const { config, password } = creds(auth);
+    const { config, smtpPassword } = creds(auth);
     const raw = await buildMime(msg);
-    const transport = nodemailer.createTransport({ host: config.smtpHost, port: config.smtpPort, secure: config.smtpSecure, auth: { user: config.username, pass: password } });
+    const transport = nodemailer.createTransport({ host: config.smtpHost, port: config.smtpPort, secure: config.smtpSecure, auth: { user: config.smtpUsername ?? config.username, pass: smtpPassword } });
     try {
       await transport.sendMail({ envelope: { from: msg.from.address, to: [msg.to] }, raw });
     } catch (e) {
@@ -65,6 +87,8 @@ export class SmtpImapProvider implements EmailProvider {
       try {
         await client.connect();
         await client.append(config.sentFolder ?? 'Sent', raw, ['\\Seen']);
+      } catch (e) {
+        throw imapError(e);
       } finally { await client.logout().catch(() => undefined); }
     }
     return { providerMessageId: msg.messageId, providerThreadId: msg.references?.[0] ?? msg.inReplyTo ?? msg.messageId, internetMessageId: msg.messageId };
@@ -73,7 +97,7 @@ export class SmtpImapProvider implements EmailProvider {
   async findSentByOutboundId(auth: AuthHandle, q: { outboundId: string; to: string; since: Date }): Promise<SentResult | null> {
     const { config } = creds(auth);
     const client = this.imap(auth);
-    await client.connect();
+    try { await client.connect(); } catch (e) { throw imapError(e); }
     try {
       const lock = await client.getMailboxLock(config.sentFolder ?? 'Sent');
       try {
@@ -83,7 +107,8 @@ export class SmtpImapProvider implements EmailProvider {
         const mid = msg && msg.envelope?.messageId ? msg.envelope.messageId : '';
         return { providerMessageId: mid, providerThreadId: mid, internetMessageId: mid };
       } finally { lock.release(); }
-    } finally { await client.logout().catch(() => undefined); }
+    } catch (e) { throw imapError(e); }
+    finally { await client.logout().catch(() => undefined); }
   }
 
   async sync(auth: AuthHandle, cursor: string | null, since: Date): Promise<SyncResult> {
@@ -91,12 +116,23 @@ export class SmtpImapProvider implements EmailProvider {
     const cur: ImapCursor = cursor ? JSON.parse(cursor) : {};
     const folders = ['INBOX', config.sentFolder ?? 'Sent'];
     const client = this.imap(auth);
-    await client.connect();
+    try { await client.connect(); } catch (e) { throw imapError(e); }
     const messages: NormalizedMessage[] = [];
     try {
-      for (const folder of folders) {
+      for (const configuredFolder of folders) {
+        let folder = configuredFolder;
         let lock;
-        try { lock = await client.getMailboxLock(folder); } catch { continue; }
+        try { lock = await client.getMailboxLock(folder); } catch (e) {
+          // INBOX is required for reply tracking. The sent folder is optional;
+          // discover providers' special-use Sent folder if the configured name is absent.
+          if (folder === 'INBOX') throw e;
+          try {
+            const sent = (await client.list()).find((f) => f.specialUse?.toLowerCase() === '\\sent');
+            if (!sent || sent.path === folder) continue;
+            folder = sent.path;
+            lock = await client.getMailboxLock(folder);
+          } catch { continue; }
+        }
         try {
           const mailbox = client.mailbox;
           const uidValidity = mailbox && typeof mailbox === 'object' ? String(mailbox.uidValidity) : '0';
@@ -111,7 +147,8 @@ export class SmtpImapProvider implements EmailProvider {
           cur[folder] = { uidValidity, lastUid };
         } finally { lock.release(); }
       }
-    } finally { await client.logout().catch(() => undefined); }
+    } catch (e) { throw imapError(e); }
+    finally { await client.logout().catch(() => undefined); }
     return { messages, nextCursor: JSON.stringify(cur) };
   }
 }

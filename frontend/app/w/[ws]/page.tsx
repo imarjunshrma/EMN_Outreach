@@ -26,7 +26,7 @@ export default function Dashboard() {
         const steps = [
           { ok: d.setup.postalAddress, label: 'Add your sender name and postal address', href: `${b}/settings/general` },
           { ok: d.setup.mailbox, label: 'Connect a sending mailbox', href: `${b}/email-accounts` },
-          { ok: d.setup.aiProvider, label: 'Add an OpenAI or Claude API key', href: `${b}/settings/ai` },
+          { ok: d.setup.aiProvider, label: 'Connect an AI model provider', href: `${b}/settings/ai` },
           { ok: d.setup.icp, label: 'Describe your ideal customer', href: `${b}/icps` },
           { ok: d.setup.leads, label: 'Import or discover prospects', href: `${b}/leads/import` },
         ];

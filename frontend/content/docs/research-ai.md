@@ -26,4 +26,4 @@ description: How the research brief is built, how AI Studio controls the writing
 
 ## Providers and cost
 
-You bring your own OpenAI or Anthropic key, set under **Settings → AI providers**. Costs are estimated from each provider's published token prices and counted toward both your workspace budget and your plan's monthly AI allowance. When a budget is used up, AI tasks stop with `AI_BUDGET_EXCEEDED` until the next month or until the budget is raised; nothing is sent half-written.
+You connect a supported hosted or local text model under **Settings → AI providers**. Costs are estimated from prices you configure and counted toward both your workspace budget and your plan's monthly AI allowance. When a budget is used up, AI tasks stop with `AI_BUDGET_EXCEEDED` until the next month or until the budget is raised; nothing is sent half-written.

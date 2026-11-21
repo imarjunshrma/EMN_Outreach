@@ -39,7 +39,7 @@ export async function tenantState(organizationId: string, now = new Date()): Pro
     if (sub.graceUntil && sub.graceUntil > now) return { ...base, mode: 'saas', operational: true, reason: `Payment failed — update your payment method by ${sub.graceUntil.toISOString().slice(0, 10)}`, entitlements: ent, source: 'grace' };
     return { ...base, mode: 'saas', operational: false, reason: 'Payment overdue — subscription suspended', entitlements: NONE, source: 'none' };
   }
-  return { ...base, mode: 'saas', operational: false, reason: sub.status === 'CANCELED' ? 'Subscription cancelled' : 'Subscription incomplete — finish checkout', entitlements: NONE, source: 'none' };
+  return { ...base, mode: 'saas', operational: false, reason: sub.status === 'CANCELED' ? 'Subscription cancelled' : !sub.providerSubscriptionId && !sub.trialEndsAt ? 'Your free trial has already been used — choose a plan to start' : 'Subscription incomplete — finish checkout', entitlements: NONE, source: 'none' };
 }
 
 export const tenantStateForWorkspace = async (workspaceId: string) => tenantState(await orgIdOf(workspaceId));
@@ -87,6 +87,15 @@ export async function assertMetered(organizationId: string, metric: keyof typeof
   const m = METERED[metric];
   const max = (st.entitlements[m.field] as number) * (m.scale ?? 1);
   if (max >= 1e9 * (m.scale ?? 1)) return st;
+  // Annual pooling (plan setting, yearly billing only): 12× the monthly allowance over the paid year.
+  const sub = st.entitlements.allowancePeriod === 'annual_pooled' ? await db().subscription.findUnique({ where: { organizationId }, select: { interval: true, currentPeriodStart: true, createdAt: true } }) : null;
+  if (sub?.interval === 'year') {
+    const since = sub.currentPeriodStart ?? sub.createdAt;
+    const monthStart = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), 1));
+    const used = Number((await db().usageCounter.aggregate({ where: { organizationId, metric, periodStart: { gte: monthStart } }, _sum: { value: true } }))._sum.value ?? 0n);
+    if (used + planned > max * 12) throw new AppError('QUOTA_EXCEEDED', `Yearly allowance reached: your plan includes ${m.scale ? ((max * 12) / m.scale).toFixed(2) : max * 12} ${m.label} per year`, 402, { metric, limit: max * 12, used, period: 'year' });
+    return st;
+  }
   const used = (await currentUsage(organizationId)).metered[metric as keyof Awaited<ReturnType<typeof currentUsage>>['metered']] ?? 0;
   if (used + planned > max) throw new AppError('QUOTA_EXCEEDED', `Monthly limit reached: your plan includes ${m.scale ? (max / m.scale).toFixed(2) : max} ${m.label}`, 402, { metric, limit: max, used });
   return st;

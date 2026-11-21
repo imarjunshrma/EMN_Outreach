@@ -10,7 +10,7 @@ Every job payload carries `workspaceId` (UUID-validated); `processorFor()` recor
 | `outbound-prepare` | `outbound.prepare` | 4 | Render, variant, review gate, fact-check gate |
 | `send` | `outbound.send` | `WORKER_CONCURRENCY_SEND` (4) | Atomic claim, gates re-checked, reconciliation on ambiguity |
 | `reply-send` | `reply.send` | 2 | Replies from the original mailbox, idempotency key |
-| `mailbox-sync` | `sync.account`, `sync.pollAll`, `graph.renew` | 4 | Poll every 120 s (`mailbox-poll`), Graph subscription renewal every 12 h |
+| `mailbox-sync` | `sync.account`, `sync.pollAll`, `graph.renew` | 4 | Poll every 120 s (`mailbox-poll`), Graph subscription renewal every 12 h; per-mailbox sync lock, cursor commits only after ingestion succeeds |
 | `ai` | `ai.classifyReply`, `ai.qualify` | 4 | |
 | `research` | `research.lead`, `research.company` | 2 | SafeFetcher + optional search |
 | `import` | `import.csv` | 1 | Streams the stored CSV, progress via SSE |

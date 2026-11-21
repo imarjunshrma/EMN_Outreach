@@ -1,5 +1,5 @@
 import {
-  BarChart3, Bell, BookOpen, Bot, Building2, ClipboardCheck, Cog, CreditCard, Cpu, Database, FileBarChart, FileSearch, Globe, HeartPulse, Inbox, KanbanSquare,
+  BarChart3, Bell, BookOpen, Bot, BrainCircuit, Building2, ClipboardCheck, Cog, CreditCard, Cpu, Database, FileBarChart, FileSearch, Globe, HeartPulse, Inbox, KanbanSquare,
   KeyRound, LayoutDashboard, Library, ListTodo, Mail, MailCheck, MessageSquareReply, PenLine, Plug, Scale, ScrollText, Send, Settings, ShieldBan, ShieldCheck,
   SlidersHorizontal, Sparkles, Target, Telescope, Upload, UserCircle, Users, UsersRound, Webhook, Workflow, Zap, AlertTriangle, type LucideIcon,
 } from 'lucide-react';
@@ -30,8 +30,9 @@ export const NAV: NavGroup[] = [
     { href: '/inbox', label: 'Inbox', icon: Inbox, keywords: 'replies unibox' },
     { href: '/reply-assistant', label: 'Reply assistant', icon: MessageSquareReply, keywords: 'drafts templates auto' },
   ] },
-  { group: 'AI Studio', items: [
+  { group: 'AI Outreach Brain', items: [
     { href: '/ai-studio', label: 'Overview', icon: Sparkles },
+    { href: '/ai-studio/training', label: 'Outreach training', icon: BrainCircuit, keywords: 'strategy rules examples learning feedback' },
     { href: '/ai-studio/knowledge', label: 'Business knowledge', icon: BookOpen },
     { href: '/ai-studio/writing', label: 'Writing rules', icon: SlidersHorizontal },
     { href: '/ai-studio/research', label: 'Research rules', icon: FileSearch },

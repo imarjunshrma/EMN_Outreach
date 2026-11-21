@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
-import { Button, Card, Field, Input, Notice, PageHeader, QueryView, Select, Textarea } from '@/components/ui';
+import { Button, Card, Field, Input, Notice, PageHeader, QueryView, Select, Textarea, TimezoneSelect } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export default function General() {
@@ -20,9 +20,12 @@ export default function General() {
           <div className="grid gap-4 lg:grid-cols-2">
             <Card title="Workspace & sender identity">
               <Field label="Workspace name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-              <Field label="Default time zone (IANA)"><Input value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} placeholder="Asia/Kolkata" /></Field>
+              <Field label="Default time zone (IANA)"><TimezoneSelect value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} /></Field>
               <Field label="Legal sender name" hint="Shown in every email footer"><Input value={f.senderLegalName} onChange={(e) => setF({ ...f, senderLegalName: e.target.value })} placeholder="Elite Media Networks" /></Field>
               <Field label="Physical postal address" hint="Required in the footer of commercial emails in several countries"><Textarea rows={3} value={f.postalAddress} onChange={(e) => setF({ ...f, postalAddress: e.target.value })} /></Field>
+              <Field label="Workspace campaign sends per day" hint="Blank means no workspace cap. This stacks with each mailbox and campaign limit; it counts campaign sends only."><Input type="number" min={1} max={100000} value={s.dailyEmailSendLimit ?? ''} onChange={(e) => setS('dailyEmailSendLimit', e.target.value === '' ? null : Number(e.target.value))} /></Field>
+              <Field label="Auto-pause mailbox at hard-bounce rate (%)" hint="Uses the last 30 days after at least the minimum number of sent messages. Blank disables this mailbox-level rule; campaign protections still apply."><Input type="number" min={0.5} max={50} step={0.5} value={s.mailboxAutoPauseBounceRatePct ?? ''} onChange={(e) => setS('mailboxAutoPauseBounceRatePct', e.target.value === '' ? null : Number(e.target.value))} /></Field>
+              <Field label="Minimum sent messages before mailbox bounce check"><Input type="number" min={5} max={10000} value={s.mailboxAutoPauseMinSends} onChange={(e) => setS('mailboxAutoPauseMinSends', Number(e.target.value))} /></Field>
             </Card>
             <Card title="Providers in use">
               <Field label="Lead data provider"><Select value={s.leadProvider} onChange={(e) => setS('leadProvider', e.target.value)} options={[{ value: 'none', label: 'None (CSV import only)' }, { value: 'apollo', label: 'Apollo.io' }]} /></Field>

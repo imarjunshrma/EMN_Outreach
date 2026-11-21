@@ -196,7 +196,7 @@ async function runAction(workspaceId: string, b: Extract<Block, { kind: 'action'
       const leads = await db().lead.findMany({ where, take: 50_000, select: { email: true, firstName: true, lastName: true, title: true, country: true, status: true, tags: true } });
       const guard = (v: unknown) => { const s = String(v ?? ''); return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s; };
       const csv = stringify(leads.map((l) => [l.email, l.firstName, l.lastName, l.title, l.country, l.status, l.tags.join('|')].map(guard)), { header: true, columns: ['email', 'firstName', 'lastName', 'title', 'country', 'status', 'tags'] });
-      const key = await store().put(workspaceId, 'exports', Buffer.from(csv), 'csv');
+      const key = await (await import('./storage-accounting.js')).putTracked(workspaceId, 'exports', Buffer.from(csv), 'csv', { enforce: true });
       await notifyWorkspace(workspaceId, 'MANAGER', { type: 'export.ready', title: `Workflow export ready (${leads.length} leads)`, link: `/settings/privacy?export=${encodeURIComponent(key)}` });
       return `exported ${leads.length} leads`;
     }

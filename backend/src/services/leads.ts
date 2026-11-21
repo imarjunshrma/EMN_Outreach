@@ -346,7 +346,7 @@ export async function uploadImport(workspaceId: string, file: { originalname: st
   }
   if (rows.length === 0) throw BadRequest('VALIDATION_FAILED', 'CSV is empty');
   const headers = rows[0].map((h) => h.trim());
-  const key = await store().put(workspaceId, 'imports', file.buffer, 'csv');
+  const key = await (await import('./storage-accounting.js')).putTracked(workspaceId, 'imports', file.buffer, 'csv', { enforce: true });
   const guess: Record<string, string> = {};
   for (const h of headers) {
     const n = h.toLowerCase().replace(/[^a-z]/g, '');

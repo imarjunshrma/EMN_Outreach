@@ -94,6 +94,8 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'maintenance.taskReminders': async () => crm.sendTaskReminders(),
     'tenant.sync': async () => tenancy.syncTenantStatuses(),
     'tenant.purge': async () => tenancy.purgeDueTenants(),
+    'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
+    'billing.reconcile': async () => (await import('../../backend/src/services/billing.js')).reconcileSubscriptions(),
   },
   [QUEUES.automation]: {
     'workflow.run': async (j) => workflows.runWorkflow(s(j.data.workspaceId), s(j.data.workflowId), s(j.data.eventKey), (j.data.payload as Record<string, unknown>) ?? {}, !!j.data.testMode),

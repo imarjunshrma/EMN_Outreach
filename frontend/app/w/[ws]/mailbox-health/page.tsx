@@ -15,11 +15,14 @@ export default function MailboxHealth() {
       <PageHeader title="Mailbox health" subtitle="Connection, authentication, sync and sending signals for every mailbox (last 30 days). Only measured data is shown — inbox placement is not estimated." />
       <QueryView q={q} isEmpty={(d) => d.length === 0} empty={<Empty title="No mailboxes connected" action={<Link className="underline" href={`/w/${ws}/email-accounts`}>Connect a mailbox</Link>} />}>
         {(rows) => (
-          <div className="card p-2"><Table head={['Mailbox', 'Status', 'Auth', 'Last sync', 'Last sent', 'Last received', 'Sent today / limit', 'Sent 30d', 'Bounce %', 'Complaints', 'Domain', 'Last error']}>
+          <div className="card p-2"><Table head={['Mailbox', 'Health', 'Status', 'SMTP', 'IMAP', 'Auth', 'Last sync', 'Last sent', 'Last received', 'Sent today / limit', 'Sent 30d', 'Bounce %', 'Complaints', 'Domain', 'Last error']}>
             {rows.map((a) => (
               <tr key={a.id}>
                 <td className="td text-xs">{a.emailAddress}<div className="text-slate-400">{a.provider}</div></td>
+                <td className="td"><Badge color={a.health.status === 'Healthy' ? 'green' : a.health.status === 'Warning' || a.health.status === 'Disconnected' ? 'red' : a.health.status === 'Paused' ? 'gray' : 'yellow'}>{a.health.status}</Badge>{a.health.reasons.length > 0 && <div className="mt-1 max-w-xs text-xs text-slate-500" title={a.health.reasons.join('\n')}>{a.health.reasons[0]}</div>}</td>
                 <td className="td"><Badge>{a.status}</Badge></td>
+                <td className="td text-xs">{a.provider === 'SMTP_IMAP' ? <Badge color={a.smtpConnection?.ok ? 'green' : a.smtpConnection ? 'red' : 'gray'}>{a.smtpConnection?.ok ? 'OK' : a.smtpConnection ? 'Error' : 'Not tested'}</Badge> : 'OAuth'}</td>
+                <td className="td text-xs">{a.provider === 'SMTP_IMAP' ? <Badge color={a.imapConnection?.ok ? 'green' : a.imapConnection ? 'red' : 'gray'}>{a.imapConnection?.ok ? 'OK' : a.imapConnection ? 'Error' : 'Not tested'}</Badge> : 'OAuth'}</td>
                 <td className="td text-xs">{a.authStatus}</td>
                 <td className="td text-xs">{fmtDate(a.lastSyncedAt)}</td>
                 <td className="td text-xs">{fmtDate(a.lastSentAt)}</td>
@@ -35,7 +38,7 @@ export default function MailboxHealth() {
           </Table></div>
         )}
       </QueryView>
-      <div className="mt-4"><Notice>Daily limits come from your mailbox settings — Google and Microsoft do not expose remaining sending quota. Keep volumes conservative; this platform does not rotate mailboxes or run warm-up networks.</Notice></div>
+      <div className="mt-4"><Notice>Health summarizes observed connection, DNS and sending signals only. It does not measure spam placement or guarantee deliverability. Daily limits come from mailbox settings; Google and Microsoft do not expose remaining sending quota. This platform does not generate artificial engagement or run a reputation warm-up network.</Notice></div>
       <h2 className="mb-2 mt-6 text-sm font-semibold">Provider automation status</h2>
       <QueryView q={registry}>{(rows) => <div className="card p-2"><Table head={['Provider', 'Kind', 'DNS write', 'Mailbox create', 'Mailbox status', 'Notes']}>{rows.map((p) => <tr key={p.id}><td className="td">{p.name}</td><td className="td text-xs">{p.kind.replace(/_/g, ' ')}</td><td className="td"><Badge color={p.capabilities.dnsWrite === 'implemented' ? 'green' : 'gray'}>{p.capabilities.dnsWrite}</Badge></td><td className="td"><Badge color={p.capabilities.mailboxCreate === 'implemented' ? 'green' : 'gray'}>{p.capabilities.mailboxCreate}</Badge></td><td className="td"><Badge color={p.capabilities.mailboxStatus === 'implemented' ? 'green' : 'gray'}>{p.capabilities.mailboxStatus}</Badge></td><td className="td text-xs">{p.notes}</td></tr>)}</Table></div>}</QueryView>
     </>

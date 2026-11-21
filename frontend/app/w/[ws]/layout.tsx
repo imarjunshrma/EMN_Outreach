@@ -32,6 +32,13 @@ function SetupReminder({ orgId }: { orgId: string }) {
   return <div className="flex items-center gap-3 bg-brand-50 px-4 py-2 text-sm text-brand-900 lg:px-8" data-testid="setup-reminder"><span className="flex-1">{left} required setup step{left === 1 ? '' : 's'} left before your first campaign.</span><Link className="font-semibold underline" href={`/onboarding/${orgId}`}>Open the checklist</Link><button className="text-brand-700 hover:text-ink" onClick={() => { try { localStorage.setItem(`emn-onboarding-${orgId}`, 'later'); } catch { /* ignore */ } setHidden(true); }} aria-label="Hide setup reminder"><X className="h-4 w-4" /></button></div>;
 }
 
+/** Shown to EMN staff while they are inside a customer's workspace through a support grant. */
+function SupportBanner({ ws }: { ws: string }) {
+  const q = useQuery({ queryKey: ['ws-access', ws], queryFn: () => api<{ via: string; support: { expiresAt: string; reason: string } | null }>(`/w/${ws}/access`), staleTime: 60_000 });
+  if (q.data?.via !== 'support') return null;
+  return <div className="bg-red-700 px-4 py-2 text-sm font-semibold text-white lg:px-8" role="status" data-testid="support-banner">Support access — read-only, recorded in the customer’s audit log. Ends {q.data.support ? new Date(q.data.support.expiresAt).toLocaleTimeString() : 'soon'}. Reason: {q.data.support?.reason}</div>;
+}
+
 function useCollapsed() {
   const [c, setC] = useState<Record<string, boolean>>({});
   useEffect(() => { try { setC(JSON.parse(localStorage.getItem('emn-nav') ?? '{}')); } catch { /* ignore */ } }, []);
@@ -78,6 +85,8 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
   const [collapsed, toggle] = useCollapsed();
   useRealtime(ws);
   const me = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/auth/me') });
+  const inList = !!me.data?.workspaces.some((w) => w.id === ws);
+  const access = useQuery({ queryKey: ['ws-access', ws], queryFn: () => api<{ via: string; role: string; workspaceName: string; organizationId: string; organizationName: string; orgStatus: string; support: { expiresAt: string; reason: string } | null }>(`/w/${ws}/access`), enabled: !!me.data && !inList, retry: false });
   const notes = useWsQuery<{ unread: number }>('/notifications', { refetchInterval: 60_000 });
   const bill = useWsQuery<{ mode: string; active: boolean; reason: string | null }>('/billing', { refetchInterval: 300_000 });
   useEffect(() => {
@@ -88,7 +97,9 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
   useEffect(() => { try { localStorage.setItem('emn-last-ws', ws); } catch { /* ignore */ } }, [ws]);
   if (me.isLoading) return <Loading />;
   if (me.error || !me.data) return <Loading label="Redirecting to sign in…" />;
-  const current = me.data.workspaces.find((w) => w.id === ws);
+  // Support staff reach a customer's workspace through a grant, so it is not in their own workspace list.
+  const current = me.data.workspaces.find((w) => w.id === ws) ?? (access.data ? { id: ws, name: access.data.workspaceName, role: access.data.role, organizationId: access.data.organizationId, organizationName: access.data.organizationName, organizationStatus: access.data.orgStatus } : undefined);
+  if (!current && access.isLoading) return <Loading />;
   if (!current) return <div className="p-8 text-sm">Workspace not found or you are not a member. <Link className="underline" href="/select-workspace">Choose a workspace</Link></div>;
   const base = `/w/${ws}`;
   const groups = visibleNav(current.role);
@@ -164,6 +175,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
           </Link>
           <UserMenu me={me.data} base={base} current={current} />
         </header>
+        <SupportBanner ws={ws} />
         {(me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'OWNER' || me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'ADMIN') && <SetupReminder orgId={current.organizationId} />}
         {me.data.user.emailVerified === false && bill.data?.mode === 'saas' && <div className="bg-brand-50 px-4 py-2 text-sm text-brand-900 lg:px-8">Confirm your email address to invite teammates and start campaigns. <ResendVerification /></div>}
         {bill.data?.mode === 'saas' && (!bill.data.active || bill.data.reason) && <div data-testid="billing-banner" className={`px-4 py-2 text-sm lg:px-8 ${bill.data.active ? 'bg-amber-50 text-amber-900' : 'bg-red-50 text-red-800'}`}>{bill.data.reason}. <Link className="font-semibold underline" href={`${base}/billing`}>Open plan & billing</Link></div>}

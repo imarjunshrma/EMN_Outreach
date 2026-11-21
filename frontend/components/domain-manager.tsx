@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fmtDay } from '@/lib/format';
-import { Badge, Button, Card, Checkbox, ConfirmButton, Field, Input, Notice, Table } from '@/components/ui';
+import { Badge, Button, Card, Checkbox, ConfirmButton, Field, Input, Notice, Select, Table } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /** Ownership verification, propagation check, recommended records (+ one-click apply via Cloudflare) and renewal tracking. */
@@ -18,6 +18,8 @@ export function DomainManager({ domain: d }: { domain: any }) {
   const propagate = useWsMutation(() => ({ path: `/domains/${d.id}/propagation`, body: {} }), { onSuccess: (r: any) => setProp(r) });
   const apply = useWsMutation<{ type: string; name: string; content: string }>((b) => ({ path: `/domains/${d.id}/dns-records`, body: b }), { success: 'Record created at Cloudflare' });
   const [ren, setRen] = useState({ registrar: d.registrar ?? '', expiresAt: d.expiresAt ? String(d.expiresAt).slice(0, 10) : '', autoRenew: !!d.autoRenew });
+  const registrarOptions = ['Cloudflare', 'GoDaddy', 'Namecheap', 'Squarespace Domains', 'Porkbun', 'Amazon Route 53', 'Other'];
+  const [customRegistrar, setCustomRegistrar] = useState(!!d.registrar && !registrarOptions.slice(0, -1).includes(d.registrar));
   const saveRen = useWsMutation(() => ({ path: `/domains/${d.id}/renewal`, method: 'PATCH', body: { registrar: ren.registrar || null, expiresAt: ren.expiresAt || null, autoRenew: ren.autoRenew } }), { success: 'Renewal details saved' });
   return (
     <div className="mb-4 grid gap-4 lg:grid-cols-3">
@@ -38,7 +40,7 @@ export function DomainManager({ domain: d }: { domain: any }) {
         ) : <p className="text-sm text-slate-600">Compare what Cloudflare, Google and Quad9 resolvers see.</p>}
       </Card>
       <Card title="Registrar & renewal">
-        <Field label="Registrar"><Input value={ren.registrar} onChange={(e) => setRen({ ...ren, registrar: e.target.value })} placeholder="Cloudflare / GoDaddy / Namecheap…" /></Field>
+        <Field label="Registrar"><Select value={customRegistrar ? '__other__' : ren.registrar} onChange={(e) => { if (e.target.value === '__other__') { setCustomRegistrar(true); if (!customRegistrar) setRen({ ...ren, registrar: '' }); } else { setCustomRegistrar(false); setRen({ ...ren, registrar: e.target.value }); } }} options={[{ value: '', label: 'Choose a registrar…' }, ...registrarOptions.slice(0, -1).map((x) => ({ value: x, label: x })), { value: '__other__', label: 'Other' }]} />{customRegistrar && <Input className="mt-2" value={ren.registrar} onChange={(e) => setRen({ ...ren, registrar: e.target.value })} placeholder="Enter registrar name" />}</Field>
         <Field label="Expires on"><Input type="date" value={ren.expiresAt} onChange={(e) => setRen({ ...ren, expiresAt: e.target.value })} /></Field>
         <Checkbox label="Auto-renew is on at the registrar" checked={ren.autoRenew} onChange={(v) => setRen({ ...ren, autoRenew: v })} />
         <Button className="mt-2" variant="secondary" loading={saveRen.isPending} onClick={() => saveRen.mutate()}>Save</Button>

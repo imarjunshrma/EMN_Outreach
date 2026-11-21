@@ -1,7 +1,9 @@
 import { ZeroBounceProvider, NeverBounceProvider, HunterFinder, CloudflareDns, type EmailFinder, type DnsProviderAdapter } from '../../../integrations/src/providers/extra.js';
 import { AnthropicAdapter } from '../../../integrations/src/ai/anthropic.js';
 import { OpenAiAdapter } from '../../../integrations/src/ai/openai.js';
-import type { AiProviderAdapter } from '../../../integrations/src/ai/types.js';
+import { GoogleAiAdapter } from '../../../integrations/src/ai/google.js';
+import { AI_PROVIDER_BASE_URLS, OpenAiCompatibleAdapter } from '../../../integrations/src/ai/openai-compatible.js';
+import { AI_PROVIDER_NAMES, type AiProviderAdapter, type AiProviderName } from '../../../integrations/src/ai/types.js';
 import { GmailProvider, GoogleOAuthClient } from '../../../integrations/src/email/gmail.js';
 import { MicrosoftGraphProvider, MicrosoftOAuthClient } from '../../../integrations/src/email/microsoft.js';
 import { SmtpImapProvider } from '../../../integrations/src/email/smtp-imap.js';
@@ -20,7 +22,7 @@ export interface Adapters {
   email: Record<EmailProviderName, EmailProvider>;
   oauth: Partial<Record<'GMAIL' | 'MICROSOFT', OAuthClient>>;
   graphSubscriptions: ChangeSubscriptionProvider | null;
-  ai: Record<'OPENAI' | 'ANTHROPIC', AiProviderAdapter>;
+  ai: Partial<Record<AiProviderName, AiProviderAdapter>>;
   leadData: Record<string, LeadDataProvider>;
   verifiers: Record<string, EmailVerifier>;
   finders: Record<string, EmailFinder>;
@@ -40,7 +42,12 @@ function build(): Adapters {
     email: { GMAIL: new GmailProvider(), MICROSOFT: graph, SMTP_IMAP: new SmtpImapProvider() },
     oauth,
     graphSubscriptions: graph,
-    ai: { OPENAI: new OpenAiAdapter(), ANTHROPIC: new AnthropicAdapter() },
+    ai: Object.fromEntries(AI_PROVIDER_NAMES.map((name) => [name,
+      name === 'OPENAI' ? new OpenAiAdapter()
+        : name === 'ANTHROPIC' ? new AnthropicAdapter()
+          : name === 'GOOGLE' ? new GoogleAiAdapter()
+            : new OpenAiCompatibleAdapter(name, AI_PROVIDER_BASE_URLS[name] ?? 'https://api.openai.com/v1'),
+    ])) as unknown as Record<AiProviderName, AiProviderAdapter>,
     leadData: { apollo: new ApolloProvider() },
     verifiers: { millionverifier: new MillionVerifierProvider(), zerobounce: new ZeroBounceProvider(), neverbounce: new NeverBounceProvider() },
     finders: { hunter: new HunterFinder() },

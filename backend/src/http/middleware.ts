@@ -93,13 +93,14 @@ export function authenticate(appUrl: string) {
             if (m) return { ...base, role: m.role as Role, via: 'member' };
             if (om?.role === 'OWNER') return { ...base, role: 'OWNER' as Role, via: 'org_owner' };
             if (om?.role === 'ADMIN') return { ...base, role: 'ADMIN' as Role, via: 'org_admin' };
-            if (session.user.platformRole === 'SUPPORT' || session.user.platformRole === 'SUPER_ADMIN') {
+            if ((session.user.platformRole === 'SUPPORT' || session.user.platformRole === 'SUPER_ADMIN') && session.user.mfaEnabled) {
               const grant = await db().supportAccessGrant.findFirst({ where: { organizationId: ws.organizationId, adminUserId: session.userId, revokedAt: null, expiresAt: { gt: new Date() } } });
               if (grant) return { ...base, role: 'VIEWER' as Role, via: 'support', supportGrantId: grant.id, mfaMissing: false };
             }
             return null;
           };
           res.locals.platformRole = session.user.platformRole ?? null;
+          res.locals.mfaEnabled = !!session.user.mfaEnabled;
           // Rolling expiry, at most once per hour
           if (now.getTime() - session.lastSeenAt.getTime() > 3600_000) {
             void db().session.update({ where: { id: session.id }, data: { lastSeenAt: now, expiresAt: new Date(now.getTime() + SESSION_IDLE_MS) } }).catch(() => undefined);

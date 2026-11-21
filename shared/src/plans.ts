@@ -7,6 +7,13 @@ export interface Entitlements {
   features: { copilot: boolean; workflows: boolean; autoReply: boolean; waterfall: boolean; apiAccess: boolean; agencyWorkspaces: boolean };
   /** Integration ids a tenant may connect; ['*'] = all. */
   integrations: string[];
+  /**
+   * How "monthly" allowances apply to a yearly subscription.
+   *  - 'monthly' (default): the allowance resets every calendar month (UTC), for monthly and yearly billing alike.
+   *  - 'annual_pooled': on yearly billing, 12 × the monthly allowance is available across the paid year.
+   * Monthly billing always uses calendar months.
+   */
+  allowancePeriod?: 'monthly' | 'annual_pooled';
 }
 const BIG = 1_000_000_000;
 export const UNLIMITED: Entitlements = {

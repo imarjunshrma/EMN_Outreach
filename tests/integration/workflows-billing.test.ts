@@ -5,6 +5,8 @@ import { db } from '../../backend/src/core/db.js';
 import { queue, QUEUES } from '../../backend/src/core/queues.js';
 import * as wf from '../../backend/src/services/workflows.js';
 import * as billing from '../../backend/src/services/billing.js';
+import { getAuth } from '../../backend/src/services/accounts.js';
+import { decryptSecret } from '../../backend/src/services/workspace.js';
 import { StripeGateway, RazorpayGateway, setGatewaysForTests } from '../../integrations/src/billing/gateways.js';
 import { GraphSchema } from '../../shared/src/workflow.js';
 import { resetDb, installFakes, createUserSession, addLead, addMailbox, getApp } from '../helpers/harness.js';
@@ -101,6 +103,45 @@ describe('visual workflow engine', () => {
 });
 
 describe('billing & entitlements', () => {
+  it('stores SMTP/IMAP passwords encrypted and never returns connection credentials', async () => {
+    const s = await createUserSession('mailbox-owner@x.com');
+    const smtpPassword = 'smtp-secret-should-never-leak';
+    const imapPassword = 'imap-secret-should-never-leak';
+    const smtpUsername = 'smtp-user-should-never-leak';
+    const imapUsername = 'imap-user-should-never-leak';
+    const connected = await s.agent.post(`/api/v1/w/${s.workspaceId}/email-accounts/smtp`).set('x-csrf-token', s.csrf).send({
+      emailAddress: 'mailbox@ourco.com', smtpHost: 'smtp.mailpool.example', smtpPort: 587, smtpSecure: false,
+      imapHost: 'imap.mailpool.example', imapPort: 993, imapSecure: true, smtpUsername, smtpPassword, imapUsername, imapPassword,
+    });
+    expect(connected.status).toBe(201);
+    for (const secret of [smtpPassword, imapPassword, smtpUsername, imapUsername]) expect(JSON.stringify(connected.body)).not.toContain(secret);
+    expect(connected.body.connectionConfig).toBeUndefined();
+    const saved = await db().emailAccount.findFirstOrThrow({ where: { workspaceId: s.workspaceId, emailAddress: 'mailbox@ourco.com' }, include: { credential: true } });
+    expect(saved.connectionConfig).toMatchObject({ smtpHost: 'smtp.mailpool.example' });
+    expect((saved.connectionConfig as { username?: string }).username).not.toBe(smtpUsername);
+    expect((saved.connectionConfig as { usernameEncrypted?: boolean }).usernameEncrypted).toBe(true);
+    const savedConfig = saved.connectionConfig as Record<string, unknown>;
+    expect(savedConfig.smtpUsername).not.toBe(smtpUsername);
+    expect(savedConfig.imapUsername).not.toBe(imapUsername);
+    expect(savedConfig.smtpPasswordEncrypted).not.toBe(smtpPassword);
+    expect(savedConfig.imapPasswordEncrypted).not.toBe(imapPassword);
+    expect(savedConfig.smtpUsernameEncrypted).toBe(true);
+    expect(savedConfig.imapUsernameEncrypted).toBe(true);
+    expect(decryptSecret(String(savedConfig.smtpUsername))).toBe(smtpUsername);
+    expect(decryptSecret(String(savedConfig.imapUsername))).toBe(imapUsername);
+    expect(decryptSecret(String(savedConfig.smtpPasswordEncrypted))).toBe(smtpPassword);
+    expect(decryptSecret(String(savedConfig.imapPasswordEncrypted))).toBe(imapPassword);
+    expect(saved.credential?.encryptedPassword).not.toBe(smtpPassword);
+    expect(saved.credential?.encryptedPassword).toBeTruthy();
+    const auth = await getAuth(saved.id);
+    expect(auth).toMatchObject({ kind: 'password', smtpPassword, imapPassword, config: { smtpUsername, imapUsername } });
+    const listed = await s.agent.get(`/api/v1/w/${s.workspaceId}/email-accounts`);
+    expect(listed.status).toBe(200);
+    for (const secret of [smtpPassword, imapPassword, smtpUsername, imapUsername]) expect(JSON.stringify(listed.body)).not.toContain(secret);
+    expect(JSON.stringify(listed.body)).not.toContain('smtp.mailpool.example');
+    expect(listed.body[0].connectionConfig).toBeUndefined();
+  });
+
   it('self-hosted mode (default) is unlimited and enforces nothing', async () => {
     const s = await createUserSession('o@x.com');
     expect((await billing.billingState(s.workspaceId)).mode).toBe('self_hosted');
@@ -165,7 +206,7 @@ describe('billing & entitlements', () => {
     // Platform routes are invisible (404) to tenant owners; only platform staff can override.
     expect((await s.agent.get('/api/v1/platform/tenants')).status).toBe(404);
     expect((await s.agent.post(`/api/v1/platform/tenants/${s.organizationId}/subscription`).set('x-csrf-token', s.csrf).send({ planCode: 'growth', status: 'ACTIVE', reason: 'sneaky self-upgrade' })).status).toBe(404);
-    await db().user.update({ where: { id: s.userId }, data: { platformRole: 'SUPER_ADMIN' } });
+    await db().user.update({ where: { id: s.userId }, data: { platformRole: 'SUPER_ADMIN', mfaEnabled: true } });
     const o = await s.agent.post(`/api/v1/platform/tenants/${s.organizationId}/subscription`).set('x-csrf-token', s.csrf).send({ planCode: 'growth', status: 'ACTIVE', reason: 'Pilot customer upgrade' });
     expect(o.status).toBe(200);
     expect(await db().platformAuditEvent.count({ where: { organizationId: s.organizationId, action: { contains: 'subscription' } } })).toBeGreaterThan(0);

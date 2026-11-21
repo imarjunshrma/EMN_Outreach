@@ -63,3 +63,8 @@ export function computeNextStepAt(lastSentAt: Date, delayDays: number, window: S
 export function startOfDayIn(zone: string, now: Date = new Date()): Date {
   return DateTime.fromJSDate(now).setZone(isValidZone(zone) ? zone : 'UTC').startOf('day').toJSDate();
 }
+
+/** Start of the next local calendar day, including DST transitions. */
+export function startOfNextDayIn(zone: string, now: Date = new Date()): Date {
+  return DateTime.fromJSDate(now).setZone(isValidZone(zone) ? zone : 'UTC').plus({ days: 1 }).startOf('day').toJSDate();
+}

@@ -1412,6 +1412,38 @@
                           }
                         ]
                       },
+                      "dailyEmailSendLimit": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "mailboxAutoPauseBounceRatePct": {
+                        "default": 5,
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0.5,
+                            "maximum": 50
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "mailboxAutoPauseMinSends": {
+                        "default": 20,
+                        "type": "integer",
+                        "minimum": 5,
+                        "maximum": 10000
+                      },
                       "requireMfa": {
                         "default": false,
                         "type": "boolean"
@@ -8788,18 +8820,37 @@
                     "type": "string",
                     "enum": [
                       "OPENAI",
-                      "ANTHROPIC"
+                      "ANTHROPIC",
+                      "GOOGLE",
+                      "OPENROUTER",
+                      "GROQ",
+                      "TOGETHER",
+                      "DEEPSEEK",
+                      "MISTRAL",
+                      "OLLAMA",
+                      "CUSTOM_OPENAI"
                     ]
                   },
                   "apiKey": {
                     "type": "string",
-                    "minLength": 10,
-                    "maxLength": 300
+                    "minLength": 1,
+                    "maxLength": 500
                   },
                   "defaultModel": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 100
+                    "maxLength": 150
+                  },
+                  "baseUrl": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "isEnabled": {
                     "type": "boolean"
@@ -8996,6 +9047,78 @@
         }
       }
     },
+    "/api/v1/w/{workspaceId}/ai/providers/{provider}/models": {
+      "get": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "List models available to a configured provider",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: 30 requests / 600s per workspace",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 30,
+            "windowSec": 600,
+            "key": "workspace"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/v1/w/{workspaceId}/ai/routes": {
       "get": {
         "tags": [
@@ -9099,7 +9222,15 @@
                     "type": "string",
                     "enum": [
                       "OPENAI",
-                      "ANTHROPIC"
+                      "ANTHROPIC",
+                      "GOOGLE",
+                      "OPENROUTER",
+                      "GROQ",
+                      "TOGETHER",
+                      "DEEPSEEK",
+                      "MISTRAL",
+                      "OLLAMA",
+                      "CUSTOM_OPENAI"
                     ]
                   },
                   "model": {
@@ -9112,7 +9243,15 @@
                         "type": "string",
                         "enum": [
                           "OPENAI",
-                          "ANTHROPIC"
+                          "ANTHROPIC",
+                          "GOOGLE",
+                          "OPENROUTER",
+                          "GROQ",
+                          "TOGETHER",
+                          "DEEPSEEK",
+                          "MISTRAL",
+                          "OLLAMA",
+                          "CUSTOM_OPENAI"
                         ]
                       },
                       {
@@ -9748,13 +9887,21 @@
                     "type": "string",
                     "enum": [
                       "OPENAI",
-                      "ANTHROPIC"
+                      "ANTHROPIC",
+                      "GOOGLE",
+                      "OPENROUTER",
+                      "GROQ",
+                      "TOGETHER",
+                      "DEEPSEEK",
+                      "MISTRAL",
+                      "OLLAMA",
+                      "CUSTOM_OPENAI"
                     ]
                   },
                   "model": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 100
+                    "maxLength": 150
                   },
                   "inputPerMTokUsd": {
                     "type": "number",
@@ -12421,6 +12568,16 @@
                     "minLength": 1,
                     "maxLength": 500
                   },
+                  "smtpPassword": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "imapPassword": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
                   "smtpHost": {
                     "type": "string",
                     "minLength": 1
@@ -12449,6 +12606,14 @@
                     "type": "string",
                     "minLength": 1
                   },
+                  "smtpUsername": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "imapUsername": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "sentFolder": {
                     "default": "Sent",
                     "type": "string"
@@ -12460,14 +12625,12 @@
                 },
                 "required": [
                   "emailAddress",
-                  "password",
                   "smtpHost",
                   "smtpPort",
                   "smtpSecure",
                   "imapHost",
                   "imapPort",
-                  "imapSecure",
-                  "username"
+                  "imapSecure"
                 ]
               }
             }
@@ -12781,6 +12944,78 @@
           "orgPermission": null,
           "platformPermission": null,
           "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-accounts/{id}/delivery-diagnostic": {
+      "post": {
+        "tags": [
+          "Mailboxes"
+        ],
+        "summary": "Send one clearly labeled diagnostic message from an authorized mailbox to itself",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: 1 requests / 900s per workspace",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 1,
+            "windowSec": 900,
+            "key": "workspace"
+          },
           "status": 200,
           "allowWhenInactive": false
         },
@@ -16187,6 +16422,1040 @@
         },
         "responses": {
           "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/overview": {
+      "get": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Training status, rules, examples, draft decisions and pending learning suggestions",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/rules": {
+      "get": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "List workspace rules with conflict warnings",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Create an outreach rule",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 120
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3000
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "PROSPECT_RESEARCH",
+                      "PROSPECT_QUALIFICATION",
+                      "OPPORTUNITY_IDENTIFICATION",
+                      "PERSONALIZATION",
+                      "EMAIL_OPENING",
+                      "VALUE_PROPOSITION",
+                      "PITCHING",
+                      "CLOSING",
+                      "FOLLOW_UPS",
+                      "DELIVERABILITY_COMPLIANCE"
+                    ]
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": [
+                      "MANDATORY",
+                      "PREFERRED",
+                      "AVOID",
+                      "CONDITIONAL"
+                    ]
+                  },
+                  "condition": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "status": {
+                    "default": "ACTIVE",
+                    "type": "string",
+                    "enum": [
+                      "ACTIVE",
+                      "INACTIVE"
+                    ]
+                  },
+                  "triggerTerms": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    }
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "category",
+                  "priority"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/rules/{id}": {
+      "patch": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Update an outreach rule",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 120
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3000
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "PROSPECT_RESEARCH",
+                      "PROSPECT_QUALIFICATION",
+                      "OPPORTUNITY_IDENTIFICATION",
+                      "PERSONALIZATION",
+                      "EMAIL_OPENING",
+                      "VALUE_PROPOSITION",
+                      "PITCHING",
+                      "CLOSING",
+                      "FOLLOW_UPS",
+                      "DELIVERABILITY_COMPLIANCE"
+                    ]
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": [
+                      "MANDATORY",
+                      "PREFERRED",
+                      "AVOID",
+                      "CONDITIONAL"
+                    ]
+                  },
+                  "condition": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 1000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "status": {
+                    "default": "ACTIVE",
+                    "type": "string",
+                    "enum": [
+                      "ACTIVE",
+                      "INACTIVE"
+                    ]
+                  },
+                  "triggerTerms": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    }
+                  }
+                },
+                "required": [
+                  "title",
+                  "description",
+                  "category",
+                  "priority"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Delete an outreach rule",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/examples": {
+      "get": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "List workspace examples",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Add a positive or negative text example",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 120
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 20000
+                  },
+                  "correctedContent": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 20000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "EMAIL",
+                      "RESEARCH",
+                      "CONVERSATION"
+                    ]
+                  },
+                  "polarity": {
+                    "type": "string",
+                    "enum": [
+                      "POSITIVE",
+                      "NEGATIVE"
+                    ]
+                  },
+                  "explanation": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "tags": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40
+                    }
+                  },
+                  "isActive": {
+                    "default": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content",
+                  "category",
+                  "polarity"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/examples/{id}": {
+      "patch": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Update a workspace example",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 120
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 20000
+                  },
+                  "correctedContent": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 20000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "EMAIL",
+                      "RESEARCH",
+                      "CONVERSATION"
+                    ]
+                  },
+                  "polarity": {
+                    "type": "string",
+                    "enum": [
+                      "POSITIVE",
+                      "NEGATIVE"
+                    ]
+                  },
+                  "explanation": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "tags": {
+                    "default": [],
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40
+                    }
+                  },
+                  "isActive": {
+                    "default": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content",
+                  "category",
+                  "polarity"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Delete a workspace example",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/suggestions": {
+      "get": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Learning suggestions from repeated customer edits",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-outreach-brain/suggestions/{id}/decision": {
+      "post": {
+        "tags": [
+          "AI Outreach Brain"
+        ],
+        "summary": "Accept or reject a learning suggestion",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "ACCEPT",
+                      "REJECT"
+                    ]
+                  }
+                },
+                "required": [
+                  "decision"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
             "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
           },
           "400": {
@@ -19825,6 +21094,20 @@
                   "rerunFactCheck": {
                     "default": true,
                     "type": "boolean"
+                  },
+                  "feedbackNote": {
+                    "type": "string",
+                    "maxLength": 1000
+                  },
+                  "feedbackScope": {
+                    "default": "CAMPAIGN",
+                    "type": "string",
+                    "enum": [
+                      "GLOBAL",
+                      "CAMPAIGN",
+                      "PROSPECT",
+                      "FACTUAL"
+                    ]
                   }
                 }
               }
@@ -26527,6 +27810,123 @@
         }
       }
     },
+    "/api/v1/orgs/{organizationId}/support-access": {
+      "get": {
+        "tags": [
+          "Organizations"
+        ],
+        "summary": "When EMN support accessed this organization, why, and how many pages they viewed",
+        "description": "Authentication: organization member (session cookie)\n\nOrganization permission: manage\n\nAvailable while the organization is suspended or cancelled\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "organizationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "org",
+          "role": null,
+          "orgPermission": "manage",
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/access": {
+      "get": {
+        "tags": [
+          "Workspaces"
+        ],
+        "summary": "How the caller is accessing this workspace (member, organization admin, or audited support access) and the tenant status",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nAvailable while the organization is suspended or cancelled\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/v1/orgs/{organizationId}/usage": {
       "get": {
         "tags": [
@@ -27123,7 +28523,7 @@
         "tags": [
           "Platform"
         ],
-        "summary": "My platform role and permissions",
+        "summary": "My platform role, permissions and whether 2FA is on (required for every other platform route)",
         "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nRate limit: global Nginx limit",
         "parameters": [],
         "security": [
@@ -27137,6 +28537,161 @@
           "role": null,
           "orgPermission": null,
           "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Find user accounts by email or name",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users/{id}/status": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Disable (signs out everywhere) or re-enable a user account; reason required",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:lifecycle\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "ACTIVE",
+                      "DISABLED"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:lifecycle",
           "rateLimit": null,
           "status": 200,
           "allowWhenInactive": false
@@ -27594,6 +29149,165 @@
         }
       }
     },
+    "/api/v1/platform/tenants/{id}/refunds": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Refund all or part of a paid invoice (optionally cancelling the subscription); idempotent on requestKey",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: billing:refund\n\nRate limit: 20 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "invoiceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "amountCents": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  },
+                  "cancelSubscription": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "requestKey": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "invoiceId",
+                  "reason",
+                  "requestKey"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "billing:refund",
+          "rateLimit": {
+            "limit": 20,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/billing": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Invoices, refunds and disputes of a tenant (no payment secrets)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: billing:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "billing:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/v1/platform/plans": {
       "get": {
         "tags": [
@@ -27817,6 +29531,14 @@
                           "type": "string",
                           "maxLength": 40
                         }
+                      },
+                      "allowancePeriod": {
+                        "default": "monthly",
+                        "type": "string",
+                        "enum": [
+                          "monthly",
+                          "annual_pooled"
+                        ]
                       }
                     },
                     "required": [
@@ -28074,6 +29796,14 @@
                           "type": "string",
                           "maxLength": 40
                         }
+                      },
+                      "allowancePeriod": {
+                        "default": "monthly",
+                        "type": "string",
+                        "enum": [
+                          "monthly",
+                          "annual_pooled"
+                        ]
                       }
                     },
                     "required": [

@@ -55,7 +55,9 @@ export async function currentUsage(organizationId: string, at = new Date()) {
     db().campaign.count({ where: { workspaceId: { in: wsIds }, status: 'RUNNING' } }),
     db().lead.count({ where: { workspaceId: { in: wsIds } } }),
   ]);
-  return { period: { start, end }, counts: { users, workspaces, mailboxes, runningCampaigns, leads }, metered };
+  const { storageBytes } = await import('./storage-accounting.js');
+  const storageMb = Math.round((await storageBytes(organizationId)) / 1048576 * 10) / 10;
+  return { period: { start, end }, counts: { users, workspaces, mailboxes, runningCampaigns, leads, storageMb }, metered };
 }
 
 export async function usageHistory(organizationId: string, months = 6) {

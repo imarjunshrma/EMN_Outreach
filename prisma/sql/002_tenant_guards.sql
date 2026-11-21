@@ -62,6 +62,8 @@ DROP TRIGGER IF EXISTS emn_tenant_guard ON "Opportunity";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "Opportunity" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('leadId', 'Lead', 'companyId', 'Company', 'campaignId', 'Campaign');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "OutboundEmail";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "OutboundEmail" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('campaignId', 'Campaign', 'enrollmentId', 'SequenceEnrollment', 'stepId', 'SequenceStep', 'variantId', 'SequenceStepVariant', 'emailAccountId', 'EmailAccount', 'emailMessageId', 'EmailMessage');
+DROP TRIGGER IF EXISTS emn_tenant_guard ON "OutreachFeedback";
+CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "OutreachFeedback" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('personalizationId', 'LeadPersonalization');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "PersonalizationBatch";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "PersonalizationBatch" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('campaignId', 'Campaign');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "PersonalizationRevision";

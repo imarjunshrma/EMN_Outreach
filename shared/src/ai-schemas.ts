@@ -102,6 +102,18 @@ export const PersonalizationOutput = z.object({
   usedClaimIds: z.array(z.string()),
   personalizationBasis: z.string(),
   insufficientContext: z.boolean(),
+  opportunityAnalysis: z.object({
+    qualification: z.enum(['STRONG_FIT', 'POSSIBLE_FIT', 'WEAK_FIT', 'INSUFFICIENT_INFORMATION']),
+    businessModel: z.object({ statement: z.string().nullable(), basis: z.enum(['FACT', 'INFERENCE', 'UNKNOWN']), claimIds: z.array(z.string()) }),
+    facts: z.array(z.object({ statement: z.string(), claimId: z.string() })).max(10),
+    inferences: z.array(z.object({ statement: z.string(), claimIds: z.array(z.string()).min(1) })).max(10),
+    unknowns: z.array(z.string()).max(10),
+    opportunity: z.string().nullable(),
+    serviceFit: z.string().nullable(),
+    confidence: z.number().min(0).max(1),
+    missingInformation: z.array(z.string()).max(10),
+    recommendedApproach: z.string().nullable(),
+  }).default({ qualification: 'INSUFFICIENT_INFORMATION', businessModel: { statement: null, basis: 'UNKNOWN', claimIds: [] }, facts: [], inferences: [], unknowns: [], opportunity: null, serviceFit: null, confidence: 0, missingInformation: [], recommendedApproach: null }),
 });
 export type Personalization = z.infer<typeof PersonalizationOutput>;
 

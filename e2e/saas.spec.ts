@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { login, watchErrors, workspaceBase } from './helpers';
+import { login, sql, totp, watchErrors, workspaceBase } from './helpers';
 
 // Public website, documentation, self-service sign-up, onboarding, organization settings, tenant
 // isolation in the browser, and the platform console. Self-hosted mode (no billing) with
@@ -124,10 +124,26 @@ test('organization settings: profile, members, workspaces and usage', async ({ p
   expect(errors).toEqual([]);
 });
 
-test('platform console: metrics, tenant search, audited suspension and reactivation', async ({ page, browser }) => {
+test('platform console: staff need 2FA, then metrics, tenant search, audited suspension and reactivation', async ({ page, browser }) => {
   const errors = watchErrors(page);
-  await login(page);
+  // A dedicated staff account (platform roles are granted by an operator, never through the API).
+  const STAFF = { email: 'staff@emn-e2e.test', password: 'Staff-password-12345' };
+  const reg = await page.request.post('/api/v1/auth/signup', { data: { name: 'EMN Staff', email: STAFF.email, password: STAFF.password, organizationName: 'EMN Internal', acceptTerms: true } });
+  expect(reg.ok()).toBeTruthy();
+  await sql(`UPDATE "User" SET "platformRole" = 'SUPER_ADMIN' WHERE email = $1`, [STAFF.email]);
+  await login(page, STAFF.email, STAFF.password);
   await workspaceBase(page);
+  await page.goto('/platform');
+  await expect(page.getByTestId('platform-mfa-required')).toBeVisible(); // console refuses staff without 2FA
+  const secret = await page.evaluate(async () => {
+    const csrf = decodeURIComponent(document.cookie.match(/emn_csrf=([^;]+)/)?.[1] ?? '');
+    return (await (await fetch('/api/v1/auth/mfa/setup', { method: 'POST', headers: { 'x-csrf-token': csrf } })).json()).secret as string;
+  });
+  const enabled = await page.evaluate(async (code) => {
+    const csrf = decodeURIComponent(document.cookie.match(/emn_csrf=([^;]+)/)?.[1] ?? '');
+    return (await fetch('/api/v1/auth/mfa/enable', { method: 'POST', headers: { 'x-csrf-token': csrf, 'content-type': 'application/json' }, body: JSON.stringify({ code }) })).status;
+  }, totp(secret));
+  expect(enabled).toBe(200);
   await page.goto('/platform');
   await expect(page.getByTestId('platform-tiles')).toContainText('Tenants');
   await shot(page, 'platform-overview');

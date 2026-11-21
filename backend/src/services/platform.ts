@@ -117,6 +117,7 @@ const EntSchema = z.object({
   apiRequestsPerMinute: z.number().int().min(1),
   features: z.object({ copilot: z.boolean(), workflows: z.boolean(), autoReply: z.boolean(), waterfall: z.boolean(), apiAccess: z.boolean(), agencyWorkspaces: z.boolean() }),
   integrations: z.array(z.string().max(40)).max(50),
+  allowancePeriod: z.enum(['monthly', 'annual_pooled']).default('monthly'),
 });
 export const PlanSchema = z.object({
   code: z.string().regex(/^[a-z0-9-]{2,40}$/), name: z.string().trim().min(2).max(60), description: z.string().max(500).default(''),
@@ -232,3 +233,42 @@ export async function platformAuditLog(q: { organizationId?: string; action?: st
 }
 
 export const PLATFORM_ADMIN_ENTITLEMENTS = UNLIMITED;
+
+// ------------------------------------------------------------------ user accounts (disable / enable)
+
+export const UserQuery = z.object({ q: z.string().trim().min(2).max(100), page: z.coerce.number().int().min(1).default(1) });
+export async function searchUsers(q: z.infer<typeof UserQuery>) {
+  const where: Prisma.UserWhereInput = { OR: [{ email: { contains: q.q.toLowerCase() } }, { name: { contains: q.q, mode: 'insensitive' } }] };
+  const rows = await db().user.findMany({ where, take: 25, skip: (q.page - 1) * 25, orderBy: { createdAt: 'desc' }, select: { id: true, email: true, name: true, status: true, platformRole: true, mfaEnabled: true, emailVerifiedAt: true, lastLoginAt: true, createdAt: true, orgMemberships: { select: { role: true, organization: { select: { id: true, name: true } } } } } });
+  return { data: rows };
+}
+
+export const UserStatusSchema = z.object({ status: z.enum(['ACTIVE', 'DISABLED']), reason: z.string().trim().min(5).max(500) });
+/** Disabling an account signs it out everywhere immediately (all sessions revoked) and blocks sign-in. */
+export async function setUserStatus(userId: string, input: z.infer<typeof UserStatusSchema>, admin: Admin & { role: string }) {
+  if (userId === admin.userId) throw new AppError('CONFLICT', 'You cannot change your own account status', 409);
+  const u = await db().user.findUnique({ where: { id: userId } });
+  if (!u) throw NotFound('User');
+  if (u.platformRole && admin.role !== 'SUPER_ADMIN') throw new AppError('FORBIDDEN', 'Only a super admin can change a staff account', 403);
+  await db().$transaction([
+    db().user.update({ where: { id: userId }, data: { status: input.status } }),
+    ...(input.status === 'DISABLED' ? [db().session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } })] : []),
+  ]);
+  const orgs = await db().organizationMember.findMany({ where: { userId }, select: { organizationId: true } });
+  for (const o of orgs.length ? orgs : [{ organizationId: null as string | null }]) {
+    await platformAudit({ actorUserId: admin.userId, action: input.status === 'DISABLED' ? 'user.disabled' : 'user.enabled', organizationId: o.organizationId, targetType: 'user', targetId: userId, reason: input.reason, ip: admin.ip });
+  }
+  return { status: input.status };
+}
+
+// ------------------------------------------------------------------ customer-visible support access history
+
+export async function supportAccessForOrg(organizationId: string) {
+  const grants = await db().supportAccessGrant.findMany({ where: { organizationId }, orderBy: { createdAt: 'desc' }, take: 100 });
+  const staff = await db().user.findMany({ where: { id: { in: grants.map((g) => g.adminUserId) } }, select: { id: true, name: true } });
+  const now = new Date();
+  // Number of pages viewed under each grant (from the append-only platform audit trail).
+  const reads = await db().platformAuditEvent.findMany({ where: { organizationId, action: 'support.read', createdAt: { gte: grants.at(-1)?.createdAt ?? now } }, select: { metadata: true } });
+  const count = (id: string) => reads.filter((r) => (r.metadata as { grantId?: string } | null)?.grantId === id).length;
+  return grants.map((g) => ({ pagesViewed: count(g.id), id: g.id, staffName: staff.find((s) => s.id === g.adminUserId)?.name ?? 'EMN support', reason: g.reason, scope: g.scope, createdAt: g.createdAt, expiresAt: g.expiresAt, revokedAt: g.revokedAt, active: !g.revokedAt && g.expiresAt > now }));
+}

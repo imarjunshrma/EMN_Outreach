@@ -7,12 +7,39 @@ import { fmtDate, fmtUsd } from '@/lib/format';
 import { AI_TASKS } from '@/lib/constants';
 import { Badge, Button, Card, Checkbox, Field, Input, Notice, PageHeader, Pagination, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
 
+const AI_PROVIDERS = [
+  ['OPENAI', 'OpenAI'], ['ANTHROPIC', 'Anthropic Claude'], ['GOOGLE', 'Google Gemini'], ['OPENROUTER', 'OpenRouter'],
+  ['GROQ', 'Groq'], ['TOGETHER', 'Together AI'], ['DEEPSEEK', 'DeepSeek'], ['MISTRAL', 'Mistral'],
+  ['OLLAMA', 'Ollama (local)'], ['CUSTOM_OPENAI', 'Custom OpenAI-compatible'],
+] as const;
+
+function useProviderModels(configured: any[] | undefined) {
+  const enabled = (id: string) => configured?.some((p) => p.provider === id);
+  const openai = useWsQuery<{ models: string[]; warning: string | null }>(enabled('OPENAI') ? '/ai/providers/OPENAI/models' : null);
+  const anthropic = useWsQuery<{ models: string[]; warning: string | null }>(enabled('ANTHROPIC') ? '/ai/providers/ANTHROPIC/models' : null);
+  const google = useWsQuery<{ models: string[]; warning: string | null }>(enabled('GOOGLE') ? '/ai/providers/GOOGLE/models' : null);
+  const openrouter = useWsQuery<{ models: string[]; warning: string | null }>(enabled('OPENROUTER') ? '/ai/providers/OPENROUTER/models' : null);
+  const groq = useWsQuery<{ models: string[]; warning: string | null }>(enabled('GROQ') ? '/ai/providers/GROQ/models' : null);
+  const together = useWsQuery<{ models: string[]; warning: string | null }>(enabled('TOGETHER') ? '/ai/providers/TOGETHER/models' : null);
+  const deepseek = useWsQuery<{ models: string[]; warning: string | null }>(enabled('DEEPSEEK') ? '/ai/providers/DEEPSEEK/models' : null);
+  const mistral = useWsQuery<{ models: string[]; warning: string | null }>(enabled('MISTRAL') ? '/ai/providers/MISTRAL/models' : null);
+  const ollama = useWsQuery<{ models: string[]; warning: string | null }>(enabled('OLLAMA') ? '/ai/providers/OLLAMA/models' : null);
+  const custom = useWsQuery<{ models: string[]; warning: string | null }>(enabled('CUSTOM_OPENAI') ? '/ai/providers/CUSTOM_OPENAI/models' : null);
+  return { OPENAI: openai.data, ANTHROPIC: anthropic.data, GOOGLE: google.data, OPENROUTER: openrouter.data, GROQ: groq.data, TOGETHER: together.data, DEEPSEEK: deepseek.data, MISTRAL: mistral.data, OLLAMA: ollama.data, CUSTOM_OPENAI: custom.data };
+}
+
+function modelChoices(models: string[] | undefined, current: string) {
+  const choices = (models ?? []).map((model) => ({ value: model, label: model }));
+  if (current && !choices.some((m) => m.value === current)) choices.unshift({ value: current, label: `${current} (saved)` });
+  return [{ value: '', label: 'Choose a model…' }, ...choices, { value: '__custom__', label: 'Enter model ID manually…' }];
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export default function AiSettings() {
   const [tab, setTab] = useState('providers');
   return (
     <>
-      <PageHeader title="AI models & prompts" subtitle="Configure OpenAI and Claude independently. Keys are encrypted at rest and never shown again. Each task can use its own model with automatic fallback to the other provider." />
+      <PageHeader title="AI models & prompts" subtitle="Connect hosted or local language models. Keys are encrypted at rest; route each task and configure fallbacks." />
       <Tabs active={tab} onChange={setTab} tabs={[{ id: 'providers', label: 'Providers & keys' }, { id: 'routes', label: 'Model routing' }, { id: 'prompts', label: 'Prompt versions' }, { id: 'logs', label: 'AI response logs' }, { id: 'prices', label: 'Prices' }]} />
       {tab === 'providers' && <Providers />}
       {tab === 'routes' && <Routes />}
@@ -25,29 +52,38 @@ export default function AiSettings() {
 
 function Providers() {
   const q = useWsQuery<{ providers: any[]; suggestions: Record<string, { fast: string; quality: string }> }>('/ai/providers');
-  const [forms, setForms] = useState<Record<string, { apiKey: string; defaultModel: string; isEnabled: boolean }>>({ ANTHROPIC: { apiKey: '', defaultModel: 'claude-sonnet-5-5', isEnabled: true }, OPENAI: { apiKey: '', defaultModel: '', isEnabled: true } });
-  useEffect(() => { if (q.data) { const next = { ...forms }; for (const p of q.data.providers) next[p.provider] = { apiKey: '', defaultModel: p.defaultModel, isEnabled: p.isEnabled }; setForms(next); } }, [q.data]); // eslint-disable-line react-hooks/exhaustive-deps
-  const save = useWsMutation<string>((p) => ({ path: '/ai/providers', method: 'PUT', body: { provider: p, defaultModel: forms[p].defaultModel, isEnabled: forms[p].isEnabled, ...(forms[p].apiKey ? { apiKey: forms[p].apiKey } : {}) } }), { success: 'Saved', onSuccess: () => setForms((f) => ({ ...f, ANTHROPIC: { ...f.ANTHROPIC, apiKey: '' }, OPENAI: { ...f.OPENAI, apiKey: '' } })) });
+  const modelLists = useProviderModels(q.data?.providers);
+  const [forms, setForms] = useState<Record<string, { apiKey: string; defaultModel: string; baseUrl: string; isEnabled: boolean }>>({});
+  const [customModels, setCustomModels] = useState<Record<string, boolean>>({});
+  useEffect(() => { if (q.data) { const next: typeof forms = {}; for (const [id] of AI_PROVIDERS) { const p = q.data.providers.find((x) => x.provider === id); next[id] = { apiKey: '', defaultModel: p?.defaultModel ?? q.data.suggestions[id]?.quality ?? '', baseUrl: p?.baseUrl ?? '', isEnabled: p?.isEnabled ?? true }; } setForms(next); } }, [q.data]);
+  const save = useWsMutation<string>((p) => ({ path: '/ai/providers', method: 'PUT', body: { provider: p, defaultModel: forms[p].defaultModel, baseUrl: forms[p].baseUrl || null, isEnabled: forms[p].isEnabled, ...(forms[p].apiKey ? { apiKey: forms[p].apiKey } : {}) } }), { success: 'Saved', onSuccess: () => setForms((f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, { ...v, apiKey: '' }]))) });
   const test = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}/test`, body: {} }), { success: (r: any) => (r.ok ? 'Connection OK' : `Failed: ${r.error}`) });
   const del = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}`, method: 'DELETE' }), { success: 'Removed' });
   return (
     <QueryView q={q}>
       {(d) => (
         <div className="grid gap-4 lg:grid-cols-2">
-          {(['ANTHROPIC', 'OPENAI'] as const).map((p) => {
+          {AI_PROVIDERS.map(([p, label]) => {
             const cur = d.providers.find((x) => x.provider === p);
-            const f = forms[p];
+            const f = forms[p] ?? { apiKey: '', defaultModel: '', baseUrl: '', isEnabled: true };
             return (
-              <Card key={p} title={<>{p === 'ANTHROPIC' ? 'Anthropic Claude' : 'OpenAI'} {cur ? <Badge color="green">configured ••••{cur.keyLast4}</Badge> : <Badge>not configured</Badge>}</>}>
-                <Field label={cur ? 'Replace API key (leave blank to keep)' : 'API key'}><Input type="password" autoComplete="off" value={f.apiKey} onChange={(e) => setForms({ ...forms, [p]: { ...f, apiKey: e.target.value } })} /></Field>
-                <Field label="Default model" hint={p === 'ANTHROPIC' ? `e.g. ${d.suggestions.ANTHROPIC.quality} (quality) or ${d.suggestions.ANTHROPIC.fast} (fast/cheap)` : 'Enter the exact model id from your OpenAI account'}><Input value={f.defaultModel} onChange={(e) => setForms({ ...forms, [p]: { ...f, defaultModel: e.target.value } })} /></Field>
+              <Card key={p} title={<>{label} {cur ? <Badge color="green">configured{cur.keyLast4 ? ` ••••${cur.keyLast4}` : ''}</Badge> : <Badge>not configured</Badge>}</>}>
+                {p !== 'OLLAMA' && p !== 'CUSTOM_OPENAI' && <Field label={cur ? 'Replace API key (leave blank to keep)' : 'API key'}><Input type="password" autoComplete="off" value={f.apiKey} onChange={(e) => setForms({ ...forms, [p]: { ...f, apiKey: e.target.value } })} /></Field>}
+                {(p === 'OLLAMA' || p === 'CUSTOM_OPENAI') && <Field label="OpenAI-compatible base URL" hint={p === 'OLLAMA' ? 'For Docker, try http://host.docker.internal:11434/v1; local/private HTTP endpoints are allowed.' : 'Examples: https://api.example.com/v1 or a local OpenAI-compatible server.'}><Input value={f.baseUrl} placeholder={p === 'OLLAMA' ? 'http://host.docker.internal:11434/v1' : 'https://your-endpoint.example/v1'} onChange={(e) => setForms({ ...forms, [p]: { ...f, baseUrl: e.target.value } })} /></Field>}
+                {p === 'CUSTOM_OPENAI' && <Field label="API key (optional for local endpoints)"><Input type="password" autoComplete="off" value={f.apiKey} onChange={(e) => setForms({ ...forms, [p]: { ...f, apiKey: e.target.value } })} /></Field>}
+                <Field label="Default model" hint={modelLists[p]?.warning ?? (modelLists[p]?.models.length ? 'Choose a model returned by your provider, or enter a custom model ID.' : d.suggestions[p]?.quality ? `Suggested: ${d.suggestions[p].quality} (quality), ${d.suggestions[p].fast} (fast)` : 'Save the provider first to load its model list.') }>
+                  {cur && modelLists[p]?.models.length && !customModels[p]
+                    ? <Select value={f.defaultModel} onChange={(e) => { if (e.target.value === '__custom__') setCustomModels({ ...customModels, [p]: true }); else setForms({ ...forms, [p]: { ...f, defaultModel: e.target.value } }); }} options={modelChoices(modelLists[p]?.models, f.defaultModel)} />
+                    : <Input value={f.defaultModel} onChange={(e) => setForms({ ...forms, [p]: { ...f, defaultModel: e.target.value } })} placeholder="Enter model ID" />}
+                </Field>
+                {customModels[p] && <Button className="-mt-2 mb-3" variant="ghost" onClick={() => setCustomModels({ ...customModels, [p]: false })}>Choose from the model list</Button>}
                 <div className="mt-2"><Checkbox label="Enabled" checked={f.isEnabled} onChange={(v) => setForms({ ...forms, [p]: { ...f, isEnabled: v } })} /></div>
                 {cur?.lastTestedAt && <p className="mt-2 text-xs">{cur.lastTestOk ? '✅' : '❌'} tested {fmtDate(cur.lastTestedAt)} {cur.lastTestError && <span className="text-red-600">{cur.lastTestError}</span>}</p>}
-                <div className="mt-3 flex gap-2"><Button disabled={!f.defaultModel || (!cur && !f.apiKey)} loading={save.isPending} onClick={() => save.mutate(p)}>Save</Button>{cur && <Button variant="secondary" loading={test.isPending} onClick={() => test.mutate(p)}>Test connection</Button>}{cur && <Button variant="ghost" onClick={() => window.confirm('Remove this provider?') && del.mutate(p)}>Remove</Button>}</div>
+                <div className="mt-3 flex gap-2"><Button disabled={!f.defaultModel || (!cur && !f.apiKey && p !== 'OLLAMA' && p !== 'CUSTOM_OPENAI') || ((p === 'OLLAMA' || p === 'CUSTOM_OPENAI') && !f.baseUrl)} loading={save.isPending} onClick={() => save.mutate(p)}>Save</Button>{cur && <Button variant="secondary" loading={test.isPending} onClick={() => test.mutate(p)}>Test connection</Button>}{cur && <Button variant="ghost" onClick={() => window.confirm('Remove this provider?') && del.mutate(p)}>Remove</Button>}</div>
               </Card>
             );
           })}
-          <div className="lg:col-span-2"><Notice>When both providers are configured, every task automatically falls back to the other provider if the primary fails. Use the Model routing tab to choose models per task and set monthly budgets.</Notice></div>
+          <div className="lg:col-span-2"><Notice>OpenAI-compatible endpoints support OpenRouter, Groq, Together AI, DeepSeek, Mistral, Ollama, vLLM and compatible servers. Each task can select any configured provider and fallback. Image, audio, and embedding workflows are not part of this text generation interface.</Notice></div>
         </div>
       )}
     </QueryView>
@@ -56,7 +92,11 @@ function Providers() {
 
 function Routes() {
   const q = useWsQuery<any[]>('/ai/routes');
+  const providers = useWsQuery<{ providers: any[] }>('/ai/providers');
+  const modelLists = useProviderModels(providers.data?.providers);
+  const providerChoices = (providers.data?.providers ?? []).map((p) => ({ value: p.provider, label: AI_PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider }));
   const [edits, setEdits] = useState<Record<string, any>>({});
+  const [customModels, setCustomModels] = useState<Record<string, boolean>>({});
   const save = useWsMutation<string>((task) => ({ path: '/ai/routes', method: 'PUT', body: { task, ...edits[task], monthlyBudgetUsd: edits[task].monthlyBudgetUsd === '' || edits[task].monthlyBudgetUsd === null ? null : Number(edits[task].monthlyBudgetUsd) } }), { success: 'Route saved' });
   return (
     <QueryView q={q} isEmpty={(d) => d.length === 0} empty={<Notice>Add an AI provider first; default routes are created automatically.</Notice>}>
@@ -65,13 +105,19 @@ function Routes() {
           {AI_TASKS.map((t) => {
             const r = rows.find((x) => x.task === t);
             const e = edits[t] ?? { provider: r?.provider ?? 'ANTHROPIC', model: r?.model ?? '', fallbackProvider: r?.fallbackProvider ?? null, fallbackModel: r?.fallbackModel ?? '', maxOutputTokens: r?.maxOutputTokens ?? 1500, monthlyBudgetUsd: r?.monthlyBudgetUsd ?? '' };
+            const models = modelLists[e.provider as keyof typeof modelLists]?.models;
+            const fallbackModels = modelLists[e.fallbackProvider as keyof typeof modelLists]?.models;
             const set = (k: string, v: unknown) => setEdits({ ...edits, [t]: { ...e, [k]: v } });
             return (
               <tr key={t}><td className="td text-xs font-medium">{t}</td>
-                <td className="td"><Select value={e.provider} onChange={(x) => set('provider', x.target.value)} options={['ANTHROPIC', 'OPENAI']} /></td>
-                <td className="td"><Input value={e.model} onChange={(x) => set('model', x.target.value)} /></td>
-                <td className="td"><Select value={e.fallbackProvider ?? ''} onChange={(x) => set('fallbackProvider', x.target.value || null)} options={[{ value: '', label: 'none' }, { value: 'ANTHROPIC', label: 'Anthropic' }, { value: 'OPENAI', label: 'OpenAI' }]} /></td>
-                <td className="td"><Input value={e.fallbackModel ?? ''} onChange={(x) => set('fallbackModel', x.target.value)} /></td>
+                <td className="td"><Select value={e.provider} onChange={(x) => set('provider', x.target.value)} options={providerChoices} /></td>
+                <td className="td">{models?.length && !customModels[t]
+                  ? <Select value={e.model} onChange={(x) => { if (x.target.value === '__custom__') setCustomModels({ ...customModels, [t]: true }); else set('model', x.target.value); }} options={modelChoices(models, e.model)} />
+                  : <Input value={e.model} placeholder="Model ID" onChange={(x) => set('model', x.target.value)} />}{customModels[t] && <button className="mt-1 text-xs text-brand-700" onClick={() => setCustomModels({ ...customModels, [t]: false })}>Choose from model list</button>}</td>
+                <td className="td"><Select value={e.fallbackProvider ?? ''} onChange={(x) => set('fallbackProvider', x.target.value || null)} options={[{ value: '', label: 'none' }, ...providerChoices]} /></td>
+                <td className="td">{fallbackModels?.length && !customModels[`${t}-fallback`]
+                  ? <Select value={e.fallbackModel ?? ''} onChange={(x) => { if (x.target.value === '__custom__') setCustomModels({ ...customModels, [`${t}-fallback`]: true }); else set('fallbackModel', x.target.value); }} options={modelChoices(fallbackModels, e.fallbackModel ?? '')} />
+                  : <Input value={e.fallbackModel ?? ''} placeholder="Fallback model ID" onChange={(x) => set('fallbackModel', x.target.value)} />}{customModels[`${t}-fallback`] && <button className="mt-1 text-xs text-brand-700" onClick={() => setCustomModels({ ...customModels, [`${t}-fallback`]: false })}>Choose from model list</button>}</td>
                 <td className="td w-24"><Input type="number" value={e.maxOutputTokens} onChange={(x) => set('maxOutputTokens', Number(x.target.value))} /></td>
                 <td className="td w-28"><Input type="number" value={e.monthlyBudgetUsd ?? ''} onChange={(x) => set('monthlyBudgetUsd', x.target.value)} /></td>
                 <td className="td"><Button variant="secondary" disabled={!e.model} onClick={() => { setEdits({ ...edits, [t]: e }); save.mutate(t); }}>Save</Button></td>
@@ -148,7 +194,7 @@ function Prices() {
     <div className="grid gap-4 lg:grid-cols-3">
       <Card title="Add / update price (owner)">
         <Notice kind="warning">Check prices on the provider’s pricing page. Cost reports are estimates based on this table.</Notice>
-        <Field label="Provider"><Select value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })} options={['OPENAI', 'ANTHROPIC']} /></Field>
+        <Field label="Provider"><Select value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })} options={AI_PROVIDERS.map(([id, label]) => ({ value: id, label }))} /></Field>
         <Field label="Model id"><Input value={f.model} onChange={(e) => setF({ ...f, model: e.target.value })} /></Field>
         <Field label="Input $ / 1M tokens"><Input type="number" step="0.001" value={f.inputPerMTokUsd} onChange={(e) => setF({ ...f, inputPerMTokUsd: e.target.value })} /></Field>
         <Field label="Output $ / 1M tokens"><Input type="number" step="0.001" value={f.outputPerMTokUsd} onChange={(e) => setF({ ...f, outputPerMTokUsd: e.target.value })} /></Field>

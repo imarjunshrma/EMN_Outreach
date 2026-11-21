@@ -6,6 +6,7 @@ import { randomToken } from '../core/crypto.js';
 import { AppError, NotFound } from '../core/errors.js';
 import { audit, notifyWorkspace, type Actor } from '../core/audit.js';
 import { PROVIDER_REGISTRY } from '../../../shared/src/provider-registry.js';
+import { classifyMailboxHealth } from '../../../shared/src/mailbox-health.js';
 import { getSecret, requireSecret } from './integrations.js';
 
 // Domain manager: ownership verification (TXT), DNS propagation across public resolvers, recommended
@@ -123,7 +124,7 @@ export function providerRegistry() { return PROVIDER_REGISTRY; }
 export async function mailboxHealth(workspaceId: string) {
   const since = new Date(Date.now() - 30 * 86400_000);
   const startDay = new Date(); startDay.setUTCHours(0, 0, 0, 0);
-  const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true } });
+  const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true, connectionConfig: true } });
   const events = await db().emailEvent.groupBy({ by: ['emailAccountId', 'type'], where: { workspaceId, occurredAt: { gte: since }, type: { in: ['SENT', 'BOUNCED_HARD', 'COMPLAINED'] } }, _count: { _all: true } });
   const today = await db().outboundEmail.groupBy({ by: ['emailAccountId'], where: { workspaceId, sentAt: { gte: startDay } }, _count: { _all: true } });
   const domains = await db().domain.findMany({ where: { workspaceId }, select: { name: true, healthStatus: true, verifiedAt: true } });
@@ -131,7 +132,12 @@ export async function mailboxHealth(workspaceId: string) {
     const n = (t: string) => events.find((e) => e.emailAccountId === a.id && e.type === t)?._count._all ?? 0;
     const sent = n('SENT');
     const dom = domains.find((d) => a.emailAddress.endsWith(`@${d.name}`));
-    return { ...a, sent30d: sent, hardBounces30d: n('BOUNCED_HARD'), bounceRatePct: sent ? +(100 * n('BOUNCED_HARD') / sent).toFixed(2) : null, complaints30d: n('COMPLAINED'), sentToday: today.find((t) => t.emailAccountId === a.id)?._count._all ?? 0, quota: { dailyLimit: a.dailySendLimit, source: 'workspace setting (providers do not expose remaining quota)' }, domain: dom ?? null, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
+    const hardBounces = n('BOUNCED_HARD');
+    const complaints = n('COMPLAINED');
+    const health = classifyMailboxHealth({ connectionStatus: a.status, sent30d: sent, hardBounces30d: hardBounces, complaints30d: complaints, domainHealth: dom?.healthStatus ?? null, domainVerified: !!dom?.verifiedAt, lastSyncedAt: a.lastSyncedAt, lastErrorAt: a.lastErrorAt });
+    const { connectionConfig, ...publicAccount } = a;
+    const connectionHealth = (connectionConfig as { connectionHealth?: { smtp?: { ok?: boolean; error?: string | null }; imap?: { ok?: boolean; error?: string | null }; checkedAt?: string } } | null)?.connectionHealth;
+    return { ...publicAccount, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: today.find((t) => t.emailAccountId === a.id)?._count._all ?? 0, quota: { dailyLimit: a.dailySendLimit, source: 'workspace setting (providers do not expose remaining quota)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
   });
 }
 

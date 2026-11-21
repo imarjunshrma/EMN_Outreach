@@ -7,14 +7,18 @@ import { logger } from '../core/logger.js';
 import { AI_OUTPUT_SCHEMAS, AI_TASKS, type AiTaskName } from '../../../shared/src/ai-schemas.js';
 import { DEFAULT_PROMPTS } from '../../../shared/src/prompts.js';
 import { redactForLog } from '../../../integrations/src/ai/guard.js';
+import { AI_PROVIDER_NAMES, type AiProviderName } from '../../../integrations/src/ai/types.js';
 import { ProviderError } from '../../../integrations/src/http.js';
 import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
 
-type ProviderName = 'OPENAI' | 'ANTHROPIC';
+type ProviderName = AiProviderName;
 
 export const SUGGESTED_MODELS: Record<ProviderName, { fast: string; quality: string }> = {
   ANTHROPIC: { fast: 'claude-haiku-5-5', quality: 'claude-sonnet-5-5' },
   OPENAI: { fast: '', quality: '' }, // entered by the user; no default is assumed
+  GOOGLE: { fast: 'gemini-2.5-flash', quality: 'gemini-2.5-pro' },
+  OPENROUTER: { fast: '', quality: '' }, GROQ: { fast: '', quality: '' }, TOGETHER: { fast: '', quality: '' },
+  DEEPSEEK: { fast: '', quality: '' }, MISTRAL: { fast: '', quality: '' }, OLLAMA: { fast: '', quality: '' }, CUSTOM_OPENAI: { fast: '', quality: '' },
 };
 
 const FAST_TASKS: AiTaskName[] = ['REPLY_CLASSIFICATION', 'SUBJECT_LINES', 'ICP_FROM_TEXT'];
@@ -84,7 +88,7 @@ interface Candidate { provider: ProviderName; model: string; fallback: boolean }
 
 async function resolveCandidates(workspaceId: string, task: AiTaskName): Promise<{ candidates: Candidate[]; maxOutputTokens: number; temperature?: number; budget: number | null }> {
   const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true } });
-  if (providers.length === 0) throw new AppError('PROVIDER_NOT_CONFIGURED', 'No AI provider is configured. Add an OpenAI or Anthropic API key in AI settings.', 400);
+  if (providers.length === 0) throw new AppError('PROVIDER_NOT_CONFIGURED', 'No AI provider is configured. Add a provider in AI settings.', 400);
   const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
   const enabled = new Set(providers.map((p) => p.provider));
   const candidates: Candidate[] = [];
@@ -154,10 +158,11 @@ export async function runAi<T = unknown>(
     if (!prov) continue;
     const apiKey = decryptSecret(prov.encryptedApiKey);
     const adapter = adapters().ai[cand.provider];
+    if (!adapter) { lastError = `AI adapter ${cand.provider} is not installed`; continue; }
     let user = userPrompt;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const res = await adapter.generateStructured(apiKey, { model: cand.model, system: prompt.systemPrompt, user, jsonSchema, schemaName: task.toLowerCase(), maxOutputTokens, temperature });
+        const res = await adapter.generateStructured(apiKey, { model: cand.model, system: prompt.systemPrompt, user, jsonSchema, schemaName: task.toLowerCase(), maxOutputTokens, temperature }, { baseUrl: prov.baseUrl });
         const price = await priceFor(cand.provider, cand.model);
         const { cost, priced } = computeCost(price, res.usage);
         const parsed = schema.safeParse(res.data);
@@ -201,17 +206,38 @@ export async function listProviders(workspaceId: string) {
   return ps.map(({ encryptedApiKey: _k, ...p }) => p);
 }
 
-export async function upsertProvider(workspaceId: string, input: { provider: ProviderName; apiKey?: string; defaultModel: string; isEnabled?: boolean }, actor: Actor) {
+function validateBaseUrl(provider: ProviderName, raw?: string | null) {
+  if (!raw?.trim()) {
+    if (provider === 'CUSTOM_OPENAI') throw new AppError('VALIDATION_FAILED', 'A base URL is required for a custom OpenAI-compatible endpoint', 400);
+    return null;
+  }
+  if (provider !== 'CUSTOM_OPENAI' && provider !== 'OLLAMA') throw new AppError('VALIDATION_FAILED', 'A custom endpoint URL is only supported for Ollama or Custom OpenAI-compatible providers', 400);
+  let url: URL;
+  try { url = new URL(raw.trim()); } catch { throw new AppError('VALIDATION_FAILED', 'Endpoint URL must be a valid HTTPS URL or a local HTTP URL', 400); }
+  const hostname = url.hostname.toLowerCase();
+  const localhost = hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === 'host.docker.internal' || hostname === '::1' || hostname === '[::1]';
+  const octets = hostname.split('.').map(Number);
+  const privateIpv4 = octets.length === 4 && octets.every((n) => Number.isInteger(n) && n >= 0 && n <= 255) && (octets[0] === 10 || octets[0] === 192 && octets[1] === 168 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+  if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && (localhost || privateIpv4))) || hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
+    throw new AppError('VALIDATION_FAILED', 'Endpoint must use HTTPS, or HTTP on localhost/private network; credentials, query strings, fragments and link-local addresses are not allowed', 400);
+  }
+  return url.toString().replace(/\/$/, '');
+}
+
+export async function upsertProvider(workspaceId: string, input: { provider: ProviderName; apiKey?: string; defaultModel: string; baseUrl?: string | null; isEnabled?: boolean }, actor: Actor) {
+  const baseUrl = validateBaseUrl(input.provider, input.baseUrl);
   const existing = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: input.provider } } });
-  if (!existing && !input.apiKey) throw new AppError('VALIDATION_FAILED', 'API key is required', 400);
+  const keyOptional = input.provider === 'OLLAMA' || input.provider === 'CUSTOM_OPENAI';
+  if (!existing && !input.apiKey && !keyOptional) throw new AppError('VALIDATION_FAILED', 'API key is required', 400);
   const data = {
     defaultModel: input.defaultModel,
+    baseUrl,
     isEnabled: input.isEnabled ?? true,
     ...(input.apiKey ? { encryptedApiKey: encryptSecret(input.apiKey.trim()), keyLast4: input.apiKey.trim().slice(-4), lastTestOk: null, lastTestedAt: null } : {}),
   };
   const p = existing
     ? await db().aiProvider.update({ where: { id: existing.id }, data })
-    : await db().aiProvider.create({ data: { workspaceId, provider: input.provider, encryptedApiKey: encryptSecret(input.apiKey!.trim()), keyLast4: input.apiKey!.trim().slice(-4), defaultModel: input.defaultModel, isEnabled: input.isEnabled ?? true } });
+    : await db().aiProvider.create({ data: { workspaceId, provider: input.provider, encryptedApiKey: encryptSecret(input.apiKey?.trim() ?? ''), keyLast4: input.apiKey?.trim().slice(-4) ?? '', baseUrl, defaultModel: input.defaultModel, isEnabled: input.isEnabled ?? true } });
   await ensureDefaultRoutes(workspaceId);
   await audit(workspaceId, actor, input.apiKey ? 'ai_provider.key_updated' : 'ai_provider.updated', { type: 'ai_provider', id: p.id }, { provider: input.provider, model: input.defaultModel });
   const { encryptedApiKey: _k, ...safe } = p;
@@ -229,9 +255,20 @@ export async function deleteProvider(workspaceId: string, provider: ProviderName
 export async function testProvider(workspaceId: string, provider: ProviderName) {
   const p = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
   if (!p) throw NotFound('AI provider');
-  const r = await adapters().ai[provider].testConnection(decryptSecret(p.encryptedApiKey), p.defaultModel);
+  const adapter = adapters().ai[provider];
+  if (!adapter) throw new AppError('PROVIDER_NOT_CONFIGURED', `AI adapter ${provider} is not installed`, 400);
+  const r = await adapter.testConnection(decryptSecret(p.encryptedApiKey), p.defaultModel, { baseUrl: p.baseUrl });
   await db().aiProvider.update({ where: { id: p.id }, data: { lastTestedAt: new Date(), lastTestOk: r.ok, lastTestError: r.ok ? null : r.error.slice(0, 500) } });
   return r;
+}
+
+export async function providerModels(workspaceId: string, provider: ProviderName) {
+  const p = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
+  if (!p) throw NotFound('AI provider');
+  const adapter = adapters().ai[provider];
+  if (!adapter?.listModels) return { models: [], warning: 'This provider does not expose a model list. Enter its model ID manually.' };
+  try { return { models: await adapter.listModels(decryptSecret(p.encryptedApiKey), { baseUrl: p.baseUrl }), warning: null }; }
+  catch { return { models: [], warning: 'Could not load models. Check the provider connection or enter a model ID manually.' }; }
 }
 
 /** Make sure every task has a route; add the other provider as fallback when both exist. */
@@ -253,9 +290,9 @@ export async function ensureDefaultRoutes(workspaceId: string) {
 
 export const RouteUpdateSchema = z.object({
   task: z.enum(AI_TASKS as [AiTaskName, ...AiTaskName[]]),
-  provider: z.enum(['OPENAI', 'ANTHROPIC']),
+  provider: z.enum(AI_PROVIDER_NAMES),
   model: z.string().min(1),
-  fallbackProvider: z.enum(['OPENAI', 'ANTHROPIC']).nullable().optional(),
+  fallbackProvider: z.enum(AI_PROVIDER_NAMES).nullable().optional(),
   fallbackModel: z.string().nullable().optional(),
   temperature: z.number().min(0).max(2).nullable().optional(),
   maxOutputTokens: z.number().int().min(100).max(16000).optional(),
