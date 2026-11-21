@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false },
+  "include": ["shared/src", "integrations/src", "backend/src", "worker/src"],
+  "exclude": ["node_modules", "dist", "frontend", "tests"]
+}

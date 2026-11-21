@@ -1,0 +1,30 @@
+[Unit]
+Description=EMN Outreach OS — API
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=emn
+Group=emn
+WorkingDirectory=/opt/emn/current
+Environment=NODE_ENV=production
+Environment=EMN_ENV_FILE=/opt/emn/shared/.env
+Environment=EMN_SERVICE=emn-api
+ExecStart=/usr/bin/node dist/backend/src/main.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/emn/api.log
+StandardError=append:/var/log/emn/api.log
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/emn /var/log/emn
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

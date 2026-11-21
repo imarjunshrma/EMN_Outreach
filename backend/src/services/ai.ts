@@ -1,0 +1,346 @@
+import { z } from 'zod';
+import { db, Prisma } from '../core/db.js';
+import { adapters } from '../core/container.js';
+import { AppError, NotFound } from '../core/errors.js';
+import { audit, type Actor } from '../core/audit.js';
+import { logger } from '../core/logger.js';
+import { AI_OUTPUT_SCHEMAS, AI_TASKS, type AiTaskName } from '../../../shared/src/ai-schemas.js';
+import { DEFAULT_PROMPTS } from '../../../shared/src/prompts.js';
+import { redactForLog } from '../../../integrations/src/ai/guard.js';
+import { ProviderError } from '../../../integrations/src/http.js';
+import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
+
+type ProviderName = 'OPENAI' | 'ANTHROPIC';
+
+export const SUGGESTED_MODELS: Record<ProviderName, { fast: string; quality: string }> = {
+  ANTHROPIC: { fast: 'claude-haiku-5-5', quality: 'claude-sonnet-5-5' },
+  OPENAI: { fast: '', quality: '' }, // entered by the user; no default is assumed
+};
+
+const FAST_TASKS: AiTaskName[] = ['REPLY_CLASSIFICATION', 'SUBJECT_LINES', 'ICP_FROM_TEXT'];
+
+export function renderPrompt(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, k: string) => vars[k] ?? '');
+}
+
+export function jsonSchemaFor(task: AiTaskName): Record<string, unknown> {
+  const js = z.toJSONSchema(AI_OUTPUT_SCHEMAS[task], { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+  delete js.$schema;
+  return js;
+}
+
+async function priceFor(provider: ProviderName, model: string) {
+  return db().aiModelPrice.findFirst({ where: { provider, model, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } });
+}
+
+export function computeCost(p: { inputPerMTokUsd: Prisma.Decimal; outputPerMTokUsd: Prisma.Decimal; cachedInputPerMTokUsd: Prisma.Decimal | null } | null, u: { inputTokens: number; outputTokens: number; cachedTokens: number }) {
+  if (!p) return { cost: 0, priced: false };
+  const uncached = Math.max(0, u.inputTokens - u.cachedTokens);
+  const cachedRate = Number(p.cachedInputPerMTokUsd ?? p.inputPerMTokUsd);
+  const cost = (uncached * Number(p.inputPerMTokUsd) + u.cachedTokens * cachedRate + u.outputTokens * Number(p.outputPerMTokUsd)) / 1_000_000;
+  return { cost, priced: true };
+}
+
+function monthStart() { const start = new Date(); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0); return start; }
+
+async function monthSpend(workspaceId: string, task?: AiTaskName) {
+  const r = await db().aiExecution.aggregate({ where: { workspaceId, ...(task ? { task } : {}), createdAt: { gte: monthStart() } }, _sum: { costUsd: true } });
+  return Number(r._sum.costUsd ?? 0);
+}
+
+/** AI spend attributed to one lead within one campaign (all tasks, all time). */
+export async function leadSpend(workspaceId: string, campaignId: string, leadId: string) {
+  const r = await db().aiExecution.aggregate({ where: { workspaceId, campaignId, leadId }, _sum: { costUsd: true } });
+  return Number(r._sum.costUsd ?? 0);
+}
+
+/** Upper-bound cost estimate for one call (input chars/4 tokens + full output budget). */
+export async function estimateCallCost(workspaceId: string, task: AiTaskName, inputChars: number, outputTokens?: number) {
+  const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
+  const provider = await db().aiProvider.findFirst({ where: { workspaceId, isEnabled: true, ...(route ? { provider: route.provider } : {}) } });
+  if (!provider) return { usd: 0, priced: false, model: null as string | null };
+  const model = route?.model ?? provider.defaultModel;
+  const price = await priceFor(provider.provider, model);
+  const inputTokens = Math.ceil(inputChars / 4) + 600; // + system prompt
+  const out = outputTokens ?? route?.maxOutputTokens ?? 1500;
+  const { cost, priced } = computeCost(price, { inputTokens, outputTokens: out, cachedTokens: 0 });
+  return { usd: cost, priced, model };
+}
+
+export async function routeLimits(workspaceId: string, task: AiTaskName) {
+  const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
+  return { maxInputTokens: route?.maxInputTokens ?? null, maxOutputTokens: route?.maxOutputTokens ?? 1500 };
+}
+
+async function ensurePrompt(workspaceId: string, task: AiTaskName) {
+  const p = await db().promptTemplate.findFirst({ where: { workspaceId, task, isActive: true }, orderBy: { version: 'desc' } });
+  if (p) return p;
+  const d = DEFAULT_PROMPTS[task];
+  if (!d || (await db().promptTemplate.count({ where: { workspaceId, task } }))) return null; // user deactivated everything on purpose
+  return db().promptTemplate.upsert({ where: { workspaceId_task_version: { workspaceId, task, version: 1 } }, update: {}, create: { workspaceId, task, version: 1, systemPrompt: d.system, userPromptTemplate: d.user, isActive: true, changeNote: 'Built-in default' } });
+}
+
+interface Candidate { provider: ProviderName; model: string; fallback: boolean }
+
+async function resolveCandidates(workspaceId: string, task: AiTaskName): Promise<{ candidates: Candidate[]; maxOutputTokens: number; temperature?: number; budget: number | null }> {
+  const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true } });
+  if (providers.length === 0) throw new AppError('PROVIDER_NOT_CONFIGURED', 'No AI provider is configured. Add an OpenAI or Anthropic API key in AI settings.', 400);
+  const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
+  const enabled = new Set(providers.map((p) => p.provider));
+  const candidates: Candidate[] = [];
+  if (route && enabled.has(route.provider)) candidates.push({ provider: route.provider, model: route.model, fallback: false });
+  if (route?.fallbackProvider && route.fallbackModel && enabled.has(route.fallbackProvider)) candidates.push({ provider: route.fallbackProvider, model: route.fallbackModel, fallback: true });
+  if (candidates.length === 0) for (const p of providers) candidates.push({ provider: p.provider, model: p.defaultModel, fallback: candidates.length > 0 });
+  return { candidates, maxOutputTokens: route?.maxOutputTokens ?? 1500, temperature: route?.temperature ?? undefined, budget: route?.monthlyBudgetUsd ? Number(route.monthlyBudgetUsd) : null };
+}
+
+export interface AiRunResult<T> { data: T; executionId: string; provider: ProviderName; model: string }
+
+/**
+ * Run one AI task end-to-end: route → prompt → provider call → schema validation (one repair
+ * attempt) → fallback provider on failure → cost + execution log.
+ */
+export async function runAi<T = unknown>(
+  workspaceId: string,
+  task: AiTaskName,
+  vars: Record<string, string>,
+  opts: {
+    entity?: { type: string; id: string };
+    critical?: boolean;
+    /** Attribute cost to a campaign/lead (enables per-lead cost limits). */
+    attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null };
+    /** Refuse the call if spend for this campaign+lead plus the estimated cost would exceed maxUsd. */
+    maxLeadCostUsd?: number | null;
+  } = {},
+): Promise<AiRunResult<T>> {
+  const { candidates, maxOutputTokens, temperature, budget } = await resolveCandidates(workspaceId, task);
+  if (budget !== null && !opts.critical && (await monthSpend(workspaceId, task)) >= budget) {
+    throw new AppError('AI_BUDGET_EXCEEDED', `Monthly AI budget for ${task} is used up`, 402);
+  }
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const wsBudget = readSettings(ws?.settings).aiMonthlyBudgetUsd;
+  if (wsBudget !== null && !opts.critical && (await monthSpend(workspaceId)) >= wsBudget) {
+    throw new AppError('AI_BUDGET_EXCEEDED', `The workspace monthly AI budget ($${wsBudget}) is used up`, 402);
+  }
+  if (!opts.critical) {
+    const ent = await import('./entitlements.js');
+    const { orgIdOf } = await import('../core/tenant.js');
+    try { await ent.assertMetered(await orgIdOf(workspaceId), 'ai_cost_micro_usd'); } catch (e) {
+      throw (e as { code?: string }).code === 'QUOTA_EXCEEDED' ? new AppError('AI_BUDGET_EXCEEDED', (e as Error).message, 402) : e;
+    }
+  }
+  const prompt = await ensurePrompt(workspaceId, task);
+  if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
+  const schema = AI_OUTPUT_SCHEMAS[task];
+  const jsonSchema = jsonSchemaFor(task);
+  let userPrompt = renderPrompt(prompt.userPromptTemplate, vars);
+  const limits = await routeLimits(workspaceId, task);
+  if (limits.maxInputTokens && userPrompt.length > limits.maxInputTokens * 4) {
+    userPrompt = `${userPrompt.slice(0, limits.maxInputTokens * 4)}\n[input truncated to the ${limits.maxInputTokens}-token limit for ${task}]`;
+  }
+  const att = { campaignId: opts.attribution?.campaignId ?? null, leadId: opts.attribution?.leadId ?? null, profileVersionId: opts.attribution?.profileVersionId ?? null };
+  if (opts.maxLeadCostUsd != null && att.campaignId && att.leadId) {
+    const spent = await leadSpend(workspaceId, att.campaignId, att.leadId);
+    const est = await estimateCallCost(workspaceId, task, prompt.systemPrompt.length + userPrompt.length, Math.min(maxOutputTokens, 1500));
+    if (spent + est.usd > opts.maxLeadCostUsd) {
+      throw new AppError('AI_COST_LIMIT', `AI cost limit per lead reached ($${spent.toFixed(4)} spent + ~$${est.usd.toFixed(4)} estimated > $${opts.maxLeadCostUsd})`, 402, { spentUsd: spent, estimateUsd: est.usd, limitUsd: opts.maxLeadCostUsd });
+    }
+  }
+  const preview = redactForLog(userPrompt).slice(0, 1500);
+  let lastError = 'unknown error';
+
+  for (const cand of candidates) {
+    const prov = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: cand.provider } } });
+    if (!prov) continue;
+    const apiKey = decryptSecret(prov.encryptedApiKey);
+    const adapter = adapters().ai[cand.provider];
+    let user = userPrompt;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await adapter.generateStructured(apiKey, { model: cand.model, system: prompt.systemPrompt, user, jsonSchema, schemaName: task.toLowerCase(), maxOutputTokens, temperature });
+        const price = await priceFor(cand.provider, cand.model);
+        const { cost, priced } = computeCost(price, res.usage);
+        const parsed = schema.safeParse(res.data);
+        const exec = await db().aiExecution.create({
+          data: {
+            workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id,
+            status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: cand.fallback,
+            inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens, cachedTokens: res.usage.cachedTokens,
+            costUsd: cost, costIsEstimate: !priced, latencyMs: res.latencyMs,
+            entityType: opts.entity?.type, entityId: opts.entity?.id, ...att,
+            inputPreview: preview,
+            output: (res.data ?? null) as Prisma.InputJsonValue,
+            errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+          },
+        });
+        const usage = await import('./usage.js');
+        usage.meter({ workspaceId, metric: 'ai_requests', quantity: 1, key: `ai:${exec.id}` });
+        usage.meter({ workspaceId, metric: 'ai_tokens', quantity: (res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0), key: `ai-tok:${exec.id}` });
+        usage.meter({ workspaceId, metric: 'ai_cost_micro_usd', quantity: Math.round(Number(cost ?? 0) * 1_000_000), key: `ai-cost:${exec.id}` });
+        if (parsed.success) return { data: parsed.data as T, executionId: exec.id, provider: cand.provider, model: cand.model };
+        lastError = `schema invalid: ${exec.errorMessage}`;
+        user = `${userPrompt}\n\nYour previous answer failed validation (${exec.errorMessage}). Return output that matches the schema exactly.`;
+      } catch (e) {
+        lastError = (e as Error).message;
+        await db().aiExecution.create({
+          data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: preview },
+        });
+        logger.warn({ task, provider: cand.provider, err: lastError }, 'AI call failed');
+        if (e instanceof ProviderError && !e.retryable && e.status && e.status < 500 && e.status !== 429) break; // bad key/model → try fallback
+        break; // transient errors already retried in the HTTP layer
+      }
+    }
+  }
+  throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed: ${lastError}`, 502);
+}
+
+// ---------------------------------------------------------------- provider configuration
+
+export async function listProviders(workspaceId: string) {
+  const ps = await db().aiProvider.findMany({ where: { workspaceId }, orderBy: { provider: 'asc' } });
+  return ps.map(({ encryptedApiKey: _k, ...p }) => p);
+}
+
+export async function upsertProvider(workspaceId: string, input: { provider: ProviderName; apiKey?: string; defaultModel: string; isEnabled?: boolean }, actor: Actor) {
+  const existing = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: input.provider } } });
+  if (!existing && !input.apiKey) throw new AppError('VALIDATION_FAILED', 'API key is required', 400);
+  const data = {
+    defaultModel: input.defaultModel,
+    isEnabled: input.isEnabled ?? true,
+    ...(input.apiKey ? { encryptedApiKey: encryptSecret(input.apiKey.trim()), keyLast4: input.apiKey.trim().slice(-4), lastTestOk: null, lastTestedAt: null } : {}),
+  };
+  const p = existing
+    ? await db().aiProvider.update({ where: { id: existing.id }, data })
+    : await db().aiProvider.create({ data: { workspaceId, provider: input.provider, encryptedApiKey: encryptSecret(input.apiKey!.trim()), keyLast4: input.apiKey!.trim().slice(-4), defaultModel: input.defaultModel, isEnabled: input.isEnabled ?? true } });
+  await ensureDefaultRoutes(workspaceId);
+  await audit(workspaceId, actor, input.apiKey ? 'ai_provider.key_updated' : 'ai_provider.updated', { type: 'ai_provider', id: p.id }, { provider: input.provider, model: input.defaultModel });
+  const { encryptedApiKey: _k, ...safe } = p;
+  return safe;
+}
+
+export async function deleteProvider(workspaceId: string, provider: ProviderName, actor: Actor) {
+  await db().aiProvider.deleteMany({ where: { workspaceId, provider } });
+  await db().aiModelRoute.deleteMany({ where: { workspaceId, provider } });
+  await db().aiModelRoute.updateMany({ where: { workspaceId, fallbackProvider: provider }, data: { fallbackProvider: null, fallbackModel: null } });
+  await ensureDefaultRoutes(workspaceId);
+  await audit(workspaceId, actor, 'ai_provider.removed', undefined, { provider });
+}
+
+export async function testProvider(workspaceId: string, provider: ProviderName) {
+  const p = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider } } });
+  if (!p) throw NotFound('AI provider');
+  const r = await adapters().ai[provider].testConnection(decryptSecret(p.encryptedApiKey), p.defaultModel);
+  await db().aiProvider.update({ where: { id: p.id }, data: { lastTestedAt: new Date(), lastTestOk: r.ok, lastTestError: r.ok ? null : r.error.slice(0, 500) } });
+  return r;
+}
+
+/** Make sure every task has a route; add the other provider as fallback when both exist. */
+export async function ensureDefaultRoutes(workspaceId: string) {
+  const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, orderBy: { provider: 'asc' } });
+  if (providers.length === 0) return;
+  const primary = providers.find((p) => p.provider === 'ANTHROPIC') ?? providers[0];
+  const secondary = providers.find((p) => p.provider !== primary.provider) ?? null;
+  for (const task of AI_TASKS) {
+    const existing = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
+    const model = primary.provider === 'ANTHROPIC' && FAST_TASKS.includes(task) ? SUGGESTED_MODELS.ANTHROPIC.fast : primary.defaultModel;
+    if (!existing) {
+      await db().aiModelRoute.create({ data: { workspaceId, task, provider: primary.provider, model, fallbackProvider: secondary?.provider ?? null, fallbackModel: secondary?.defaultModel ?? null } });
+    } else if (!existing.fallbackProvider && secondary && secondary.provider !== existing.provider) {
+      await db().aiModelRoute.update({ where: { id: existing.id }, data: { fallbackProvider: secondary.provider, fallbackModel: secondary.defaultModel } });
+    }
+  }
+}
+
+export const RouteUpdateSchema = z.object({
+  task: z.enum(AI_TASKS as [AiTaskName, ...AiTaskName[]]),
+  provider: z.enum(['OPENAI', 'ANTHROPIC']),
+  model: z.string().min(1),
+  fallbackProvider: z.enum(['OPENAI', 'ANTHROPIC']).nullable().optional(),
+  fallbackModel: z.string().nullable().optional(),
+  temperature: z.number().min(0).max(2).nullable().optional(),
+  maxOutputTokens: z.number().int().min(100).max(16000).optional(),
+  maxInputTokens: z.number().int().min(500).max(200000).nullable().optional(),
+  monthlyBudgetUsd: z.number().min(0).nullable().optional(),
+});
+
+export async function listRoutes(workspaceId: string) {
+  return db().aiModelRoute.findMany({ where: { workspaceId }, orderBy: { task: 'asc' } });
+}
+
+export async function updateRoute(workspaceId: string, input: z.infer<typeof RouteUpdateSchema>, actor: Actor) {
+  const data = {
+    provider: input.provider, model: input.model,
+    fallbackProvider: input.fallbackProvider ?? null, fallbackModel: input.fallbackProvider ? input.fallbackModel ?? null : null,
+    temperature: input.temperature ?? null, maxOutputTokens: input.maxOutputTokens ?? 1500,
+    maxInputTokens: input.maxInputTokens ?? null,
+    monthlyBudgetUsd: input.monthlyBudgetUsd ?? null,
+  };
+  const r = await db().aiModelRoute.upsert({ where: { workspaceId_task: { workspaceId, task: input.task } }, update: data, create: { workspaceId, task: input.task, ...data } });
+  await audit(workspaceId, actor, 'ai_route.updated', { type: 'ai_route', id: r.id }, { task: input.task, provider: input.provider, model: input.model });
+  return r;
+}
+
+// ---------------------------------------------------------------- prompts
+
+export async function listPrompts(workspaceId: string, task?: AiTaskName) {
+  return db().promptTemplate.findMany({ where: { workspaceId, ...(task ? { task } : {}) }, orderBy: [{ task: 'asc' }, { version: 'desc' }] });
+}
+
+export async function createPromptVersion(workspaceId: string, input: { task: AiTaskName; systemPrompt: string; userPromptTemplate: string; changeNote?: string; activate?: boolean }, actor: Actor) {
+  const last = await db().promptTemplate.findFirst({ where: { workspaceId, task: input.task }, orderBy: { version: 'desc' } });
+  const version = (last?.version ?? 0) + 1;
+  const p = await db().$transaction(async (tx) => {
+    if (input.activate) await tx.promptTemplate.updateMany({ where: { workspaceId, task: input.task }, data: { isActive: false } });
+    return tx.promptTemplate.create({ data: { workspaceId, task: input.task, version, systemPrompt: input.systemPrompt, userPromptTemplate: input.userPromptTemplate, changeNote: input.changeNote, isActive: !!input.activate, createdById: actor.userId ?? null } });
+  });
+  await audit(workspaceId, actor, 'prompt.version_created', { type: 'prompt', id: p.id }, { task: input.task, version, activated: !!input.activate });
+  return p;
+}
+
+export async function activatePrompt(workspaceId: string, id: string, actor: Actor) {
+  const p = await db().promptTemplate.findFirst({ where: { id, workspaceId } });
+  if (!p) throw NotFound('Prompt');
+  await db().$transaction([
+    db().promptTemplate.updateMany({ where: { workspaceId, task: p.task }, data: { isActive: false } }),
+    db().promptTemplate.update({ where: { id }, data: { isActive: true } }),
+  ]);
+  await audit(workspaceId, actor, 'prompt.activated', { type: 'prompt', id }, { task: p.task, version: p.version });
+}
+
+// ---------------------------------------------------------------- usage & prices
+
+export async function usageReport(workspaceId: string, days: number) {
+  const since = new Date(Date.now() - days * 86400_000);
+  const byTask = await db().aiExecution.groupBy({ by: ['task', 'provider', 'model'], where: { workspaceId, createdAt: { gte: since } }, _sum: { inputTokens: true, outputTokens: true, costUsd: true }, _count: { _all: true } });
+  const failures = await db().aiExecution.count({ where: { workspaceId, createdAt: { gte: since }, status: { not: 'SUCCEEDED' } } });
+  const unpriced = await db().aiExecution.count({ where: { workspaceId, createdAt: { gte: since }, costIsEstimate: true, status: 'SUCCEEDED' } });
+  const daily = await db().$queryRaw<Array<{ day: Date; calls: bigint; cost: Prisma.Decimal | null; tokens: bigint | null }>>`
+    SELECT date_trunc('day', "createdAt") AS day, count(*) AS calls, sum("costUsd") AS cost, sum("inputTokens" + "outputTokens") AS tokens
+    FROM "AiExecution" WHERE "workspaceId" = ${workspaceId}::uuid AND "createdAt" >= ${since}
+    GROUP BY 1 ORDER BY 1`;
+  return {
+    byTask: byTask.map((r) => ({ task: r.task, provider: r.provider, model: r.model, calls: r._count._all, inputTokens: r._sum.inputTokens ?? 0, outputTokens: r._sum.outputTokens ?? 0, costUsd: Number(r._sum.costUsd ?? 0) })),
+    daily: daily.map((d) => ({ day: d.day.toISOString().slice(0, 10), calls: Number(d.calls), costUsd: Number(d.cost ?? 0), tokens: Number(d.tokens ?? 0) })),
+    failures,
+    note: unpriced > 0 ? `${unpriced} successful calls used models with no price configured; their cost is shown as 0 (estimate).` : 'Costs are estimates computed from token counts reported by the provider and the configured price table.',
+  };
+}
+
+export async function listExecutions(workspaceId: string, q: { page: number; pageSize: number; task?: AiTaskName; status?: string }) {
+  const where: Prisma.AiExecutionWhereInput = { workspaceId, ...(q.task ? { task: q.task } : {}), ...(q.status ? { status: q.status as never } : {}) };
+  const [items, total] = await Promise.all([
+    db().aiExecution.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
+    db().aiExecution.count({ where }),
+  ]);
+  return { items, total };
+}
+
+export async function listPrices() {
+  return db().aiModelPrice.findMany({ orderBy: [{ provider: 'asc' }, { model: 'asc' }, { effectiveFrom: 'desc' }] });
+}
+
+export async function upsertPrice(input: { provider: ProviderName; model: string; inputPerMTokUsd: number; outputPerMTokUsd: number; cachedInputPerMTokUsd?: number | null }, actor: Actor) {
+  const p = await db().aiModelPrice.create({ data: { ...input, cachedInputPerMTokUsd: input.cachedInputPerMTokUsd ?? null, effectiveFrom: new Date() } });
+  await audit(null, actor, 'ai_price.added', { type: 'ai_price', id: p.id }, input);
+  return p;
+}

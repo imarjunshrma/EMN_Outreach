@@ -1,0 +1,161 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { qs, type Paged } from '@/lib/api';
+import { useWsMutation, useWsQuery } from '@/lib/hooks';
+import { fmtDate, fmtUsd } from '@/lib/format';
+import { AI_TASKS } from '@/lib/constants';
+import { Badge, Button, Card, Checkbox, Field, Input, Notice, PageHeader, Pagination, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export default function AiSettings() {
+  const [tab, setTab] = useState('providers');
+  return (
+    <>
+      <PageHeader title="AI models & prompts" subtitle="Configure OpenAI and Claude independently. Keys are encrypted at rest and never shown again. Each task can use its own model with automatic fallback to the other provider." />
+      <Tabs active={tab} onChange={setTab} tabs={[{ id: 'providers', label: 'Providers & keys' }, { id: 'routes', label: 'Model routing' }, { id: 'prompts', label: 'Prompt versions' }, { id: 'logs', label: 'AI response logs' }, { id: 'prices', label: 'Prices' }]} />
+      {tab === 'providers' && <Providers />}
+      {tab === 'routes' && <Routes />}
+      {tab === 'prompts' && <Prompts />}
+      {tab === 'logs' && <Logs />}
+      {tab === 'prices' && <Prices />}
+    </>
+  );
+}
+
+function Providers() {
+  const q = useWsQuery<{ providers: any[]; suggestions: Record<string, { fast: string; quality: string }> }>('/ai/providers');
+  const [forms, setForms] = useState<Record<string, { apiKey: string; defaultModel: string; isEnabled: boolean }>>({ ANTHROPIC: { apiKey: '', defaultModel: 'claude-sonnet-5-5', isEnabled: true }, OPENAI: { apiKey: '', defaultModel: '', isEnabled: true } });
+  useEffect(() => { if (q.data) { const next = { ...forms }; for (const p of q.data.providers) next[p.provider] = { apiKey: '', defaultModel: p.defaultModel, isEnabled: p.isEnabled }; setForms(next); } }, [q.data]); // eslint-disable-line react-hooks/exhaustive-deps
+  const save = useWsMutation<string>((p) => ({ path: '/ai/providers', method: 'PUT', body: { provider: p, defaultModel: forms[p].defaultModel, isEnabled: forms[p].isEnabled, ...(forms[p].apiKey ? { apiKey: forms[p].apiKey } : {}) } }), { success: 'Saved', onSuccess: () => setForms((f) => ({ ...f, ANTHROPIC: { ...f.ANTHROPIC, apiKey: '' }, OPENAI: { ...f.OPENAI, apiKey: '' } })) });
+  const test = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}/test`, body: {} }), { success: (r: any) => (r.ok ? 'Connection OK' : `Failed: ${r.error}`) });
+  const del = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}`, method: 'DELETE' }), { success: 'Removed' });
+  return (
+    <QueryView q={q}>
+      {(d) => (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {(['ANTHROPIC', 'OPENAI'] as const).map((p) => {
+            const cur = d.providers.find((x) => x.provider === p);
+            const f = forms[p];
+            return (
+              <Card key={p} title={<>{p === 'ANTHROPIC' ? 'Anthropic Claude' : 'OpenAI'} {cur ? <Badge color="green">configured ••••{cur.keyLast4}</Badge> : <Badge>not configured</Badge>}</>}>
+                <Field label={cur ? 'Replace API key (leave blank to keep)' : 'API key'}><Input type="password" autoComplete="off" value={f.apiKey} onChange={(e) => setForms({ ...forms, [p]: { ...f, apiKey: e.target.value } })} /></Field>
+                <Field label="Default model" hint={p === 'ANTHROPIC' ? `e.g. ${d.suggestions.ANTHROPIC.quality} (quality) or ${d.suggestions.ANTHROPIC.fast} (fast/cheap)` : 'Enter the exact model id from your OpenAI account'}><Input value={f.defaultModel} onChange={(e) => setForms({ ...forms, [p]: { ...f, defaultModel: e.target.value } })} /></Field>
+                <div className="mt-2"><Checkbox label="Enabled" checked={f.isEnabled} onChange={(v) => setForms({ ...forms, [p]: { ...f, isEnabled: v } })} /></div>
+                {cur?.lastTestedAt && <p className="mt-2 text-xs">{cur.lastTestOk ? '✅' : '❌'} tested {fmtDate(cur.lastTestedAt)} {cur.lastTestError && <span className="text-red-600">{cur.lastTestError}</span>}</p>}
+                <div className="mt-3 flex gap-2"><Button disabled={!f.defaultModel || (!cur && !f.apiKey)} loading={save.isPending} onClick={() => save.mutate(p)}>Save</Button>{cur && <Button variant="secondary" loading={test.isPending} onClick={() => test.mutate(p)}>Test connection</Button>}{cur && <Button variant="ghost" onClick={() => window.confirm('Remove this provider?') && del.mutate(p)}>Remove</Button>}</div>
+              </Card>
+            );
+          })}
+          <div className="lg:col-span-2"><Notice>When both providers are configured, every task automatically falls back to the other provider if the primary fails. Use the Model routing tab to choose models per task and set monthly budgets.</Notice></div>
+        </div>
+      )}
+    </QueryView>
+  );
+}
+
+function Routes() {
+  const q = useWsQuery<any[]>('/ai/routes');
+  const [edits, setEdits] = useState<Record<string, any>>({});
+  const save = useWsMutation<string>((task) => ({ path: '/ai/routes', method: 'PUT', body: { task, ...edits[task], monthlyBudgetUsd: edits[task].monthlyBudgetUsd === '' || edits[task].monthlyBudgetUsd === null ? null : Number(edits[task].monthlyBudgetUsd) } }), { success: 'Route saved' });
+  return (
+    <QueryView q={q} isEmpty={(d) => d.length === 0} empty={<Notice>Add an AI provider first; default routes are created automatically.</Notice>}>
+      {(rows) => (
+        <div className="card p-2"><Table head={['Task', 'Provider', 'Model', 'Fallback', 'Fallback model', 'Max tokens', 'Monthly budget $', '']}>
+          {AI_TASKS.map((t) => {
+            const r = rows.find((x) => x.task === t);
+            const e = edits[t] ?? { provider: r?.provider ?? 'ANTHROPIC', model: r?.model ?? '', fallbackProvider: r?.fallbackProvider ?? null, fallbackModel: r?.fallbackModel ?? '', maxOutputTokens: r?.maxOutputTokens ?? 1500, monthlyBudgetUsd: r?.monthlyBudgetUsd ?? '' };
+            const set = (k: string, v: unknown) => setEdits({ ...edits, [t]: { ...e, [k]: v } });
+            return (
+              <tr key={t}><td className="td text-xs font-medium">{t}</td>
+                <td className="td"><Select value={e.provider} onChange={(x) => set('provider', x.target.value)} options={['ANTHROPIC', 'OPENAI']} /></td>
+                <td className="td"><Input value={e.model} onChange={(x) => set('model', x.target.value)} /></td>
+                <td className="td"><Select value={e.fallbackProvider ?? ''} onChange={(x) => set('fallbackProvider', x.target.value || null)} options={[{ value: '', label: 'none' }, { value: 'ANTHROPIC', label: 'Anthropic' }, { value: 'OPENAI', label: 'OpenAI' }]} /></td>
+                <td className="td"><Input value={e.fallbackModel ?? ''} onChange={(x) => set('fallbackModel', x.target.value)} /></td>
+                <td className="td w-24"><Input type="number" value={e.maxOutputTokens} onChange={(x) => set('maxOutputTokens', Number(x.target.value))} /></td>
+                <td className="td w-28"><Input type="number" value={e.monthlyBudgetUsd ?? ''} onChange={(x) => set('monthlyBudgetUsd', x.target.value)} /></td>
+                <td className="td"><Button variant="secondary" disabled={!e.model} onClick={() => { setEdits({ ...edits, [t]: e }); save.mutate(t); }}>Save</Button></td>
+              </tr>
+            );
+          })}
+        </Table></div>
+      )}
+    </QueryView>
+  );
+}
+
+function Prompts() {
+  const [task, setTask] = useState(AI_TASKS[0]);
+  const q = useWsQuery<any[]>(`/ai/prompts?task=${task}`);
+  const [draft, setDraft] = useState<{ systemPrompt: string; userPromptTemplate: string; changeNote: string } | null>(null);
+  const create = useWsMutation<boolean>((activate) => ({ path: '/ai/prompts', body: { task, ...draft, activate } }), { success: 'New version saved', onSuccess: () => setDraft(null) });
+  const activate = useWsMutation<string>((id) => ({ path: `/ai/prompts/${id}/activate`, body: {} }), { success: 'Activated' });
+  return (
+    <>
+      <Select className="mb-3 w-72" value={task} onChange={(e) => { setTask(e.target.value); setDraft(null); }} options={AI_TASKS} />
+      <Notice>Prompts are versioned and never edited in place. Untrusted content (websites, emails, uploads) is always wrapped in &lt;untrusted_content&gt; tags by the system — keep the instruction that tells the model to ignore instructions inside them.</Notice>
+      <QueryView q={q}>
+        {(rows) => (
+          <div className="mt-3 grid gap-4 lg:grid-cols-2">
+            <div className="space-y-3">{rows.map((p) => (
+              <Card key={p.id} title={<>v{p.version} {p.isActive && <Badge color="green">active</Badge>}</>} actions={<><Button variant="ghost" onClick={() => setDraft({ systemPrompt: p.systemPrompt, userPromptTemplate: p.userPromptTemplate, changeNote: '' })}>Copy to new version</Button>{!p.isActive && <Button variant="secondary" onClick={() => activate.mutate(p.id)}>Activate</Button>}</>}>
+                <p className="text-xs text-slate-500">{p.changeNote} · {fmtDate(p.createdAt)}</p>
+                <details className="mt-2 text-xs"><summary className="cursor-pointer">Show prompt</summary><pre className="mt-2 whitespace-pre-wrap rounded bg-slate-50 p-2">{p.systemPrompt}{'\n\n---\n'}{p.userPromptTemplate}</pre></details>
+              </Card>
+            ))}</div>
+            {draft && (
+              <Card title="New version">
+                <Field label="System prompt"><Textarea rows={10} value={draft.systemPrompt} onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })} /></Field>
+                <Field label="User prompt template" hint="Keep the {{placeholders}}"><Textarea rows={6} value={draft.userPromptTemplate} onChange={(e) => setDraft({ ...draft, userPromptTemplate: e.target.value })} /></Field>
+                <Field label="Change note"><Input value={draft.changeNote} onChange={(e) => setDraft({ ...draft, changeNote: e.target.value })} /></Field>
+                <div className="mt-3 flex gap-2"><Button loading={create.isPending} onClick={() => create.mutate(true)}>Save & activate</Button><Button variant="secondary" onClick={() => create.mutate(false)}>Save as draft</Button></div>
+              </Card>
+            )}
+          </div>
+        )}
+      </QueryView>
+    </>
+  );
+}
+
+function Logs() {
+  const [f, setF] = useState({ task: '', status: '', page: 1 });
+  const q = useWsQuery<Paged<any>>(`/ai/executions${qs({ ...f, pageSize: 30 })}`);
+  return (
+    <>
+      <div className="mb-3 flex gap-2"><Select className="w-64" value={f.task} onChange={(e) => setF({ ...f, task: e.target.value, page: 1 })} options={[{ value: '', label: 'All tasks' }, ...AI_TASKS.map((t) => ({ value: t, label: t }))]} /><Select className="w-48" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value, page: 1 })} options={[{ value: '', label: 'All statuses' }, ...['SUCCEEDED', 'FAILED', 'SCHEMA_INVALID', 'BLOCKED'].map((s) => ({ value: s, label: s }))]} /></div>
+      <QueryView q={q}>
+        {(d) => (
+          <div className="card p-2">
+            <Table head={['When', 'Task', 'Provider / model', 'Status', 'Tokens in/out', 'Cost', 'Latency', 'Details']}>
+              {d.data.map((e: any) => <tr key={e.id}><td className="td text-xs">{fmtDate(e.createdAt)}</td><td className="td text-xs">{e.task}</td><td className="td text-xs">{e.provider} · {e.model}{e.usedFallback && <Badge color="yellow">fallback</Badge>}</td><td className="td"><Badge>{e.status}</Badge></td><td className="td text-xs">{e.inputTokens}/{e.outputTokens}</td><td className="td text-xs">{fmtUsd(Number(e.costUsd))}{e.costIsEstimate && '*'}</td><td className="td text-xs">{e.latencyMs ?? '—'} ms</td>
+                <td className="td text-xs"><details><summary className="cursor-pointer">view</summary>{e.errorMessage && <p className="text-red-600">{e.errorMessage}</p>}<pre className="max-w-md whitespace-pre-wrap">{e.output ? JSON.stringify(e.output, null, 2).slice(0, 3000) : '(output removed by retention or none)'}</pre></details></td></tr>)}
+            </Table>
+            <Pagination page={d.page} totalPages={d.totalPages} total={d.total} onPage={(p) => setF({ ...f, page: p })} />
+            <p className="mt-1 text-xs text-slate-500">* model has no configured price — cost shown as estimate 0.</p>
+          </div>
+        )}
+      </QueryView>
+    </>
+  );
+}
+
+function Prices() {
+  const q = useWsQuery<any[]>('/ai/prices');
+  const [f, setF] = useState({ provider: 'OPENAI', model: '', inputPerMTokUsd: '', outputPerMTokUsd: '', cachedInputPerMTokUsd: '' });
+  const add = useWsMutation(() => ({ path: '/ai/prices', body: { provider: f.provider, model: f.model, inputPerMTokUsd: Number(f.inputPerMTokUsd), outputPerMTokUsd: Number(f.outputPerMTokUsd), cachedInputPerMTokUsd: f.cachedInputPerMTokUsd ? Number(f.cachedInputPerMTokUsd) : null } }), { success: 'Price added' });
+  return (
+    <div className="grid gap-4 lg:grid-cols-3">
+      <Card title="Add / update price (owner)">
+        <Notice kind="warning">Check prices on the provider’s pricing page. Cost reports are estimates based on this table.</Notice>
+        <Field label="Provider"><Select value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })} options={['OPENAI', 'ANTHROPIC']} /></Field>
+        <Field label="Model id"><Input value={f.model} onChange={(e) => setF({ ...f, model: e.target.value })} /></Field>
+        <Field label="Input $ / 1M tokens"><Input type="number" step="0.001" value={f.inputPerMTokUsd} onChange={(e) => setF({ ...f, inputPerMTokUsd: e.target.value })} /></Field>
+        <Field label="Output $ / 1M tokens"><Input type="number" step="0.001" value={f.outputPerMTokUsd} onChange={(e) => setF({ ...f, outputPerMTokUsd: e.target.value })} /></Field>
+        <Field label="Cached input $ / 1M (optional)"><Input type="number" step="0.001" value={f.cachedInputPerMTokUsd} onChange={(e) => setF({ ...f, cachedInputPerMTokUsd: e.target.value })} /></Field>
+        <Button className="mt-3" disabled={!f.model || !f.inputPerMTokUsd || !f.outputPerMTokUsd} loading={add.isPending} onClick={() => add.mutate()}>Save price</Button>
+      </Card>
+      <div className="lg:col-span-2"><QueryView q={q}>{(rows) => <div className="card p-2"><Table head={['Provider', 'Model', 'Input', 'Output', 'Cached input', 'Effective from']}>{rows.map((p) => <tr key={p.id}><td className="td">{p.provider}</td><td className="td">{p.model}</td><td className="td">${Number(p.inputPerMTokUsd)}</td><td className="td">${Number(p.outputPerMTokUsd)}</td><td className="td">{p.cachedInputPerMTokUsd ? `$${Number(p.cachedInputPerMTokUsd)}` : '—'}</td><td className="td text-xs">{fmtDate(p.effectiveFrom)}</td></tr>)}</Table></div>}</QueryView></div>
+    </div>
+  );
+}

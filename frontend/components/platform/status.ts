@@ -1,0 +1,2 @@
+export const STATUSES = ['PENDING_SETUP', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED', 'DELETION_PENDING', 'DELETED'];
+export const statusColor = (s: string) => (({ ACTIVE: 'green', TRIAL: 'blue', PAST_DUE: 'yellow', PENDING_SETUP: 'yellow', SUSPENDED: 'red', CANCELLED: 'red', DELETION_PENDING: 'red', DELETED: 'gray' }) as Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'>)[s];

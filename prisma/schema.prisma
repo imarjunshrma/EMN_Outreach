@@ -1,0 +1,2450 @@
+// =====================================================================
+// EMN Outreach OS — Prisma schema
+// PostgreSQL 16 · Prisma 7 (prisma-client generator + @prisma/adapter-pg)
+//
+// Conventions
+//  - UUID primary keys; timestamps are timestamptz written in UTC.
+//  - Every customer-owned row carries workspaceId (indexed) and cascades from Workspace.
+//  - Secrets are stored only as AES-256-GCM envelopes ("v<key>:<iv>:<tag>:<ct>"), never plaintext.
+// =====================================================================
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../backend/src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- enums
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MANAGER
+  MEMBER
+  VIEWER
+}
+
+enum DnsCheckStatus {
+  UNKNOWN
+  PASS
+  WARN
+  FAIL
+}
+
+enum HealthStatus {
+  UNKNOWN
+  HEALTHY
+  WARNING
+  CRITICAL
+}
+
+enum EmailProviderType {
+  GMAIL
+  MICROSOFT
+  SMTP_IMAP
+}
+
+enum EmailAccountStatus {
+  CONNECTED
+  NEEDS_REAUTH
+  ERROR
+  PAUSED
+  DISCONNECTED
+}
+
+enum AiProviderType {
+  OPENAI
+  ANTHROPIC
+}
+
+enum AiTask {
+  PERSONALIZATION
+  COPILOT
+  ICP_FROM_TEXT
+  FACT_EXTRACTION
+  LEAD_QUALIFICATION
+  EMAIL_WRITING
+  SUBJECT_LINES
+  FOLLOWUP_WRITING
+  FACT_CHECK
+  REPLY_CLASSIFICATION
+  CONVERSATION_SUMMARY
+  REPLY_DRAFT
+}
+
+enum AiExecutionStatus {
+  SUCCEEDED
+  FAILED
+  SCHEMA_INVALID
+  BLOCKED
+}
+
+enum LeadSourceType {
+  CSV_IMPORT
+  MANUAL
+  API
+  PROVIDER_SEARCH
+}
+
+enum LeadStatus {
+  NEW
+  RESEARCHED
+  QUALIFIED
+  DISQUALIFIED
+  CONTACTED
+  REPLIED
+  INTERESTED
+  MEETING_BOOKED
+  NOT_INTERESTED
+  CUSTOMER
+  UNSUBSCRIBED
+  BOUNCED
+}
+
+enum EmailVerificationStatus {
+  UNVERIFIED
+  VALID
+  INVALID
+  RISKY
+  CATCH_ALL
+  UNKNOWN
+}
+
+enum LawfulBasis {
+  UNKNOWN
+  CONSENT
+  LEGITIMATE_INTEREST
+  EXISTING_RELATIONSHIP
+  NOT_REQUIRED
+}
+
+enum AiConfigKind {
+  KNOWLEDGE
+  WRITING
+  RESEARCH
+}
+
+enum PersonalizationStatus {
+  QUEUED
+  GENERATING
+  NEEDS_RESEARCH
+  GENERATED
+  BLOCKED
+  APPROVED
+  REJECTED
+  FAILED
+  SKIPPED
+}
+
+enum RevisionSource {
+  AI
+  MANUAL
+}
+
+enum SuggestionStatus {
+  PENDING
+  APPROVED
+  SENT
+  DISMISSED
+  FAILED
+}
+
+enum CopilotActionStatus {
+  PROPOSED
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum EvidenceSourceType {
+  WEBSITE
+  SEARCH_RESULT
+  DATA_PROVIDER
+  USER_PROVIDED
+}
+
+enum ClaimStatus {
+  SUPPORTED
+  REJECTED
+}
+
+enum ScoreTier {
+  A
+  B
+  C
+  D
+}
+
+enum StepCondition {
+  ALWAYS
+  IF_OPENED
+  IF_NOT_OPENED
+}
+
+enum ThreadMode {
+  NEW_THREAD
+  REPLY_IN_THREAD
+}
+
+enum PersonalizationMode {
+  TEMPLATE_ONLY
+  AI_FIRST_LINE
+  AI_FULL
+}
+
+enum CampaignStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  RUNNING
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum ReviewMode {
+  NONE
+  AI_CONTENT_ONLY
+  ALL
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  STOPPED_REPLIED
+  STOPPED_BOUNCED
+  STOPPED_UNSUBSCRIBED
+  STOPPED_SUPPRESSED
+  STOPPED_COMPLAINT
+  STOPPED_INELIGIBLE
+  STOPPED_MANUAL
+  FAILED
+}
+
+enum OutboundStatus {
+  PENDING
+  AWAITING_APPROVAL
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
+enum ApprovalStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FactCheckStatus {
+  NOT_REQUIRED
+  PASSED
+  FAILED
+}
+
+enum ConversationStatus {
+  OPEN
+  WAITING
+  CLOSED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ReplyCategory {
+  INTERESTED
+  WANTS_PRICING
+  WANTS_MEETING
+  NEEDS_INFO
+  NOT_INTERESTED
+  HAS_PROVIDER
+  WRONG_PERSON
+  OUT_OF_OFFICE
+  UNSUBSCRIBE
+  COMPLAINT
+  OTHER
+}
+
+enum EmailEventType {
+  QUEUED
+  SENT
+  FAILED
+  BOUNCED_HARD
+  BOUNCED_SOFT
+  REPLIED
+  AUTO_REPLIED
+  UNSUBSCRIBED
+  COMPLAINED
+  OPENED
+  CLICKED
+}
+
+enum SuppressionType {
+  EMAIL
+  DOMAIN
+}
+
+enum SuppressionReason {
+  UNSUBSCRIBED
+  HARD_BOUNCE
+  COMPLAINT
+  DO_NOT_CONTACT_REQUEST
+  MANUAL
+  LEGAL
+}
+
+enum OpportunityStage {
+  NEW
+  QUALIFIED
+  MEETING
+  PROPOSAL
+  WON
+  LOST
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  WORKER
+  API
+}
+
+enum PrivacyRequestType {
+  EXPORT
+  ERASURE
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+// ---------------------------------------------------------------- identity
+
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  email           String     @unique
+  name            String
+  passwordHash    String
+  status          UserStatus @default(ACTIVE)
+  isPlatformAdmin Boolean    @default(false)
+  lastLoginAt     DateTime?  @db.Timestamptz(3)
+  createdAt       DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(3)
+
+  sessions          Session[]
+  memberships       WorkspaceMember[]
+  invitesSent       WorkspaceInvitation[] @relation("InvitedBy")
+  notifications     Notification[]
+  tasksAssigned     Task[]                @relation("TaskAssignee")
+  leadsOwned        Lead[]                @relation("LeadOwner")
+  notes             Note[]
+  auditLogs         AuditLog[]
+  mfaEnabled        Boolean               @default(false)
+  mfaSecretEnc      String?
+  mfaRecoveryHashes String[]
+  mfaEnabledAt      DateTime?             @db.Timestamptz(3)
+  emailVerifiedAt   DateTime?             @db.Timestamptz(3)
+  termsAcceptedAt   DateTime?             @db.Timestamptz(3)
+  termsVersion      String?
+  platformRole      PlatformRole?
+  locale            String?
+  orgMemberships    OrganizationMember[]
+}
+
+model Session {
+  id                String    @id @default(uuid()) @db.Uuid
+  tokenHash         String    @unique
+  csrfToken         String
+  userId            String    @db.Uuid
+  activeWorkspaceId String?   @db.Uuid
+  ipAddress         String?
+  userAgent         String?
+  expiresAt         DateTime  @db.Timestamptz(3)
+  revokedAt         DateTime? @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  lastSeenAt        DateTime  @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Workspace {
+  id              String    @id @default(uuid()) @db.Uuid
+  // Owning tenant. Every workspace-scoped record inherits its tenant through this column; it can never change (DB trigger).
+  organizationId  String    @db.Uuid
+  name            String
+  slug            String    @unique
+  branding        Json      @default("{}")
+  archivedAt      DateTime? @db.Timestamptz(3)
+  timezone        String    @default("UTC")
+  // Sender identity & compliance footer
+  senderLegalName String?
+  postalAddress   String?
+  // Free-form settings validated by WorkspaceSettingsSchema (booking link, retention days, tracking, offer facts…)
+  settings        Json      @default("{}")
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+
+  members                  WorkspaceMember[]
+  invitations              WorkspaceInvitation[]
+  apiKeys                  ApiKey[]
+  domains                  Domain[]
+  domainChecks             DomainHealthCheck[]
+  emailAccounts            EmailAccount[]
+  credentials              ProviderCredential[]
+  aiProviders              AiProvider[]
+  aiRoutes                 AiModelRoute[]
+  prompts                  PromptTemplate[]
+  aiExecutions             AiExecution[]
+  integrations             Integration[]
+  usageRecords             UsageRecord[]
+  companies                Company[]
+  leadSources              LeadSource[]
+  leads                    Lead[]
+  statusChanges            LeadStatusChange[]
+  verifications            EmailVerification[]
+  icps                     IdealCustomerProfile[]
+  researchReports          ResearchReport[]
+  researchEvidence         ResearchEvidence[]
+  researchClaims           ResearchClaim[]
+  leadScores               LeadScore[]
+  leadLists                LeadList[]
+  leadListMembers          LeadListMember[]
+  importJobs               ImportJob[]
+  prospectSearches         ProspectSearch[]
+  templates                Template[]
+  campaigns                Campaign[]
+  sequences                Sequence[]
+  sequenceSteps            SequenceStep[]
+  stepVariants             SequenceStepVariant[]
+  campaignLists            CampaignList[]
+  campaignAccounts         CampaignEmailAccount[]
+  enrollments              SequenceEnrollment[]
+  outboundEmails           OutboundEmail[]
+  trackedLinks             TrackedLink[]
+  conversations            Conversation[]
+  messages                 EmailMessage[]
+  attachments              EmailAttachment[]
+  events                   EmailEvent[]
+  suppressions             SuppressionEntry[]
+  complianceRules          ComplianceRule[]
+  privacyRequests          PrivacyRequest[]
+  opportunities            Opportunity[]
+  notes                    Note[]
+  tasks                    Task[]
+  automations              AutomationRule[]
+  automationRuns           AutomationRun[]
+  webhooks                 Webhook[]
+  webhookDeliveries        WebhookDelivery[]
+  notifications            Notification[]
+  auditLogs                AuditLog[]
+  jobRuns                  JobRun[]
+  errorLogs                ErrorLog[]
+  aiConfigVersions         AiConfigVersion[]
+  knowledgeDocuments       KnowledgeDocument[]
+  promptProfiles           PromptProfile[]
+  promptProfileVersions    PromptProfileVersion[]
+  personalizations         LeadPersonalization[]
+  personalizationRevisions PersonalizationRevision[]
+  personalizationBatches   PersonalizationBatch[]
+  sequenceVersions         SequenceVersion[]
+  passwordResets           PasswordResetToken[]
+  replyTemplates           ReplyTemplate[]
+  replySuggestions         ReplySuggestion[]
+  copilotThreads           CopilotThread[]
+  copilotMessages          CopilotMessage[]
+  copilotActions           CopilotAction[]
+  copilotMemories          CopilotMemory[]
+  workflows                Workflow[]
+  workflowVersions         WorkflowVersion[]
+  workflowRuns             WorkflowRun[]
+  subscription             Subscription?
+  invoices                 Invoice[]
+  savedFilters             SavedFilter[]
+  scheduledReports         ScheduledReport[]
+  notificationChannels     NotificationChannel[]
+  usageEvents              UsageEvent[]
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model WorkspaceMember {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+model WorkspaceInvitation {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
+  email       String
+  role        WorkspaceRole
+  tokenHash   String        @unique
+  invitedById String        @db.Uuid
+  expiresAt   DateTime      @db.Timestamptz(3)
+  acceptedAt  DateTime?     @db.Timestamptz(3)
+  revokedAt   DateTime?     @db.Timestamptz(3)
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, email])
+}
+
+// Programmatic API access (header: Authorization: Bearer emn_<prefix>_<secret>)
+model ApiKey {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
+  name        String
+  prefix      String        @unique
+  keyHash     String
+  role        WorkspaceRole @default(MEMBER)
+  lastUsedAt  DateTime?     @db.Timestamptz(3)
+  expiresAt   DateTime?     @db.Timestamptz(3)
+  revokedAt   DateTime?     @db.Timestamptz(3)
+  createdById String?       @db.Uuid
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  scopes String[]
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- domains & mailboxes
+
+model Domain {
+  id            String         @id @default(uuid()) @db.Uuid
+  workspaceId   String         @db.Uuid
+  name          String
+  healthStatus  HealthStatus   @default(UNKNOWN)
+  spfStatus     DnsCheckStatus @default(UNKNOWN)
+  dkimStatus    DnsCheckStatus @default(UNKNOWN)
+  dmarcStatus   DnsCheckStatus @default(UNKNOWN)
+  mxStatus      DnsCheckStatus @default(UNKNOWN)
+  dkimSelectors String[]       @default(["google", "selector1", "selector2", "default"])
+  lastCheckedAt DateTime?      @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
+
+  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  checks        DomainHealthCheck[]
+  emailAccounts EmailAccount[]
+
+  verificationToken String?
+  verifiedAt        DateTime? @db.Timestamptz(3)
+  registrar         String?
+  expiresAt         DateTime? @db.Timestamptz(3)
+  autoRenew         Boolean?
+  dnsProvider       String?
+  dnsZoneId         String?
+  propagation       Json?
+  renewalNotifiedAt DateTime? @db.Timestamptz(3)
+
+  @@unique([workspaceId, name])
+}
+
+model DomainHealthCheck {
+  id          String         @id @default(uuid()) @db.Uuid
+  workspaceId String         @db.Uuid
+  domainId    String         @db.Uuid
+  spfStatus   DnsCheckStatus
+  spfRecord   String?
+  dkimStatus  DnsCheckStatus
+  dkimResults Json
+  dmarcStatus DnsCheckStatus
+  dmarcRecord String?
+  mxStatus    DnsCheckStatus
+  mxRecords   Json
+  issues      Json           @default("[]")
+  checkedAt   DateTime       @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  domain    Domain    @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([domainId, checkedAt])
+  @@index([workspaceId])
+}
+
+model EmailAccount {
+  id                     String             @id @default(uuid()) @db.Uuid
+  workspaceId            String             @db.Uuid
+  domainId               String?            @db.Uuid
+  provider               EmailProviderType
+  emailAddress           String
+  displayName            String?
+  replyTo                String?
+  providerAccountId      String?
+  status                 EmailAccountStatus @default(CONNECTED)
+  statusReason           String?
+  dailySendLimit         Int                @default(25)
+  minSecondsBetweenSends Int                @default(180)
+  sendingWindow          Json // {days:[1..7], start:"09:00", end:"17:00", timezone:"Asia/Kolkata"}
+  signatureText          String?
+  connectionConfig       Json               @default("{}") // SMTP/IMAP host/port/user (non-secret)
+  syncCursor             String?
+  watchExpiresAt         DateTime?          @db.Timestamptz(3)
+  subscriptionId         String?
+  subscriptionSecretHash String?
+  lastSyncedAt           DateTime?          @db.Timestamptz(3)
+  lastSentAt             DateTime?          @db.Timestamptz(3)
+  lastErrorAt            DateTime?          @db.Timestamptz(3)
+  lastError              String?
+  createdAt              DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime           @updatedAt @db.Timestamptz(3)
+
+  workspace        Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  domain           Domain?                @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  credential       ProviderCredential?
+  campaignAccounts CampaignEmailAccount[]
+  enrollments      SequenceEnrollment[]
+  outboundEmails   OutboundEmail[]
+  conversations    Conversation[]
+  messages         EmailMessage[]
+  events           EmailEvent[]
+
+  lastReceivedAt DateTime? @db.Timestamptz(3)
+
+  @@unique([workspaceId, emailAddress])
+  @@index([subscriptionId])
+}
+
+model ProviderCredential {
+  id                    String    @id @default(uuid()) @db.Uuid
+  workspaceId           String    @db.Uuid
+  emailAccountId        String    @unique @db.Uuid
+  encryptedAccessToken  String?
+  encryptedRefreshToken String?
+  encryptedPassword     String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(3)
+  scopes                String[]
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  emailAccount EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- AI
+
+model AiProvider {
+  id              String         @id @default(uuid()) @db.Uuid
+  workspaceId     String         @db.Uuid
+  provider        AiProviderType
+  encryptedApiKey String
+  keyLast4        String
+  isEnabled       Boolean        @default(true)
+  defaultModel    String
+  lastTestedAt    DateTime?      @db.Timestamptz(3)
+  lastTestOk      Boolean?
+  lastTestError   String?
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider])
+}
+
+model AiModelRoute {
+  id               String          @id @default(uuid()) @db.Uuid
+  workspaceId      String          @db.Uuid
+  task             AiTask
+  provider         AiProviderType
+  model            String
+  fallbackProvider AiProviderType?
+  fallbackModel    String?
+  temperature      Float?
+  maxOutputTokens  Int             @default(1500)
+  monthlyBudgetUsd Decimal?        @db.Decimal(10, 2)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  maxInputTokens Int?
+
+  @@unique([workspaceId, task])
+}
+
+// Global price table (USD per million tokens). Editable from AI settings by platform admins.
+model AiModelPrice {
+  id                    String         @id @default(uuid()) @db.Uuid
+  provider              AiProviderType
+  model                 String
+  inputPerMTokUsd       Decimal        @db.Decimal(12, 6)
+  outputPerMTokUsd      Decimal        @db.Decimal(12, 6)
+  cachedInputPerMTokUsd Decimal?       @db.Decimal(12, 6)
+  effectiveFrom         DateTime       @default(now()) @db.Timestamptz(3)
+
+  @@unique([provider, model, effectiveFrom])
+}
+
+model PromptTemplate {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @db.Uuid
+  task               AiTask
+  version            Int
+  systemPrompt       String
+  userPromptTemplate String
+  isActive           Boolean  @default(false)
+  changeNote         String?
+  createdById        String?  @db.Uuid
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  executions AiExecution[]
+
+  @@unique([workspaceId, task, version])
+}
+
+model AiExecution {
+  id               String            @id @default(uuid()) @db.Uuid
+  workspaceId      String            @db.Uuid
+  task             AiTask
+  provider         AiProviderType
+  model            String
+  promptTemplateId String?           @db.Uuid
+  status           AiExecutionStatus
+  usedFallback     Boolean           @default(false)
+  inputTokens      Int               @default(0)
+  outputTokens     Int               @default(0)
+  cachedTokens     Int               @default(0)
+  costUsd          Decimal           @default(0) @db.Decimal(12, 6)
+  costIsEstimate   Boolean           @default(true)
+  latencyMs        Int?
+  errorMessage     String?
+  entityType       String?
+  entityId         String?
+  inputPreview     String?
+  output           Json?
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  promptTemplate PromptTemplate? @relation(fields: [promptTemplateId], references: [id], onDelete: SetNull)
+
+  campaignId       String? @db.Uuid
+  leadId           String? @db.Uuid
+  profileVersionId String? @db.Uuid
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, task, createdAt])
+  @@index([entityType, entityId])
+  @@index([workspaceId, campaignId, leadId])
+}
+
+// Third-party provider credentials: apollo, millionverifier, brave, serper, smartlead, booking
+model Integration {
+  id              String    @id @default(uuid()) @db.Uuid
+  workspaceId     String    @db.Uuid
+  type            String
+  encryptedConfig String?
+  publicConfig    Json      @default("{}")
+  isEnabled       Boolean   @default(true)
+  lastTestedAt    DateTime? @db.Timestamptz(3)
+  lastTestOk      Boolean?
+  lastError       String?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, type])
+}
+
+model UsageRecord {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  provider    String // apollo | millionverifier | brave | serper | gmail | microsoft ...
+  kind        String // search | enrich | verify | web_search | send
+  units       Int      @default(1)
+  costUsd     Decimal? @db.Decimal(12, 6)
+  isEstimate  Boolean  @default(true)
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, provider, createdAt])
+}
+
+// ---------------------------------------------------------------- prospects
+
+model Company {
+  id            String   @id @default(uuid()) @db.Uuid
+  workspaceId   String   @db.Uuid
+  name          String
+  domain        String?
+  website       String?
+  linkedinUrl   String?
+  industry      String?
+  employeeCount Int?
+  country       String?
+  city          String?
+  description   String?
+  services      String[]
+  audience      String?
+  businessModel String?
+  customFields  Json     @default("{}")
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  leads           Lead[]
+  researchReports ResearchReport[]
+  opportunities   Opportunity[]
+  notes           Note[]
+
+  @@unique([workspaceId, domain])
+  @@index([workspaceId, name])
+}
+
+model LeadSource {
+  id          String         @id @default(uuid()) @db.Uuid
+  workspaceId String         @db.Uuid
+  type        LeadSourceType
+  name        String
+  provider    String?
+  createdAt   DateTime       @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  leads     Lead[]
+
+  @@unique([workspaceId, name])
+}
+
+model Lead {
+  id                      String                  @id @default(uuid()) @db.Uuid
+  workspaceId             String                  @db.Uuid
+  companyId               String?                 @db.Uuid
+  sourceId                String?                 @db.Uuid
+  ownerId                 String?                 @db.Uuid
+  email                   String
+  emailNormalized         String
+  emailVerificationStatus EmailVerificationStatus @default(UNVERIFIED)
+  emailVerifiedAt         DateTime?               @db.Timestamptz(3)
+  firstName               String?
+  lastName                String?
+  title                   String?
+  linkedinUrl             String?
+  website                 String?
+  phone                   String?
+  country                 String?
+  city                    String?
+  timezone                String?
+  status                  LeadStatus              @default(NEW)
+  lawfulBasis             LawfulBasis             @default(UNKNOWN)
+  lawfulBasisNote         String?
+  externalId              String?
+  customFields            Json                    @default("{}")
+  tags                    String[]
+  currentScore            Int?
+  lastContactedAt         DateTime?               @db.Timestamptz(3)
+  lastRepliedAt           DateTime?               @db.Timestamptz(3)
+  createdAt               DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt               DateTime                @updatedAt @db.Timestamptz(3)
+
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  company         Company?             @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  source          LeadSource?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  owner           User?                @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  statusChanges   LeadStatusChange[]
+  verifications   EmailVerification[]
+  researchReports ResearchReport[]
+  scores          LeadScore[]
+  listMembers     LeadListMember[]
+  enrollments     SequenceEnrollment[]
+  conversations   Conversation[]
+  events          EmailEvent[]
+  opportunities   Opportunity[]
+  notes           Note[]
+  tasks           Task[]
+
+  aiInstructions   String?
+  personalizations LeadPersonalization[]
+
+  @@unique([workspaceId, emailNormalized])
+  @@index([workspaceId, status])
+  @@index([workspaceId, companyId])
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, currentScore])
+}
+
+model LeadStatusChange {
+  id          String      @id @default(uuid()) @db.Uuid
+  workspaceId String      @db.Uuid
+  leadId      String      @db.Uuid
+  fromStatus  LeadStatus?
+  toStatus    LeadStatus
+  reason      String?
+  actorUserId String?     @db.Uuid
+  createdAt   DateTime    @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@index([workspaceId, createdAt])
+}
+
+model EmailVerification {
+  id          String                  @id @default(uuid()) @db.Uuid
+  workspaceId String                  @db.Uuid
+  leadId      String                  @db.Uuid
+  email       String
+  provider    String
+  result      EmailVerificationStatus
+  rawResult   String?
+  createdAt   DateTime                @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  kind        String @default("VERIFY")
+  step        Int    @default(1)
+  costCredits Float?
+  confidence  Float?
+
+  @@index([leadId])
+  @@index([workspaceId, createdAt])
+}
+
+model IdealCustomerProfile {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  name        String
+  description String?
+  criteria    Json // IcpCriteriaSchema
+  minScore    Int      @default(60)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  scores    LeadScore[]
+  searches  ProspectSearch[]
+
+  aiInstructions String?
+  campaigns      Campaign[]
+
+  @@unique([workspaceId, name])
+}
+
+model ProspectSearch {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  icpId       String?   @db.Uuid
+  provider    String
+  query       String
+  filters     Json
+  status      JobStatus @default(PENDING)
+  results     Json      @default("[]")
+  resultCount Int       @default(0)
+  error       String?
+  createdById String?   @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  icp       IdealCustomerProfile? @relation(fields: [icpId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+}
+
+model LeadList {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members   LeadListMember[]
+  campaigns CampaignList[]
+
+  @@unique([workspaceId, name])
+}
+
+model LeadListMember {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  listId      String   @db.Uuid
+  leadId      String   @db.Uuid
+  addedAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  list      LeadList  @relation(fields: [listId], references: [id], onDelete: Cascade)
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, leadId])
+  @@index([workspaceId])
+  @@index([leadId])
+}
+
+model ImportJob {
+  id           String    @id @default(uuid()) @db.Uuid
+  workspaceId  String    @db.Uuid
+  targetListId String?   @db.Uuid
+  status       JobStatus @default(PENDING)
+  fileName     String
+  storageKey   String
+  headers      String[]
+  mapping      Json      @default("{}")
+  options      Json      @default("{}")
+  totalRows    Int       @default(0)
+  importedRows Int       @default(0)
+  updatedRows  Int       @default(0)
+  skippedRows  Int       @default(0)
+  errorRows    Int       @default(0)
+  errors       Json      @default("[]")
+  createdById  String?   @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+}
+
+// ---------------------------------------------------------------- research & scoring
+
+model ResearchReport {
+  id            String    @id @default(uuid()) @db.Uuid
+  workspaceId   String    @db.Uuid
+  leadId        String?   @db.Uuid
+  companyId     String?   @db.Uuid
+  status        JobStatus @default(PENDING)
+  summary       String?
+  services      String[]
+  industry      String?
+  audience      String?
+  businessModel String?
+  error         String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt   DateTime? @db.Timestamptz(3)
+
+  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead?              @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company   Company?           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  evidence  ResearchEvidence[]
+  claims    ResearchClaim[]
+
+  @@index([workspaceId, leadId])
+  @@index([workspaceId, companyId])
+}
+
+model ResearchEvidence {
+  id          String             @id @default(uuid()) @db.Uuid
+  workspaceId String             @db.Uuid
+  reportId    String             @db.Uuid
+  sourceType  EvidenceSourceType
+  url         String
+  title       String?
+  content     String // cleaned text (capped) used for quote verification
+  contentHash String
+  httpStatus  Int?
+  fetchedAt   DateTime           @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  report    ResearchReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  claims    ResearchClaim[]
+
+  @@index([reportId])
+  @@index([workspaceId])
+}
+
+model ResearchClaim {
+  id          String      @id @default(uuid()) @db.Uuid
+  workspaceId String      @db.Uuid
+  reportId    String      @db.Uuid
+  evidenceId  String      @db.Uuid
+  category    String
+  text        String
+  quote       String
+  confidence  Float
+  status      ClaimStatus @default(SUPPORTED)
+  createdAt   DateTime    @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  report    ResearchReport   @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  evidence  ResearchEvidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, status])
+  @@index([workspaceId])
+}
+
+model LeadScore {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  leadId      String    @db.Uuid
+  icpId       String?   @db.Uuid
+  score       Int
+  tier        ScoreTier
+  qualified   Boolean
+  reasons     Json
+  risks       Json      @default("[]")
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  icp       IdealCustomerProfile? @relation(fields: [icpId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, leadId, createdAt])
+}
+
+// ---------------------------------------------------------------- outreach
+
+model Template {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  name        String
+  subject     String
+  body        String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, name])
+}
+
+model Campaign {
+  id                   String         @id @default(uuid()) @db.Uuid
+  workspaceId          String         @db.Uuid
+  name                 String
+  status               CampaignStatus @default(DRAFT)
+  timezone             String         @default("UTC") // fallback when a lead's timezone is unknown
+  useLeadTimezone      Boolean        @default(true)
+  sendingWindow        Json // {days:[1,2,3,4,5], start:"09:00", end:"17:00"}
+  dailyNewLeadLimit    Int            @default(25)
+  dailySendLimit       Int            @default(100)
+  stopOnReply          Boolean        @default(true)
+  stopOnAutoReply      Boolean        @default(false)
+  reviewMode           ReviewMode     @default(AI_CONTENT_ONLY)
+  requireFactCheck     Boolean        @default(true)
+  trackOpens           Boolean        @default(false)
+  trackClicks          Boolean        @default(false)
+  requireVerifiedEmail Boolean        @default(true)
+  minLeadScore         Int?
+  maxBounceRatePct     Float          @default(5)
+  maxComplaints        Int            @default(1)
+  approvedById         String?        @db.Uuid
+  approvedAt           DateTime?      @db.Timestamptz(3)
+  approvedContentHash  String?
+  startedAt            DateTime?      @db.Timestamptz(3)
+  pausedAt             DateTime?      @db.Timestamptz(3)
+  pauseReason          String?
+  completedAt          DateTime?      @db.Timestamptz(3)
+  createdAt            DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime       @updatedAt @db.Timestamptz(3)
+
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sequence       Sequence?
+  lists          CampaignList[]
+  accounts       CampaignEmailAccount[]
+  enrollments    SequenceEnrollment[]
+  outboundEmails OutboundEmail[]
+  conversations  Conversation[]
+  events         EmailEvent[]
+  opportunities  Opportunity[]
+
+  icpId                  String?                @db.Uuid
+  aiProfileId            String?                @db.Uuid
+  aiOverrides            Json                   @default("{}")
+  maxAiCostPerLeadUsd    Decimal?               @db.Decimal(10, 4)
+  usePregeneratedAi      Boolean                @default(true)
+  aiConfigSnapshot       Json?
+  aiSnapshotAt           DateTime?              @db.Timestamptz(3)
+  scheduledStartAt       DateTime?              @db.Timestamptz(3)
+  icp                    IdealCustomerProfile?  @relation(fields: [icpId], references: [id], onDelete: SetNull)
+  aiProfile              PromptProfile?         @relation(fields: [aiProfileId], references: [id], onDelete: SetNull)
+  personalizations       LeadPersonalization[]
+  personalizationBatches PersonalizationBatch[]
+  sequenceVersions       SequenceVersion[]
+
+  folder String?
+  tags   String[]
+
+  @@index([workspaceId, status])
+}
+
+model Sequence {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  campaignId  String   @unique @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign  Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  steps     SequenceStep[]
+}
+
+model SequenceStep {
+  id                  String              @id @default(uuid()) @db.Uuid
+  workspaceId         String              @db.Uuid
+  sequenceId          String              @db.Uuid
+  order               Int
+  delayDays           Int                 @default(0)
+  threadMode          ThreadMode          @default(REPLY_IN_THREAD)
+  personalizationMode PersonalizationMode @default(TEMPLATE_ONLY)
+  condition           StepCondition       @default(ALWAYS)
+
+  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sequence       Sequence              @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  variants       SequenceStepVariant[]
+  outboundEmails OutboundEmail[]
+
+  aiInstructions   String?
+  personalizations LeadPersonalization[]
+
+  @@unique([sequenceId, order])
+  @@index([workspaceId])
+}
+
+model SequenceStepVariant {
+  id          String @id @default(uuid()) @db.Uuid
+  workspaceId String @db.Uuid
+  stepId      String @db.Uuid
+  label       String
+  subject     String
+  body        String
+  weight      Int    @default(1)
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  step           SequenceStep    @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  outboundEmails OutboundEmail[]
+
+  aiInstructions   String?
+  personalizations LeadPersonalization[]
+
+  @@unique([stepId, label])
+  @@index([workspaceId])
+}
+
+model CampaignList {
+  id          String @id @default(uuid()) @db.Uuid
+  workspaceId String @db.Uuid
+  campaignId  String @db.Uuid
+  listId      String @db.Uuid
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  list      LeadList  @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, listId])
+  @@index([workspaceId])
+}
+
+model CampaignEmailAccount {
+  id             String @id @default(uuid()) @db.Uuid
+  workspaceId    String @db.Uuid
+  campaignId     String @db.Uuid
+  emailAccountId String @db.Uuid
+
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign     Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  emailAccount EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, emailAccountId])
+  @@index([workspaceId])
+}
+
+model SequenceEnrollment {
+  id               String           @id @default(uuid()) @db.Uuid
+  workspaceId      String           @db.Uuid
+  campaignId       String           @db.Uuid
+  leadId           String           @db.Uuid
+  emailAccountId   String           @db.Uuid // fixed sender for the life of the enrollment
+  variantSeed      Int
+  status           EnrollmentStatus @default(ACTIVE)
+  currentStepOrder Int              @default(0)
+  nextActionAt     DateTime?        @db.Timestamptz(3)
+  stopReason       String?
+  conversationId   String?          @db.Uuid
+  enrolledAt       DateTime         @default(now()) @db.Timestamptz(3)
+  completedAt      DateTime?        @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @db.Timestamptz(3)
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign       Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead           Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  emailAccount   EmailAccount    @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  conversation   Conversation?   @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  outboundEmails OutboundEmail[]
+  events         EmailEvent[]
+
+  @@unique([campaignId, leadId])
+  @@index([status, nextActionAt])
+  @@index([workspaceId, campaignId, status])
+  @@index([leadId])
+}
+
+model OutboundEmail {
+  id                String          @id @default(uuid()) @db.Uuid
+  workspaceId       String          @db.Uuid
+  campaignId        String          @db.Uuid
+  enrollmentId      String          @db.Uuid
+  stepId            String          @db.Uuid
+  variantId         String          @db.Uuid
+  emailAccountId    String          @db.Uuid
+  idempotencyKey    String          @unique
+  internetMessageId String          @unique
+  status            OutboundStatus  @default(PENDING)
+  approvalStatus    ApprovalStatus  @default(NOT_REQUIRED)
+  approvedById      String?         @db.Uuid
+  approvedAt        DateTime?       @db.Timestamptz(3)
+  factCheckStatus   FactCheckStatus @default(NOT_REQUIRED)
+  factCheckReport   Json?
+  toAddress         String
+  subject           String?
+  bodyText          String?
+  usedClaimIds      String[]
+  aiGenerated       Boolean         @default(false)
+  scheduledFor      DateTime        @db.Timestamptz(3)
+  attempts          Int             @default(0)
+  sendStartedAt     DateTime?       @db.Timestamptz(3)
+  lastError         String?
+  sentAt            DateTime?       @db.Timestamptz(3)
+  providerMessageId String?
+  providerThreadId  String?
+  emailMessageId    String?         @unique @db.Uuid
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+
+  workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign     Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  enrollment   SequenceEnrollment  @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  step         SequenceStep        @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  variant      SequenceStepVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  emailAccount EmailAccount        @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  emailMessage EmailMessage?       @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+  trackedLinks TrackedLink[]
+  events       EmailEvent[]
+
+  @@unique([enrollmentId, stepId])
+  @@index([status, scheduledFor])
+  @@index([workspaceId, campaignId, status])
+  @@index([emailAccountId, sentAt])
+}
+
+model TrackedLink {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  outboundEmailId String   @db.Uuid
+  url             String
+  token           String   @unique
+  clickCount      Int      @default(0)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  outboundEmail OutboundEmail @relation(fields: [outboundEmailId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- inbox
+
+model Conversation {
+  id               String             @id @default(uuid()) @db.Uuid
+  workspaceId      String             @db.Uuid
+  emailAccountId   String             @db.Uuid
+  leadId           String?            @db.Uuid
+  campaignId       String?            @db.Uuid
+  providerThreadId String
+  subject          String?
+  status           ConversationStatus @default(OPEN)
+  category         ReplyCategory?
+  isUnread         Boolean            @default(true)
+  labels           String[]
+  assigneeId       String?            @db.Uuid
+  summary          String?
+  lastMessageAt    DateTime           @db.Timestamptz(3)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(3)
+
+  workspace    Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  emailAccount EmailAccount         @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  lead         Lead?                @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  campaign     Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  messages     EmailMessage[]
+  enrollments  SequenceEnrollment[]
+  notes        Note[]
+  tasks        Task[]
+
+  isStarred  Boolean @default(false)
+  isArchived Boolean @default(false)
+
+  @@unique([emailAccountId, providerThreadId])
+  @@index([workspaceId, lastMessageAt])
+  @@index([workspaceId, status, isUnread])
+}
+
+model EmailMessage {
+  id                 String           @id @default(uuid()) @db.Uuid
+  workspaceId        String           @db.Uuid
+  conversationId     String           @db.Uuid
+  emailAccountId     String           @db.Uuid
+  direction          MessageDirection
+  providerMessageId  String
+  internetMessageId  String?
+  inReplyTo          String?
+  references         String[]
+  fromAddress        String
+  fromName           String?
+  toAddresses        String[]
+  ccAddresses        String[]
+  subject            String?
+  snippet            String?
+  bodyText           String?
+  bodyHtmlSanitized  String?
+  isAutoReply        Boolean          @default(false)
+  isBounce           Boolean          @default(false)
+  category           ReplyCategory?
+  categoryConfidence Float?
+  sentiment          String?
+  objection          String?
+  meetingInterest    Boolean?
+  sentAt             DateTime         @db.Timestamptz(3)
+  createdAt          DateTime         @default(now()) @db.Timestamptz(3)
+
+  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation  Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  emailAccount  EmailAccount      @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  attachments   EmailAttachment[]
+  outboundEmail OutboundEmail?
+  events        EmailEvent[]
+
+  @@unique([emailAccountId, providerMessageId])
+  @@index([internetMessageId])
+  @@index([conversationId, sentAt])
+}
+
+model EmailAttachment {
+  id                   String   @id @default(uuid()) @db.Uuid
+  workspaceId          String   @db.Uuid
+  messageId            String   @db.Uuid
+  filename             String
+  contentType          String
+  sizeBytes            Int
+  providerAttachmentId String?
+  storageKey           String?
+  createdAt            DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  message   EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+model EmailEvent {
+  id              String         @id @default(uuid()) @db.Uuid
+  workspaceId     String         @db.Uuid
+  type            EmailEventType
+  leadId          String?        @db.Uuid
+  campaignId      String?        @db.Uuid
+  enrollmentId    String?        @db.Uuid
+  outboundEmailId String?        @db.Uuid
+  emailMessageId  String?        @db.Uuid
+  emailAccountId  String?        @db.Uuid
+  dedupeKey       String?        @unique
+  metadata        Json           @default("{}")
+  occurredAt      DateTime       @default(now()) @db.Timestamptz(3)
+
+  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead          Lead?               @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  campaign      Campaign?           @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  enrollment    SequenceEnrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  outboundEmail OutboundEmail?      @relation(fields: [outboundEmailId], references: [id], onDelete: SetNull)
+  emailMessage  EmailMessage?       @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+  emailAccount  EmailAccount?       @relation(fields: [emailAccountId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, type, occurredAt])
+  @@index([campaignId, type])
+  @@index([emailAccountId, type, occurredAt])
+  @@index([leadId])
+}
+
+// ---------------------------------------------------------------- compliance
+
+model SuppressionEntry {
+  id          String            @id @default(uuid()) @db.Uuid
+  workspaceId String            @db.Uuid
+  type        SuppressionType
+  value       String
+  reason      SuppressionReason
+  source      String?
+  note        String?
+  createdAt   DateTime          @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, type, value])
+}
+
+model ComplianceRule {
+  id                     String        @id @default(uuid()) @db.Uuid
+  workspaceId            String        @db.Uuid
+  countryCode            String // ISO alpha-2, "EU" group, or "*"
+  label                  String
+  sendingAllowed         Boolean       @default(false)
+  allowedLawfulBases     LawfulBasis[]
+  requirePostalAddress   Boolean       @default(true)
+  requireUnsubscribeLink Boolean       @default(true)
+  reviewedByOwner        Boolean       @default(false)
+  notes                  String?
+  updatedAt              DateTime      @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, countryCode])
+}
+
+model PrivacyRequest {
+  id               String             @id @default(uuid()) @db.Uuid
+  workspaceId      String             @db.Uuid
+  type             PrivacyRequestType
+  subjectEmail     String
+  status           JobStatus          @default(PENDING)
+  resultStorageKey String?
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  completedAt      DateTime?          @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, subjectEmail])
+}
+
+// ---------------------------------------------------------------- CRM
+
+model Opportunity {
+  id              String           @id @default(uuid()) @db.Uuid
+  workspaceId     String           @db.Uuid
+  leadId          String           @db.Uuid
+  companyId       String?          @db.Uuid
+  campaignId      String?          @db.Uuid
+  title           String
+  stage           OpportunityStage @default(NEW)
+  valueCents      Int              @default(0)
+  currency        String           @default("USD")
+  expectedCloseAt DateTime?        @db.Timestamptz(3)
+  closedAt        DateTime?        @db.Timestamptz(3)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company   Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  campaign  Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, stage])
+}
+
+model Note {
+  id             String   @id @default(uuid()) @db.Uuid
+  workspaceId    String   @db.Uuid
+  leadId         String?  @db.Uuid
+  companyId      String?  @db.Uuid
+  conversationId String?  @db.Uuid
+  authorId       String?  @db.Uuid
+  body           String
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead         Lead?         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author       User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, leadId])
+  @@index([conversationId])
+}
+
+model Task {
+  id             String       @id @default(uuid()) @db.Uuid
+  workspaceId    String       @db.Uuid
+  title          String
+  description    String?
+  status         TaskStatus   @default(OPEN)
+  priority       TaskPriority @default(MEDIUM)
+  dueAt          DateTime?    @db.Timestamptz(3)
+  remindedAt     DateTime?    @db.Timestamptz(3)
+  assigneeId     String?      @db.Uuid
+  leadId         String?      @db.Uuid
+  conversationId String?      @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  completedAt    DateTime?    @db.Timestamptz(3)
+
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignee     User?         @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  lead         Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, dueAt])
+}
+
+// ---------------------------------------------------------------- automation & webhooks
+
+model AutomationRule {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  name        String
+  isEnabled   Boolean  @default(true)
+  trigger     String // reply.categorized | lead.scored | lead.status_changed
+  conditions  Json     @default("{}")
+  actions     Json // [{type, ...params}]
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  runs      AutomationRun[]
+
+  @@index([workspaceId, trigger])
+}
+
+model AutomationRun {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  ruleId      String    @db.Uuid
+  eventKey    String
+  status      JobStatus @default(PENDING)
+  result      Json      @default("[]")
+  error       String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  rule      AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, eventKey])
+  @@index([workspaceId, createdAt])
+}
+
+model Webhook {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  name            String
+  url             String
+  encryptedSecret String
+  events          String[]
+  isEnabled       Boolean  @default(true)
+  failureCount    Int      @default(0)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace  Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+}
+
+model WebhookDelivery {
+  id             String         @id @default(uuid()) @db.Uuid
+  workspaceId    String         @db.Uuid
+  webhookId      String         @db.Uuid
+  event          String
+  payload        Json
+  status         DeliveryStatus @default(PENDING)
+  attempts       Int            @default(0)
+  responseStatus Int?
+  error          String?
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  deliveredAt    DateTime?      @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  webhook   Webhook   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+}
+
+// ---------------------------------------------------------------- ops
+
+model Notification {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  userId      String    @db.Uuid
+  type        String
+  title       String
+  body        String?
+  link        String?
+  readAt      DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+model AuditLog {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String?   @db.Uuid
+  actorType   ActorType
+  actorUserId String?   @db.Uuid
+  action      String
+  entityType  String?
+  entityId    String?
+  metadata    Json      @default("{}")
+  ipAddress   String?
+  requestId   String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor     User?      @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model JobRun {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String?   @db.Uuid
+  queue       String
+  jobName     String
+  jobId       String
+  status      JobStatus
+  attempt     Int       @default(1)
+  error       String?
+  durationMs  Int?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([queue, status, createdAt])
+}
+
+model ErrorLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String?  @db.Uuid
+  source      String // api | worker
+  code        String
+  message     String
+  context     Json     @default("{}")
+  requestId   String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+}
+
+// ===================================================================== AI Studio & personalization
+
+/// Versioned workspace-level AI configuration: business knowledge, writing rules, research rules.
+/// Every save creates a new version; exactly one version per kind is active.
+model AiConfigVersion {
+  id          String       @id @default(uuid()) @db.Uuid
+  workspaceId String       @db.Uuid
+  kind        AiConfigKind
+  version     Int
+  data        Json
+  isActive    Boolean      @default(false)
+  changeNote  String?
+  createdById String?      @db.Uuid
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, kind, version])
+  @@index([workspaceId, kind, isActive])
+}
+
+/// Supporting documents (text extracted on upload) used as trusted business knowledge.
+model KnowledgeDocument {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  title       String
+  fileName    String?
+  mimeType    String?
+  storageKey  String?
+  text        String
+  charCount   Int
+  isActive    Boolean  @default(true)
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, isActive])
+}
+
+/// Reusable custom prompt profile (prompt builder). Content lives in immutable versions.
+model PromptProfile {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  name            String
+  description     String?
+  activeVersionId String?  @db.Uuid
+  folder          String?
+  tags            String[]
+  isApproved      Boolean  @default(false)
+  approvedById    String?  @db.Uuid
+  isArchived      Boolean  @default(false)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  versions  PromptProfileVersion[]
+  campaigns Campaign[]
+
+  @@unique([workspaceId, name])
+}
+
+model PromptProfileVersion {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @db.Uuid
+  profileId    String   @db.Uuid
+  version      Int
+  instructions String // prompt template: {{variables}}, {{#if x}}…{{else}}…{{/if}}, {{#unless x}}…{{/unless}}
+  settings     Json     @default("{}") // writing overrides (tone, length, cta…) applied at the profile level
+  changeNote   String?
+  createdById  String?  @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile   PromptProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, version])
+}
+
+/// Per-lead, per-step personalized content for a campaign. One current row per (campaign, lead, step);
+/// every generation or manual edit is also appended to PersonalizationRevision.
+model LeadPersonalization {
+  id                  String                @id @default(uuid()) @db.Uuid
+  workspaceId         String                @db.Uuid
+  campaignId          String                @db.Uuid
+  leadId              String                @db.Uuid
+  stepId              String                @db.Uuid
+  variantId           String?               @db.Uuid
+  status              PersonalizationStatus @default(QUEUED)
+  subject             String?
+  openingLine         String?
+  body                String?
+  cta                 String?
+  subjectAlternatives String[]
+  usedClaimIds        String[]
+  researchReportIds   String[]
+  quality             Json?
+  qualityPassed       Boolean               @default(false)
+  score               Int?
+  scoreExplanation    Json?
+  costUsd             Decimal               @default(0) @db.Decimal(12, 6)
+  costIsEstimate      Boolean               @default(true)
+  manuallyEdited      Boolean               @default(false)
+  editedById          String?               @db.Uuid
+  editedAt            DateTime?             @db.Timestamptz(3)
+  approvedById        String?               @db.Uuid
+  approvedAt          DateTime?             @db.Timestamptz(3)
+  approvedContentHash String?
+  configHash          String?
+  profileVersionId    String?               @db.Uuid
+  revision            Int                   @default(0)
+  batchId             String?               @db.Uuid
+  error               String?
+  generatedAt         DateTime?             @db.Timestamptz(3)
+  createdAt           DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime              @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign  Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead      Lead                      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  step      SequenceStep              @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  variant   SequenceStepVariant?      @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  revisions PersonalizationRevision[]
+
+  @@unique([campaignId, leadId, stepId])
+  @@index([workspaceId, campaignId, status])
+  @@index([batchId])
+}
+
+model PersonalizationRevision {
+  id                String         @id @default(uuid()) @db.Uuid
+  workspaceId       String         @db.Uuid
+  personalizationId String         @db.Uuid
+  revision          Int
+  source            RevisionSource
+  subject           String?
+  openingLine       String?
+  body              String?
+  cta               String?
+  usedClaimIds      String[]
+  quality           Json?
+  score             Int?
+  costUsd           Decimal        @default(0) @db.Decimal(12, 6)
+  executionIds      String[]
+  createdById       String?        @db.Uuid
+  createdAt         DateTime       @default(now()) @db.Timestamptz(3)
+
+  workspace       Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
+
+  @@unique([personalizationId, revision])
+}
+
+/// Bulk generation run (estimate → confirm → queued per lead/step).
+model PersonalizationBatch {
+  id               String    @id @default(uuid()) @db.Uuid
+  workspaceId      String    @db.Uuid
+  campaignId       String    @db.Uuid
+  status           JobStatus @default(PENDING)
+  total            Int       @default(0)
+  done             Int       @default(0)
+  failed           Int       @default(0)
+  skipped          Int       @default(0)
+  estimatedCostUsd Decimal   @default(0) @db.Decimal(12, 6)
+  maxCostUsd       Decimal?  @db.Decimal(12, 4)
+  spentUsd         Decimal   @default(0) @db.Decimal(12, 6)
+  options          Json      @default("{}")
+  error            String?
+  createdById      String?   @db.Uuid
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt      DateTime? @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, campaignId])
+}
+
+/// Immutable snapshot of a campaign's sequence + AI configuration, taken at every approval.
+model SequenceVersion {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @db.Uuid
+  campaignId   String   @db.Uuid
+  version      Int
+  snapshot     Json
+  contentHash  String
+  approvedById String?  @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, version])
+}
+
+// ===================================================================== v1.2 security, AI reply, copilot, workflows, billing, CRM
+
+/// Single-use password-reset tokens (only the SHA-256 hash is stored). Not workspace data, but linked
+/// to the workspace that sent the email for audit purposes when known.
+model PasswordResetToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  workspaceId String?   @db.Uuid
+  kind        String    @default("RESET") // RESET | MFA_CHALLENGE
+  tokenHash   String    @unique
+  expiresAt   DateTime  @db.Timestamptz(3)
+  usedAt      DateTime? @db.Timestamptz(3)
+  attempts    Int       @default(0)
+  ip          String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, kind])
+}
+
+/// Human-approved reply templates. The only content the narrow auto-reply mode may send.
+model ReplyTemplate {
+  id           String    @id @default(uuid()) @db.Uuid
+  workspaceId  String    @db.Uuid
+  name         String
+  body         String
+  categories   String[]
+  isApproved   Boolean   @default(false)
+  approvedById String?   @db.Uuid
+  approvedAt   DateTime? @db.Timestamptz(3)
+  createdById  String?   @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, name])
+}
+
+/// AI reply suggestions / drafts awaiting approval / auto-replies (audit of what was sent and why).
+model ReplySuggestion {
+  id             String           @id @default(uuid()) @db.Uuid
+  workspaceId    String           @db.Uuid
+  conversationId String           @db.Uuid
+  messageId      String           @db.Uuid
+  mode           String // SUGGEST | DRAFT | AUTO
+  category       String?
+  body           String
+  templateId     String?          @db.Uuid
+  status         SuggestionStatus @default(PENDING)
+  reason         String?
+  decidedById    String?          @db.Uuid
+  decidedAt      DateTime?        @db.Timestamptz(3)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, mode])
+  @@index([workspaceId, status])
+}
+
+model CopilotThread {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  userId      String   @db.Uuid
+  title       String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages  CopilotMessage[]
+  actions   CopilotAction[]
+
+  @@index([workspaceId, userId])
+}
+
+model CopilotMessage {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  threadId    String   @db.Uuid
+  role        String // USER | ASSISTANT
+  content     String
+  data        Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  thread    CopilotThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+}
+
+/// Actions the Copilot PROPOSED. Nothing runs until a user with the required role confirms it.
+model CopilotAction {
+  id           String              @id @default(uuid()) @db.Uuid
+  workspaceId  String              @db.Uuid
+  threadId     String              @db.Uuid
+  type         String
+  params       Json
+  summary      String
+  requiredRole String
+  status       CopilotActionStatus @default(PROPOSED)
+  result       Json?
+  executedById String?             @db.Uuid
+  executedAt   DateTime?           @db.Timestamptz(3)
+  createdAt    DateTime            @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  thread    CopilotThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
+}
+
+/// Business memory: reusable facts/instructions the Copilot always receives.
+model CopilotMemory {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  content     String
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+/// Visual workflows (graph of trigger → condition/branch → action nodes), versioned.
+model Workflow {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  name            String
+  trigger         String
+  isActive        Boolean  @default(false)
+  activeVersionId String?  @db.Uuid
+  maxRunsPerDay   Int      @default(1000)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  versions  WorkflowVersion[]
+  runs      WorkflowRun[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, trigger, isActive])
+}
+
+model WorkflowVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  workflowId  String   @db.Uuid
+  version     Int
+  graph       Json
+  changeNote  String?
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflow  Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, version])
+}
+
+model WorkflowRun {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  workflowId  String    @db.Uuid
+  versionId   String    @db.Uuid
+  dedupeKey   String?
+  event       Json
+  status      JobStatus @default(RUNNING)
+  testMode    Boolean   @default(false)
+  log         Json      @default("[]")
+  error       String?
+  attempts    Int       @default(1)
+  startedAt   DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt  DateTime? @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflow  Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, dedupeKey])
+  @@index([workspaceId, startedAt])
+}
+
+/// Subscription plans; entitlements are data, never hard-coded in the UI.
+model Plan {
+  id                String    @id @default(uuid()) @db.Uuid
+  code              String    @unique
+  name              String
+  description       String    @default("")
+  isActive          Boolean   @default(true)
+  sortOrder         Int       @default(0)
+  archivedAt        DateTime? @db.Timestamptz(3)
+  priceMonthlyCents Int
+  priceYearlyCents  Int
+  currency          String    @default("USD")
+  entitlements      Json
+  trialDays         Int       @default(14)
+  isPublic          Boolean   @default(true)
+  providerPriceIds  Json      @default("{}")
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                     String             @id @default(uuid()) @db.Uuid
+  // Billing is per organization (tenant). workspaceId is kept only for subscriptions created before 1.3.
+  organizationId         String             @unique @db.Uuid
+  workspaceId            String?            @unique @db.Uuid
+  planId                 String             @db.Uuid
+  status                 SubscriptionStatus @default(TRIALING)
+  interval               String             @default("month")
+  provider               String             @default("manual")
+  providerCustomerId     String?
+  providerSubscriptionId String?            @unique
+  currentPeriodEnd       DateTime?          @db.Timestamptz(3)
+  trialEndsAt            DateTime?          @db.Timestamptz(3)
+  graceUntil             DateTime?          @db.Timestamptz(3)
+  cancelAtPeriodEnd      Boolean            @default(false)
+  overrides              Json               @default("{}")
+  scheduledPlanId        String?            @db.Uuid
+  canceledAt             DateTime?          @db.Timestamptz(3)
+  createdAt              DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime           @updatedAt @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  plan         Plan         @relation(fields: [planId], references: [id])
+}
+
+model Invoice {
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @db.Uuid
+  workspaceId       String?   @db.Uuid
+  provider          String
+  providerInvoiceId String?   @unique
+  amountCents       Int
+  currency          String
+  status            String
+  hostedUrl         String?
+  periodStart       DateTime? @db.Timestamptz(3)
+  periodEnd         DateTime? @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+/// Processed payment-provider webhook events (idempotency).
+model BillingEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  provider    String
+  eventId     String
+  type        String
+  payload     Json
+  processedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([provider, eventId])
+}
+
+model SavedFilter {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  userId      String   @db.Uuid
+  entity      String
+  name        String
+  query       Json
+  isShared    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, entity])
+}
+
+model ScheduledReport {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  name        String
+  kind        String // campaign_summary | pipeline | ai_cost
+  frequency   String // DAILY | WEEKLY
+  recipients  String[]
+  isActive    Boolean   @default(true)
+  lastSentAt  DateTime? @db.Timestamptz(3)
+  lastError   String?
+  createdById String?   @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+/// External notification destinations (Slack incoming webhook, email).
+model NotificationChannel {
+  id              String   @id @default(uuid()) @db.Uuid
+  workspaceId     String   @db.Uuid
+  type            String // SLACK | EMAIL
+  name            String
+  encryptedConfig String
+  events          String[]
+  isActive        Boolean  @default(true)
+  lastError       String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================== SaaS tenancy (1.3)
+
+enum OrgStatus {
+  PENDING_SETUP
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+  DELETION_PENDING
+  DELETED
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  BILLING
+  MEMBER
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+  SUPPORT
+  FINANCE
+}
+
+/// A tenant: one independent customer organization. Owns workspaces, subscription, usage and billing.
+model Organization {
+  id                   String    @id @default(uuid()) @db.Uuid
+  name                 String
+  slug                 String    @unique
+  status               OrgStatus @default(PENDING_SETUP)
+  ownerId              String?   @db.Uuid
+  billingOwnerId       String?   @db.Uuid
+  timezone             String    @default("UTC")
+  locale               String    @default("en")
+  currency             String    @default("USD")
+  branding             Json      @default("{}")
+  settings             Json      @default("{}")
+  onboarding           Json      @default("{}")
+  statusReason         String?
+  statusChangedAt      DateTime? @db.Timestamptz(3)
+  deletionRequestedAt  DateTime? @db.Timestamptz(3)
+  deletionScheduledFor DateTime? @db.Timestamptz(3)
+  deletedAt            DateTime? @db.Timestamptz(3)
+  /// Idempotency key of the registration request that created this tenant (repeat requests return the same tenant).
+  registrationKey      String?   @unique
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
+
+  members       OrganizationMember[]
+  workspaces    Workspace[]
+  subscription  Subscription?
+  invoices      Invoice[]
+  usageCounters UsageCounter[]
+  usageEvents   UsageEvent[]
+  supportGrants SupportAccessGrant[]
+  statusHistory OrganizationStatusChange[]
+
+  @@index([status])
+}
+
+model OrganizationMember {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  userId         String   @db.Uuid
+  role           OrgRole
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model OrganizationStatusChange {
+  id             String     @id @default(uuid()) @db.Uuid
+  organizationId String     @db.Uuid
+  fromStatus     OrgStatus?
+  toStatus       OrgStatus
+  reason         String?
+  actorUserId    String?    @db.Uuid
+  createdAt      DateTime   @default(now()) @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+/// Running total per tenant, metric and billing period. Updated atomically from UsageEvent.
+model UsageCounter {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  metric         String
+  periodStart    DateTime @db.Timestamptz(3)
+  periodEnd      DateTime @db.Timestamptz(3)
+  value          BigInt   @default(0)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, metric, periodStart])
+}
+
+/// One metered event. (organizationId, idempotencyKey) is unique, so a retried request is never counted twice.
+model UsageEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  workspaceId    String?  @db.Uuid
+  metric         String
+  quantity       BigInt
+  idempotencyKey String
+  occurredAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, metric, occurredAt])
+}
+
+/// Time-limited, reason-stated access by platform support staff to one tenant. Every use is audited.
+model SupportAccessGrant {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  adminUserId    String    @db.Uuid
+  reason         String
+  scope          String    @default("read")
+  expiresAt      DateTime  @db.Timestamptz(3)
+  revokedAt      DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, expiresAt])
+}
+
+/// Platform-level audit trail (append-only, DB-enforced): admin actions, tenant lifecycle, support access.
+model PlatformAuditEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  actorUserId    String?  @db.Uuid
+  action         String
+  organizationId String?  @db.Uuid
+  targetType     String?
+  targetId       String?
+  reason         String?
+  metadata       Json     @default("{}")
+  ip             String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([organizationId, createdAt])
+  @@index([action, createdAt])
+}

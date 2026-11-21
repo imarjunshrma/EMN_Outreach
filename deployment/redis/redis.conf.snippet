@@ -1,0 +1,8 @@
+# Append to /etc/redis/redis.conf, then: sudo systemctl restart redis-server
+bind 127.0.0.1 -::1
+protected-mode yes
+requirepass CHANGE_ME_long_random_password
+# BullMQ requires that keys are never evicted
+maxmemory-policy noeviction
+appendonly yes
+appendfsync everysec

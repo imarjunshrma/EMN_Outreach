@@ -1,0 +1,18 @@
+# EMN Outreach OS — web UI image.  docker build -f deployment/docker/Dockerfile.web -t emn-web .
+FROM node:22-bookworm-slim AS build
+WORKDIR /web
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend ./
+ARG EMN_API_INTERNAL_URL=http://api:4000
+ENV EMN_API_INTERNAL_URL=$EMN_API_INTERNAL_URL NEXT_TELEMETRY_DISABLED=1
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-bookworm-slim
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+WORKDIR /web
+RUN groupadd --system emn && useradd --system --gid emn --home /web emn
+COPY --from=build --chown=emn:emn /web ./
+USER emn
+EXPOSE 3000
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-H", "0.0.0.0", "-p", "3000"]

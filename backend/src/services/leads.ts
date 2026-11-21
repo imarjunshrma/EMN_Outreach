@@ -1,0 +1,479 @@
+import { z } from 'zod';
+import { parse } from 'csv-parse/sync';
+import { stringify } from 'csv-stringify/sync';
+import { db, Prisma } from '../core/db.js';
+import { AppError, BadRequest, NotFound } from '../core/errors.js';
+import { audit, publish, type Actor } from '../core/audit.js';
+import { store } from '../core/storage.js';
+import { enqueue, QUEUES } from '../core/queues.js';
+import { emitEvent } from './automation.js';
+
+export const LEAD_STATUSES = ['NEW', 'RESEARCHED', 'QUALIFIED', 'DISQUALIFIED', 'CONTACTED', 'REPLIED', 'INTERESTED', 'MEETING_BOOKED', 'NOT_INTERESTED', 'CUSTOMER', 'UNSUBSCRIBED', 'BOUNCED'] as const;
+export const LAWFUL_BASES = ['UNKNOWN', 'CONSENT', 'LEGITIMATE_INTEREST', 'EXISTING_RELATIONSHIP', 'NOT_REQUIRED'] as const;
+
+export const normalizeEmail = (e: string) => e.trim().toLowerCase();
+const EMAIL_RE = /^[^\s@<>()[\]\\,;:"]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+export const isValidEmail = (e: string) => EMAIL_RE.test(e.trim());
+
+export function domainFromUrlOrEmail(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const s = input.trim().toLowerCase();
+  if (s.includes('@') && !s.includes('/')) return s.split('@')[1] ?? null;
+  try { return new URL(s.startsWith('http') ? s : `https://${s}`).hostname.replace(/^www\./, ''); } catch { return null; }
+}
+
+const FREE_MAIL = new Set(['gmail.com', 'googlemail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com', 'icloud.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'yandex.com', 'mail.com', 'zoho.com']);
+
+export const LeadInputSchema = z.object({
+  email: z.string().refine(isValidEmail, 'Invalid email address'),
+  firstName: z.string().max(100).nullable().optional(),
+  lastName: z.string().max(100).nullable().optional(),
+  title: z.string().max(200).nullable().optional(),
+  linkedinUrl: z.string().url().nullable().optional().or(z.literal('').transform(() => null)),
+  website: z.string().max(300).nullable().optional(),
+  phone: z.string().max(50).nullable().optional(),
+  country: z.string().length(2).toUpperCase().nullable().optional().or(z.literal('').transform(() => null)),
+  city: z.string().max(100).nullable().optional(),
+  timezone: z.string().max(60).nullable().optional(),
+  companyName: z.string().max(200).nullable().optional(),
+  companyDomain: z.string().max(200).nullable().optional(),
+  lawfulBasis: z.enum(LAWFUL_BASES).optional(),
+  lawfulBasisNote: z.string().max(500).nullable().optional(),
+  tags: z.array(z.string().max(50)).max(30).optional(),
+  customFields: z.record(z.string(), z.string()).optional(),
+  ownerId: z.string().uuid().nullable().optional(),
+});
+export type LeadInput = z.infer<typeof LeadInputSchema>;
+
+export async function upsertCompany(workspaceId: string, name: string | null | undefined, domainHint: string | null | undefined, extra: Partial<Prisma.CompanyUncheckedCreateInput> = {}) {
+  const domain = domainFromUrlOrEmail(domainHint);
+  if (!name && !domain) return null;
+  if (domain && FREE_MAIL.has(domain)) {
+    if (!name) return null;
+    const existing = await db().company.findFirst({ where: { workspaceId, name, domain: null } });
+    return existing ?? db().company.create({ data: { workspaceId, name, ...extra } });
+  }
+  if (domain) {
+    return db().company.upsert({
+      where: { workspaceId_domain: { workspaceId, domain } },
+      update: { ...(name ? {} : {}), ...Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== null && v !== undefined)) },
+      create: { workspaceId, name: name || domain, domain, website: `https://${domain}`, ...extra },
+    });
+  }
+  const existing = await db().company.findFirst({ where: { workspaceId, name: name!, domain: null } });
+  return existing ?? db().company.create({ data: { workspaceId, name: name!, ...extra } });
+}
+
+export async function createLead(workspaceId: string, input: LeadInput, actor: Actor, sourceId?: string) {
+  await (await import('./entitlements.js')).ws.quota(workspaceId, 'leads');
+  const emailNormalized = normalizeEmail(input.email);
+  const company = await upsertCompany(workspaceId, input.companyName, input.companyDomain ?? input.website ?? emailNormalized);
+  try {
+    const lead = await db().lead.create({
+      data: {
+        workspaceId, email: input.email.trim(), emailNormalized, firstName: input.firstName, lastName: input.lastName, title: input.title,
+        linkedinUrl: input.linkedinUrl, website: input.website, phone: input.phone, country: input.country, city: input.city, timezone: input.timezone,
+        lawfulBasis: input.lawfulBasis ?? 'UNKNOWN', lawfulBasisNote: input.lawfulBasisNote, tags: input.tags ?? [],
+        customFields: (input.customFields ?? {}) as Prisma.InputJsonValue, companyId: company?.id, sourceId, ownerId: input.ownerId ?? null,
+        statusChanges: { create: { workspaceId, toStatus: 'NEW', reason: 'created', actorUserId: actor.userId ?? null } },
+      },
+    });
+    await audit(workspaceId, actor, 'lead.created', { type: 'lead', id: lead.id });
+    await emitEvent(workspaceId, 'lead.created', `${lead.id}:created`, { leadId: lead.id });
+    return lead;
+  } catch (e) {
+    if ((e as { code?: string }).code === 'P2002') throw new AppError('CONFLICT', 'A lead with this email already exists in this workspace', 409);
+    throw e;
+  }
+}
+
+export const LeadQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(200).default(50),
+  q: z.string().optional(),
+  status: z.enum(LEAD_STATUSES).optional(),
+  listId: z.string().uuid().optional(),
+  companyId: z.string().uuid().optional(),
+  verification: z.enum(['UNVERIFIED', 'VALID', 'INVALID', 'RISKY', 'CATCH_ALL', 'UNKNOWN']).optional(),
+  minScore: z.coerce.number().int().optional(),
+  country: z.string().optional(),
+  tag: z.string().optional(),
+  sort: z.enum(['createdAt', 'score', 'lastRepliedAt', 'email']).default('createdAt'),
+});
+
+export function leadWhere(workspaceId: string, q: Partial<z.infer<typeof LeadQuerySchema>>): Prisma.LeadWhereInput {
+  return {
+    workspaceId,
+    ...(q.status ? { status: q.status } : {}),
+    ...(q.companyId ? { companyId: q.companyId } : {}),
+    ...(q.verification ? { emailVerificationStatus: q.verification } : {}),
+    ...(q.minScore !== undefined ? { currentScore: { gte: q.minScore } } : {}),
+    ...(q.country ? { country: q.country.toUpperCase() } : {}),
+    ...(q.tag ? { tags: { has: q.tag } } : {}),
+    ...(q.listId ? { listMembers: { some: { listId: q.listId } } } : {}),
+    ...(q.q ? { OR: [
+      { emailNormalized: { contains: q.q.toLowerCase() } },
+      { firstName: { contains: q.q, mode: 'insensitive' } },
+      { lastName: { contains: q.q, mode: 'insensitive' } },
+      { company: { name: { contains: q.q, mode: 'insensitive' } } },
+    ] } : {}),
+  };
+}
+
+export async function listLeads(workspaceId: string, q: z.infer<typeof LeadQuerySchema>) {
+  const where = leadWhere(workspaceId, q);
+  const orderBy: Prisma.LeadOrderByWithRelationInput =
+    q.sort === 'score' ? { currentScore: { sort: 'desc', nulls: 'last' } } : q.sort === 'lastRepliedAt' ? { lastRepliedAt: { sort: 'desc', nulls: 'last' } } : q.sort === 'email' ? { emailNormalized: 'asc' } : { createdAt: 'desc' };
+  const [items, total] = await Promise.all([
+    db().lead.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { company: { select: { id: true, name: true, domain: true } }, source: { select: { name: true } } } }),
+    db().lead.count({ where }),
+  ]);
+  return { items, total };
+}
+
+export async function getLead(workspaceId: string, id: string) {
+  const lead = await db().lead.findFirst({
+    where: { id, workspaceId },
+    include: {
+      company: true, source: true, owner: { select: { id: true, name: true, email: true } },
+      statusChanges: { orderBy: { createdAt: 'desc' }, take: 50 },
+      verifications: { orderBy: { createdAt: 'desc' }, take: 5 },
+      scores: { orderBy: { createdAt: 'desc' }, take: 5, include: { icp: { select: { name: true } } } },
+      researchReports: { orderBy: { createdAt: 'desc' }, take: 3, include: { claims: { include: { evidence: { select: { url: true, title: true } } } } } },
+      listMembers: { include: { list: { select: { id: true, name: true } } } },
+      enrollments: { include: { campaign: { select: { id: true, name: true, status: true } }, emailAccount: { select: { emailAddress: true } } } },
+      conversations: { orderBy: { lastMessageAt: 'desc' }, take: 20, select: { id: true, subject: true, category: true, lastMessageAt: true, status: true } },
+      opportunities: true,
+      notes: { orderBy: { createdAt: 'desc' }, include: { author: { select: { name: true } } } },
+      tasks: { orderBy: { dueAt: 'asc' } },
+      events: { orderBy: { occurredAt: 'desc' }, take: 50 },
+    },
+  });
+  if (!lead) throw NotFound('Lead');
+  return lead;
+}
+
+export async function setLeadStatus(workspaceId: string, leadId: string, status: (typeof LEAD_STATUSES)[number], reason: string, actor: Actor) {
+  const lead = await db().lead.findFirst({ where: { id: leadId, workspaceId } });
+  if (!lead) throw NotFound('Lead');
+  if (lead.status === status) return lead;
+  const updated = await db().$transaction(async (tx) => {
+    const l = await tx.lead.update({ where: { id: leadId }, data: { status } });
+    await tx.leadStatusChange.create({ data: { workspaceId, leadId, fromStatus: lead.status, toStatus: status, reason, actorUserId: actor.userId ?? null } });
+    return l;
+  });
+  // Converted or otherwise ineligible contacts stop all sequences.
+  if (['CUSTOMER', 'DISQUALIFIED', 'NOT_INTERESTED', 'UNSUBSCRIBED', 'BOUNCED'].includes(status)) {
+    const { stopEnrollmentsForLead } = await import('./engine.js');
+    await stopEnrollmentsForLead(workspaceId, leadId, 'STOPPED_INELIGIBLE', `lead status ${status}`);
+  }
+  await emitEvent(workspaceId, 'lead.status_changed', `${leadId}:${status}:${Date.now()}`, { leadId, from: lead.status, to: status });
+  await publish(workspaceId, 'lead.updated', { leadId });
+  return updated;
+}
+
+export async function updateLead(workspaceId: string, id: string, input: Partial<LeadInput> & { status?: (typeof LEAD_STATUSES)[number] }, actor: Actor) {
+  const lead = await db().lead.findFirst({ where: { id, workspaceId } });
+  if (!lead) throw NotFound('Lead');
+  const company = input.companyName !== undefined || input.companyDomain !== undefined
+    ? await upsertCompany(workspaceId, input.companyName, input.companyDomain ?? lead.emailNormalized) : undefined;
+  if (input.ownerId) {
+    const m = await db().workspaceMember.findFirst({ where: { workspaceId, userId: input.ownerId } });
+    if (!m) throw BadRequest('VALIDATION_FAILED', 'Owner must be a workspace member');
+  }
+  const { status, companyName: _c, companyDomain: _d, customFields, email, ...rest } = input;
+  const updated = await db().lead.update({
+    where: { id },
+    data: {
+      ...rest,
+      ...(email ? { email: email.trim(), emailNormalized: normalizeEmail(email), emailVerificationStatus: 'UNVERIFIED' } : {}),
+      ...(customFields ? { customFields: customFields as Prisma.InputJsonValue } : {}),
+      ...(company !== undefined ? { companyId: company?.id ?? null } : {}),
+    },
+  });
+  if (status) await setLeadStatus(workspaceId, id, status, 'manual update', actor);
+  await audit(workspaceId, actor, 'lead.updated', { type: 'lead', id }, { fields: Object.keys(input) });
+  return updated;
+}
+
+export async function deleteLeads(workspaceId: string, ids: string[], actor: Actor) {
+  const r = await db().lead.deleteMany({ where: { workspaceId, id: { in: ids } } });
+  await audit(workspaceId, actor, 'lead.deleted', undefined, { count: r.count });
+  return r.count;
+}
+
+export const BulkActionSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(5000),
+  action: z.enum(['add_to_list', 'remove_from_list', 'add_tag', 'set_status', 'set_lawful_basis', 'research', 'score', 'verify', 'delete']),
+  listId: z.string().uuid().optional(),
+  tag: z.string().max(50).optional(),
+  status: z.enum(LEAD_STATUSES).optional(),
+  lawfulBasis: z.enum(LAWFUL_BASES).optional(),
+  icpId: z.string().uuid().optional(),
+});
+
+export async function bulkAction(workspaceId: string, input: z.infer<typeof BulkActionSchema>, actor: Actor) {
+  const leads = await db().lead.findMany({ where: { workspaceId, id: { in: input.ids } }, select: { id: true } });
+  const ids = leads.map((l) => l.id);
+  switch (input.action) {
+    case 'add_to_list': {
+      if (!input.listId) throw BadRequest('VALIDATION_FAILED', 'listId required');
+      const list = await db().leadList.findFirst({ where: { id: input.listId, workspaceId } });
+      if (!list) throw NotFound('List');
+      const r = await db().leadListMember.createMany({ data: ids.map((leadId) => ({ workspaceId, listId: list.id, leadId })), skipDuplicates: true });
+      return { affected: r.count };
+    }
+    case 'remove_from_list': {
+      if (!input.listId) throw BadRequest('VALIDATION_FAILED', 'listId required');
+      const r = await db().leadListMember.deleteMany({ where: { workspaceId, listId: input.listId, leadId: { in: ids } } });
+      return { affected: r.count };
+    }
+    case 'add_tag': {
+      if (!input.tag) throw BadRequest('VALIDATION_FAILED', 'tag required');
+      const r = await db().$executeRaw`UPDATE "Lead" SET tags = array_append(tags, ${input.tag}) WHERE "workspaceId" = ${workspaceId}::uuid AND id = ANY(${ids}::uuid[]) AND NOT (${input.tag} = ANY(tags))`;
+      return { affected: r };
+    }
+    case 'set_status': {
+      if (!input.status) throw BadRequest('VALIDATION_FAILED', 'status required');
+      for (const id of ids) await setLeadStatus(workspaceId, id, input.status, 'bulk update', actor);
+      return { affected: ids.length };
+    }
+    case 'set_lawful_basis': {
+      if (!input.lawfulBasis) throw BadRequest('VALIDATION_FAILED', 'lawfulBasis required');
+      const r = await db().lead.updateMany({ where: { workspaceId, id: { in: ids } }, data: { lawfulBasis: input.lawfulBasis } });
+      await audit(workspaceId, actor, 'lead.lawful_basis_set', undefined, { count: r.count, basis: input.lawfulBasis });
+      return { affected: r.count };
+    }
+    case 'research':
+      for (const id of ids) await enqueue(QUEUES.research, 'research.lead', { workspaceId, leadId: id }, { jobId: `research-${id}-${Math.floor(Date.now() / 60000)}` });
+      return { queued: ids.length };
+    case 'score':
+      for (const id of ids) await enqueue(QUEUES.ai, 'ai.qualify', { workspaceId, leadId: id, icpId: input.icpId ?? null });
+      return { queued: ids.length };
+    case 'verify':
+      for (const id of ids) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId, leadId: id });
+      return { queued: ids.length };
+    case 'delete':
+      return { affected: await deleteLeads(workspaceId, ids, actor) };
+  }
+}
+
+// ---------------------------------------------------------------- lists
+
+export async function listLists(workspaceId: string) {
+  const lists = await db().leadList.findMany({ where: { workspaceId }, orderBy: { createdAt: 'desc' }, include: { _count: { select: { members: true } } } });
+  return lists.map((l) => ({ id: l.id, name: l.name, description: l.description, createdAt: l.createdAt, memberCount: l._count.members }));
+}
+
+export async function createList(workspaceId: string, input: { name: string; description?: string | null }, actor: Actor) {
+  const l = await db().leadList.create({ data: { workspaceId, name: input.name, description: input.description ?? null } });
+  await audit(workspaceId, actor, 'list.created', { type: 'list', id: l.id });
+  return l;
+}
+
+export async function updateList(workspaceId: string, id: string, input: { name?: string; description?: string | null }) {
+  const r = await db().leadList.updateMany({ where: { id, workspaceId }, data: input });
+  if (!r.count) throw NotFound('List');
+  return db().leadList.findUnique({ where: { id } });
+}
+
+export async function deleteList(workspaceId: string, id: string, actor: Actor) {
+  const inUse = await db().campaignList.count({ where: { listId: id, workspaceId, campaign: { status: { in: ['RUNNING', 'APPROVED', 'PAUSED'] } } } });
+  if (inUse) throw new AppError('CONFLICT', 'List is used by an active campaign', 409);
+  const r = await db().leadList.deleteMany({ where: { id, workspaceId } });
+  if (!r.count) throw NotFound('List');
+  await audit(workspaceId, actor, 'list.deleted', { type: 'list', id });
+}
+
+// ---------------------------------------------------------------- companies
+
+export async function listCompanies(workspaceId: string, q: { page: number; pageSize: number; q?: string }) {
+  const where: Prisma.CompanyWhereInput = { workspaceId, ...(q.q ? { OR: [{ name: { contains: q.q, mode: 'insensitive' } }, { domain: { contains: q.q.toLowerCase() } }] } : {}) };
+  const [items, total] = await Promise.all([
+    db().company.findMany({ where, orderBy: { name: 'asc' }, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { _count: { select: { leads: true } } } }),
+    db().company.count({ where }),
+  ]);
+  return { items, total };
+}
+
+export async function getCompany(workspaceId: string, id: string) {
+  const c = await db().company.findFirst({
+    where: { id, workspaceId },
+    include: {
+      leads: { select: { id: true, email: true, firstName: true, lastName: true, title: true, status: true, currentScore: true } },
+      researchReports: { orderBy: { createdAt: 'desc' }, take: 3, include: { claims: { include: { evidence: { select: { url: true, title: true } } } } } },
+      opportunities: true,
+      notes: { orderBy: { createdAt: 'desc' }, include: { author: { select: { name: true } } } },
+    },
+  });
+  if (!c) throw NotFound('Company');
+  return c;
+}
+
+export async function updateCompany(workspaceId: string, id: string, input: Partial<{ name: string; website: string | null; industry: string | null; employeeCount: number | null; country: string | null; city: string | null; description: string | null }>, actor: Actor) {
+  const r = await db().company.updateMany({ where: { id, workspaceId }, data: input });
+  if (!r.count) throw NotFound('Company');
+  await audit(workspaceId, actor, 'company.updated', { type: 'company', id });
+  return db().company.findUnique({ where: { id } });
+}
+
+// ---------------------------------------------------------------- notes
+
+export async function addNote(workspaceId: string, target: { leadId?: string; companyId?: string; conversationId?: string }, body: string, actor: Actor) {
+  if (target.leadId && !(await db().lead.findFirst({ where: { id: target.leadId, workspaceId } }))) throw NotFound('Lead');
+  if (target.companyId && !(await db().company.findFirst({ where: { id: target.companyId, workspaceId } }))) throw NotFound('Company');
+  if (target.conversationId && !(await db().conversation.findFirst({ where: { id: target.conversationId, workspaceId } }))) throw NotFound('Conversation');
+  return db().note.create({ data: { workspaceId, ...target, body, authorId: actor.userId ?? null } });
+}
+
+export async function deleteNote(workspaceId: string, id: string) {
+  const r = await db().note.deleteMany({ where: { id, workspaceId } });
+  if (!r.count) throw NotFound('Note');
+}
+
+// ---------------------------------------------------------------- CSV import / export
+
+const IMPORT_FIELDS = ['email', 'firstName', 'lastName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'phone', 'country', 'city', 'timezone', 'tags'] as const;
+export const ImportMappingSchema = z.record(z.string(), z.enum([...IMPORT_FIELDS, 'ignore'] as [string, ...string[]]).or(z.string().regex(/^custom\.[a-zA-Z0-9_]+$/)));
+
+export async function uploadImport(workspaceId: string, file: { originalname: string; buffer: Buffer }, actor: Actor) {
+  if (file.buffer.length > 20 * 1024 * 1024) throw BadRequest('VALIDATION_FAILED', 'CSV must be 20 MB or smaller');
+  let rows: string[][];
+  try {
+    rows = parse(file.buffer, { bom: true, skip_empty_lines: true, to_line: 6, relax_column_count: true }) as string[][];
+  } catch (e) {
+    throw BadRequest('VALIDATION_FAILED', `Could not parse CSV: ${(e as Error).message}`);
+  }
+  if (rows.length === 0) throw BadRequest('VALIDATION_FAILED', 'CSV is empty');
+  const headers = rows[0].map((h) => h.trim());
+  const key = await store().put(workspaceId, 'imports', file.buffer, 'csv');
+  const guess: Record<string, string> = {};
+  for (const h of headers) {
+    const n = h.toLowerCase().replace(/[^a-z]/g, '');
+    const map: Record<string, string> = { email: 'email', emailaddress: 'email', workemail: 'email', firstname: 'firstName', first: 'firstName', lastname: 'lastName', last: 'lastName', title: 'title', jobtitle: 'title', company: 'companyName', companyname: 'companyName', organization: 'companyName', domain: 'companyDomain', companydomain: 'companyDomain', website: 'website', linkedin: 'linkedinUrl', linkedinurl: 'linkedinUrl', phone: 'phone', country: 'country', city: 'city', timezone: 'timezone', tags: 'tags' };
+    guess[h] = map[n] ?? 'ignore';
+  }
+  const job = await db().importJob.create({ data: { workspaceId, fileName: file.originalname.slice(0, 200), storageKey: key, headers, mapping: guess, createdById: actor.userId ?? null } });
+  await audit(workspaceId, actor, 'import.uploaded', { type: 'import', id: job.id }, { file: file.originalname });
+  return { importId: job.id, headers, sampleRows: rows.slice(1, 6), suggestedMapping: guess };
+}
+
+export const StartImportSchema = z.object({
+  mapping: ImportMappingSchema,
+  dedupeMode: z.enum(['skip', 'update']).default('skip'),
+  targetListId: z.string().uuid().nullable().optional(),
+  newListName: z.string().max(100).optional(),
+  sourceName: z.string().min(1).max(100).default('CSV import'),
+  lawfulBasis: z.enum(LAWFUL_BASES).default('UNKNOWN'),
+  lawfulBasisNote: z.string().max(500).optional(),
+  defaultCountry: z.string().length(2).toUpperCase().optional(),
+});
+
+export async function startImport(workspaceId: string, importId: string, input: z.infer<typeof StartImportSchema>, actor: Actor) {
+  const job = await db().importJob.findFirst({ where: { id: importId, workspaceId } });
+  if (!job) throw NotFound('Import');
+  if (job.status !== 'PENDING') throw new AppError('CONFLICT', 'Import already started', 409);
+  if (!Object.values(input.mapping).includes('email')) throw BadRequest('VALIDATION_FAILED', 'Map one column to "email"');
+  let targetListId = input.targetListId ?? null;
+  if (targetListId && !(await db().leadList.findFirst({ where: { id: targetListId, workspaceId } }))) throw NotFound('List');
+  if (!targetListId && input.newListName) targetListId = (await createList(workspaceId, { name: input.newListName }, actor)).id;
+  await db().importJob.update({ where: { id: job.id }, data: { mapping: input.mapping, targetListId, options: { dedupeMode: input.dedupeMode, sourceName: input.sourceName, lawfulBasis: input.lawfulBasis, lawfulBasisNote: input.lawfulBasisNote ?? null, defaultCountry: input.defaultCountry ?? null } } });
+  await enqueue(QUEUES.imports, 'import.csv', { workspaceId, importId: job.id }, { jobId: `import-${job.id}`, attempts: 1 });
+  return { importId: job.id, status: 'queued' };
+}
+
+/** Worker: process an import job in batches. */
+export async function processImport(workspaceId: string, importId: string) {
+  const job = await db().importJob.findFirst({ where: { id: importId, workspaceId } });
+  if (!job || job.status === 'COMPLETED') return;
+  await db().importJob.update({ where: { id: job.id }, data: { status: 'RUNNING' } });
+  const opts = job.options as { dedupeMode: 'skip' | 'update'; sourceName: string; lawfulBasis: (typeof LAWFUL_BASES)[number]; lawfulBasisNote: string | null; defaultCountry: string | null };
+  const mapping = job.mapping as Record<string, string>;
+  const source = await db().leadSource.upsert({ where: { workspaceId_name: { workspaceId, name: opts.sourceName } }, update: {}, create: { workspaceId, name: opts.sourceName, type: 'CSV_IMPORT', provider: 'csv' } });
+  const records = parse(await store().get(job.storageKey), { bom: true, columns: true, skip_empty_lines: true, relax_column_count: true, trim: true }) as Record<string, string>[];
+  const counters = { imported: 0, updated: 0, skipped: 0, errors: 0 };
+  const errors: Array<{ row: number; error: string }> = [];
+  // Plan lead limit: computed once, then counted down locally (no per-row count queries).
+  const { ws: ent } = await import('./entitlements.js');
+  const tstate = await ent.state(workspaceId);
+  let leadRoom = tstate.entitlements.maxLeads >= 1e9 ? Number.POSITIVE_INFINITY : Math.max(0, tstate.entitlements.maxLeads - (await db().lead.count({ where: { workspace: { organizationId: tstate.organizationId } } })));
+  const seen = new Set<string>();
+  const suppressed = new Set((await db().suppressionEntry.findMany({ where: { workspaceId, type: 'EMAIL' }, select: { value: true } })).map((s) => s.value));
+
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i];
+    const row: Record<string, string> = {};
+    const custom: Record<string, string> = {};
+    for (const [col, field] of Object.entries(mapping)) {
+      const v = (rec[col] ?? '').trim();
+      if (!v || field === 'ignore') continue;
+      if (field.startsWith('custom.')) custom[field.slice(7)] = v; else row[field] = v;
+    }
+    const email = normalizeEmail(row.email ?? '');
+    if (!isValidEmail(email)) { counters.errors++; if (errors.length < 200) errors.push({ row: i + 2, error: 'invalid or missing email' }); continue; }
+    if (seen.has(email)) { counters.skipped++; continue; } // duplicate inside the file
+    seen.add(email);
+    if (suppressed.has(email)) { counters.skipped++; if (errors.length < 200) errors.push({ row: i + 2, error: 'email is on the suppression list' }); continue; }
+    try {
+      const existing = await db().lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: email } } });
+      const country = (row.country ?? opts.defaultCountry ?? '').toUpperCase().slice(0, 2) || null;
+      let leadId: string;
+      if (existing) {
+        if (opts.dedupeMode === 'skip') { counters.skipped++; leadId = existing.id; }
+        else {
+          await db().lead.update({ where: { id: existing.id }, data: { firstName: row.firstName ?? existing.firstName, lastName: row.lastName ?? existing.lastName, title: row.title ?? existing.title, country: country ?? existing.country, city: row.city ?? existing.city, phone: row.phone ?? existing.phone, linkedinUrl: row.linkedinUrl ?? existing.linkedinUrl } });
+          counters.updated++; leadId = existing.id;
+        }
+      } else {
+        if (leadRoom <= 0) { counters.skipped++; if (errors.length < 500) errors.push({ row: i + 2, error: 'Plan lead limit reached — upgrade to import more' }); continue; }
+        leadRoom--;
+        const company = await upsertCompany(workspaceId, row.companyName, row.companyDomain ?? row.website ?? email);
+        const lead = await db().lead.create({
+          data: {
+            workspaceId, email, emailNormalized: email, firstName: row.firstName, lastName: row.lastName, title: row.title, website: row.website,
+            linkedinUrl: row.linkedinUrl, phone: row.phone, country, city: row.city, timezone: row.timezone,
+            tags: row.tags ? row.tags.split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [], customFields: custom,
+            lawfulBasis: opts.lawfulBasis, lawfulBasisNote: opts.lawfulBasisNote, sourceId: source.id, companyId: company?.id,
+            statusChanges: { create: { workspaceId, toStatus: 'NEW', reason: `import ${job.fileName}` } },
+          },
+        });
+        counters.imported++; leadId = lead.id;
+      }
+      if (job.targetListId) await db().leadListMember.createMany({ data: [{ workspaceId, listId: job.targetListId, leadId }], skipDuplicates: true });
+    } catch (e) {
+      counters.errors++;
+      if (errors.length < 200) errors.push({ row: i + 2, error: (e as Error).message.slice(0, 200) });
+    }
+    if (i % 200 === 0) {
+      await db().importJob.update({ where: { id: job.id }, data: { totalRows: records.length, importedRows: counters.imported, updatedRows: counters.updated, skippedRows: counters.skipped, errorRows: counters.errors } });
+      await publish(workspaceId, 'import.progress', { importId, processed: i + 1, total: records.length });
+    }
+  }
+  await db().importJob.update({
+    where: { id: job.id },
+    data: { status: 'COMPLETED', finishedAt: new Date(), totalRows: records.length, importedRows: counters.imported, updatedRows: counters.updated, skippedRows: counters.skipped, errorRows: counters.errors, errors },
+  });
+  await publish(workspaceId, 'import.completed', { importId, ...counters });
+  return counters;
+}
+
+export async function exportLeadsCsv(workspaceId: string, q: Partial<z.infer<typeof LeadQuerySchema>>, actor: Actor) {
+  const leads = await db().lead.findMany({ where: leadWhere(workspaceId, q), include: { company: true, source: true }, orderBy: { createdAt: 'asc' }, take: 100_000 });
+  const safe = (v: unknown) => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s; // CSV formula-injection guard
+  };
+  const rows = leads.map((l) => [l.email, l.firstName, l.lastName, l.title, l.company?.name, l.company?.domain, l.country, l.city, l.status, l.emailVerificationStatus, l.currentScore, l.lawfulBasis, l.source?.name, l.tags.join(';'), l.createdAt.toISOString()].map(safe));
+  await audit(workspaceId, actor, 'lead.exported', undefined, { count: leads.length });
+  return stringify([['email', 'firstName', 'lastName', 'title', 'company', 'companyDomain', 'country', 'city', 'status', 'verification', 'score', 'lawfulBasis', 'source', 'tags', 'createdAt'], ...rows]);
+}
+
+export async function getImport(workspaceId: string, id: string) {
+  const j = await db().importJob.findFirst({ where: { id, workspaceId } });
+  if (!j) throw NotFound('Import');
+  return j;
+}
+
+export async function listImports(workspaceId: string) {
+  return db().importJob.findMany({ where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 50 });
+}

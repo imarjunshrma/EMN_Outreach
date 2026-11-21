@@ -1,0 +1,30 @@
+[Unit]
+Description=EMN Outreach OS — background worker (sending, sync, AI, schedules)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=emn
+Group=emn
+WorkingDirectory=/opt/emn/current
+Environment=NODE_ENV=production
+Environment=EMN_ENV_FILE=/opt/emn/shared/.env
+Environment=EMN_SERVICE=emn-worker
+ExecStart=/usr/bin/node dist/worker/src/main.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/emn/worker.log
+StandardError=append:/var/log/emn/worker.log
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/emn /var/log/emn
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

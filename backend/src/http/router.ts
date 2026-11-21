@@ -1,0 +1,180 @@
+import type { Express, Request, Response } from 'express';
+import { z, type ZodType } from 'zod';
+import { hasRole, type Role } from '../../../shared/src/permissions.js';
+import { AppError, Forbidden, Unauthorized } from '../core/errors.js';
+import { rateLimit } from '../core/redis.js';
+import type { Actor } from '../core/audit.js';
+import { db } from '../core/db.js';
+import { platformAudit } from '../core/tenant.js';
+import { ORG_ACCESS, PLATFORM_PERMISSIONS, orgCan, type OrgRole, type OrgStatus, type PlatformPermission, type PlatformRole } from '../../../shared/src/tenancy.js';
+
+// Declarative route registry: one definition drives Express wiring, validation, RBAC,
+// rate limiting and the generated OpenAPI document.
+
+export type AuthMode = 'public' | 'user' | 'workspace' | 'org' | 'platform';
+export type OrgPermission = 'view' | 'manage' | 'billing' | 'own';
+
+export interface Ctx<B = unknown, Q = unknown> {
+  req: Request;
+  res: Response;
+  body: B;
+  query: Q;
+  params: Record<string, string>;
+  userId: string;
+  workspaceId: string;
+  role: Role;
+  /** Tenant of the request, always derived server-side from membership — never from the client. */
+  organizationId: string;
+  orgRole: OrgRole | null;
+  platformRole: PlatformRole | null;
+  actor: Actor;
+  requestId: string;
+  sessionId: string | null;
+}
+
+export interface RouteDef<B = unknown, Q = unknown> {
+  method: 'get' | 'post' | 'put' | 'patch' | 'delete';
+  path: string; // relative to /api/v1, e.g. "/w/:workspaceId/leads"
+  tag: string;
+  summary: string;
+  auth: AuthMode;
+  role?: Role;
+  /** auth:'org' — required organization permission (default 'view'). */
+  orgPermission?: OrgPermission;
+  /** auth:'platform' — required platform permission. */
+  platformPermission?: PlatformPermission;
+  /** Allowed while the tenant is suspended/cancelled (read-only states): billing, export, account management. */
+  allowWhenInactive?: boolean;
+  body?: ZodType<B>;
+  query?: ZodType<Q>;
+  rateLimit?: { limit: number; windowSec: number; key?: 'ip' | 'user' | 'workspace' };
+  /** If true the handler writes the response itself (streams, redirects, files). */
+  raw?: boolean;
+  status?: number;
+  handler: (ctx: Ctx<B, Q>) => Promise<unknown>;
+}
+
+export const routes: RouteDef<any, any>[] = [];
+
+export function route<B = unknown, Q = unknown>(def: RouteDef<B, Q>) {
+  routes.push(def as RouteDef<any, any>);
+  return def;
+}
+
+/** API-key scope for a route: "<tag>:read" for GET, "<tag>:write" otherwise (tag lower-cased, spaces → "-"). */
+export function scopeOf(def: { tag: string; method: string }) {
+  return `${def.tag.toLowerCase().replace(/[^a-z0-9]+/g, '-')}:${def.method === 'get' ? 'read' : 'write'}`;
+}
+export function scopeAllows(scopes: string[], def: { tag: string; method: string }) {
+  const need = scopeOf(def);
+  const [tag, op] = need.split(':');
+  return scopes.some((s) => s === need || s === '*' || s === `*:${op}` || s === `${tag}:*` || (op === 'read' && (s === `${tag}:write` || s === '*:write')));
+}
+
+export function validationError(err: z.ZodError) {
+  return new AppError('VALIDATION_FAILED', 'Validation failed', 400, err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })));
+}
+
+export function mountRoutes(app: Express) {
+  for (const def of routes) {
+    const full = `/api/v1${def.path}`;
+    app[def.method](full, async (req: Request, res: Response, next) => {
+      try {
+        const auth = res.locals.auth as { userId: string | null; sessionId: string | null; apiKeyWorkspaceId: string | null; apiKeyRole: Role | null } | undefined;
+        const requestId = String(res.locals.requestId ?? '');
+        const ctx = {
+          req, res, params: req.params as Record<string, string>, requestId,
+          userId: auth?.userId ?? '', workspaceId: '', role: 'VIEWER' as Role, sessionId: auth?.sessionId ?? null,
+          organizationId: '', orgRole: null as OrgRole | null, platformRole: (res.locals.platformRole ?? null) as PlatformRole | null,
+          actor: { type: auth?.apiKeyWorkspaceId ? 'API' : 'USER', userId: auth?.userId ?? null, ip: req.ip, requestId } as Actor,
+          body: undefined as unknown, query: undefined as unknown,
+        };
+
+        if (def.rateLimit) {
+          const who = def.rateLimit.key === 'user' ? auth?.userId : def.rateLimit.key === 'workspace' ? String(req.params.workspaceId ?? '') : req.ip;
+          const r = await rateLimit(`${def.method}:${def.path}:${who ?? req.ip}`, def.rateLimit.limit, def.rateLimit.windowSec);
+          res.setHeader('X-RateLimit-Remaining', String(Math.max(0, r.remaining)));
+          if (!r.allowed) {
+            res.setHeader('Retry-After', String(r.resetSec));
+            throw new AppError('RATE_LIMITED', 'Too many requests, slow down', 429);
+          }
+        }
+
+        if (def.auth !== 'public') {
+          if (!auth?.userId && !auth?.apiKeyWorkspaceId) throw Unauthorized();
+        }
+        if (def.auth === 'workspace') {
+          const wsId = String(req.params.workspaceId ?? '');
+          const membership = res.locals.resolveMembership ? await res.locals.resolveMembership(wsId) : null;
+          if (!membership) throw new AppError('NOT_FOUND', 'Workspace not found', 404); // never reveal existence
+          ctx.workspaceId = wsId;
+          ctx.organizationId = membership.organizationId;
+          ctx.role = membership.role;
+          if (def.role && !hasRole(membership.role, def.role)) throw Forbidden();
+          if (membership.mfaMissing) throw new AppError('MFA_REQUIRED', 'This workspace requires two-factor authentication. Turn it on under My account → Security.', 403);
+          // Tenant lifecycle: suspended/cancelled tenants are read-only; tenants being deleted are closed.
+          const access = ORG_ACCESS[membership.orgStatus as OrgStatus] ?? 'closed';
+          const mutating = def.method !== 'get';
+          if (access === 'closed' && !def.allowWhenInactive) throw new AppError('TENANT_INACTIVE', `This organization is ${String(membership.orgStatus).toLowerCase().replace(/_/g, ' ')}`, 403, { status: membership.orgStatus });
+          if (access === 'readonly' && mutating && !def.allowWhenInactive) throw new AppError('TENANT_INACTIVE', `This organization is ${String(membership.orgStatus).toLowerCase()} — it is read-only until reactivated. Billing and exports remain available.`, 403, { status: membership.orgStatus });
+          if (membership.via === 'support') {
+            if (mutating) throw new AppError('FORBIDDEN', 'Support access is read-only', 403);
+            await platformAudit({ actorUserId: auth?.userId ?? null, action: 'support.read', organizationId: membership.organizationId, targetType: 'route', targetId: `${def.method.toUpperCase()} ${req.path}`.slice(0, 300), metadata: { grantId: membership.supportGrantId }, ip: req.ip });
+          }
+          const scopes = (res.locals.auth as { apiKeyScopes?: string[] } | undefined)?.apiKeyScopes;
+          if (auth?.apiKeyWorkspaceId) await (await import('../services/billing.js')).countApiCall(wsId, requestId);
+          if (scopes?.length && !scopeAllows(scopes, def)) throw new AppError('FORBIDDEN', `This API key lacks the scope ${scopeOf(def)}`, 403);
+        }
+
+        if (def.auth === 'org') {
+          if (!auth?.userId || auth.apiKeyWorkspaceId) throw Unauthorized();
+          const orgId = String(req.params.organizationId ?? '');
+          const m = /^[0-9a-f-]{36}$/i.test(orgId) ? await db().organizationMember.findUnique({ where: { organizationId_userId: { organizationId: orgId, userId: auth.userId } }, include: { organization: { select: { status: true } } } }) : null;
+          if (!m || m.organization.status === 'DELETED') throw new AppError('NOT_FOUND', 'Organization not found', 404);
+          const role = m.role as OrgRole;
+          const need = def.orgPermission ?? 'view';
+          if (need !== 'view' && !orgCan[need](role)) throw Forbidden(need === 'billing' ? 'Only the owner or a billing manager can do this' : need === 'own' ? 'Only the organization owner can do this' : 'Only organization owners and admins can do this');
+          const access = ORG_ACCESS[m.organization.status as OrgStatus];
+          if (access !== 'full' && def.method !== 'get' && !def.allowWhenInactive) throw new AppError('TENANT_INACTIVE', `This organization is ${m.organization.status.toLowerCase().replace(/_/g, ' ')}`, 403, { status: m.organization.status });
+          ctx.organizationId = orgId;
+          ctx.orgRole = role;
+        }
+        if (def.auth === 'platform') {
+          if (!auth?.userId || auth.apiKeyWorkspaceId) throw Unauthorized();
+          const pr = res.locals.platformRole as PlatformRole | null;
+          if (!pr || (def.platformPermission && !PLATFORM_PERMISSIONS[pr].includes(def.platformPermission))) throw new AppError('NOT_FOUND', 'Not found', 404); // platform area is invisible to tenants
+          ctx.platformRole = pr;
+        }
+
+        if (def.body) {
+          const parsed = def.body.safeParse(req.body ?? {});
+          if (!parsed.success) throw validationError(parsed.error);
+          ctx.body = parsed.data;
+        }
+        if (def.query) {
+          const parsed = def.query.safeParse(req.query ?? {});
+          if (!parsed.success) throw validationError(parsed.error);
+          ctx.query = parsed.data;
+        }
+
+        const result = await def.handler(ctx as Ctx<any, any>);
+        if (def.raw) return;
+        res.status(def.status ?? (def.method === 'post' ? 201 : 200)).json(result ?? { ok: true });
+      } catch (e) {
+        next(e);
+      }
+    });
+  }
+}
+
+// Common query helpers
+export const Paging = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export function paged<T>(items: T[], total: number, page: number, pageSize: number) {
+  return { data: items, page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+}
+
+export const Uuid = z.string().uuid();

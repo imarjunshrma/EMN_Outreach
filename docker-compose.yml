@@ -1,0 +1,68 @@
+# EMN Outreach OS — optional Docker Compose deployment (the systemd/PM2 VPS install remains supported).
+#   cp .env.example .env   # fill in secrets (see INSTALLATION.md); DATABASE_URL/REDIS_URL are set below
+#   docker compose up -d --build
+#   docker compose run --rm migrate
+# Put Nginx (deployment/nginx/emn.conf) or another TLS proxy in front of ports 3000/4000.
+name: emn
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    NODE_ENV: production
+    DATABASE_URL: postgresql://emn:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/emn
+    DATABASE_MIGRATION_URL: postgresql://emn:${POSTGRES_PASSWORD}@postgres:5432/emn
+    REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+    STORAGE_ROOT: /var/lib/emn/storage
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment: { POSTGRES_DB: emn, POSTGRES_USER: emn, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}" }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U emn -d emn"], interval: 10s, timeout: 5s, retries: 5 }
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck: { test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"], interval: 10s, timeout: 5s, retries: 5 }
+
+  migrate:
+    build: { context: ., dockerfile: deployment/docker/Dockerfile }
+    <<: *app-env
+    command: ["sh", "-c", "npx prisma migrate deploy && node --import tsx scripts/apply-sql.ts && node --import tsx prisma/seed.ts"]
+    depends_on: { postgres: { condition: service_healthy } }
+    profiles: ["tools"]
+
+  api:
+    build: { context: ., dockerfile: deployment/docker/Dockerfile }
+    <<: *app-env
+    restart: unless-stopped
+    command: ["node", "dist/backend/src/main.js"]
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgresql://emn:${POSTGRES_PASSWORD}@postgres:5432/emn
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      STORAGE_ROOT: /var/lib/emn/storage
+    ports: ["127.0.0.1:4000:4000"]
+    volumes: [storage:/var/lib/emn/storage]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+
+  worker:
+    build: { context: ., dockerfile: deployment/docker/Dockerfile }
+    <<: *app-env
+    restart: unless-stopped
+    command: ["node", "dist/worker/src/main.js"]
+    stop_grace_period: 90s
+    volumes: [storage:/var/lib/emn/storage]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+
+  web:
+    build: { context: ., dockerfile: deployment/docker/Dockerfile.web, args: { EMN_API_INTERNAL_URL: "http://api:4000" } }
+    restart: unless-stopped
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [api]
+
+volumes: { pgdata: {}, redisdata: {}, storage: {} }

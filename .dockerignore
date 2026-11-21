@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+dist
+frontend/.next
+backend/src/generated
+storage
+.env
+.env.*
+!.env.example
+*.log
+coverage
+.git
+frontend/.next-e2e
+test-results
+playwright-report
+e2e-results.json
+live-check-report.json
