@@ -87,7 +87,11 @@ test('reply template + policies: auto mode needs explicit opt-in', async ({ page
 });
 
 test('two-factor: enable with authenticator code, then sign-in requires it', async ({ page, context }) => {
-  await login(page);
+  // A customer account: platform staff (the first user) can no longer turn 2FA off, by design.
+  const U = { email: 'mfa-customer@e2e.test', password: 'Mfa-customer-12345' };
+  expect((await page.request.post('/api/v1/auth/signup', { data: { name: 'MFA Customer', email: U.email, password: U.password, organizationName: 'MFA Co', acceptTerms: true } })).ok()).toBeTruthy();
+  await context.clearCookies();
+  await login(page, U.email, U.password);
   const base = await workspaceBase(page);
   await page.goto(`${base}/settings/account`);
   await page.getByRole('button', { name: 'Set up two-factor' }).click();
@@ -98,7 +102,7 @@ test('two-factor: enable with authenticator code, then sign-in requires it', asy
   const recovery = ((await page.getByTestId('recovery-codes').locator('pre').textContent()) ?? '').split('\n').map((x) => x.trim()).filter(Boolean);
   expect(recovery.length).toBe(10);
   await context.clearCookies();
-  await login(page);
+  await login(page, U.email, U.password);
   await expect(page.getByTestId('mfa-step')).toBeVisible();
   await page.getByLabel('Authentication code').fill('000000');
   await page.getByRole('button', { name: 'Verify' }).click();
@@ -110,7 +114,7 @@ test('two-factor: enable with authenticator code, then sign-in requires it', asy
   const b2 = await workspaceBase(page);
   // turn it off again with a recovery code (single use) so later suites can sign in with a password
   await page.goto(`${b2}/settings/account`);
-  await page.getByLabel('Password', { exact: true }).fill(ADMIN.password);
+  await page.getByLabel('Password', { exact: true }).fill(U.password);
   await page.getByLabel('Code or recovery code').fill(recovery[0]);
   await page.getByRole('button', { name: 'Turn off two-factor' }).click();
   await expect(page.getByRole('button', { name: 'Set up two-factor' })).toBeVisible();

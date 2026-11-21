@@ -11,6 +11,7 @@ const NAV = [
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
   { href: '/docs', label: 'Docs' },
+  { href: '/contact', label: 'Contact' },
 ];
 
 export function Logo({ invert = false }: { invert?: boolean }) {
@@ -73,7 +74,7 @@ export function SiteShell({ children }: { children: ReactNode }) {
           </div>
           <FooterCol title="Product" links={[['/features', 'How it works'], ['/pricing', 'Pricing'], ['/security', 'Security'], ['/signup', 'Start a trial']]} />
           <FooterCol title="Developers" links={[['/docs', 'Documentation'], ['/docs/api', 'API reference'], ['/docs/quickstart', 'Quickstart'], ['/docs/webhooks', 'Webhooks']]} />
-          <FooterCol title="Company" links={[['/legal/terms', 'Terms of service'], ['/legal/privacy', 'Privacy policy'], ['/legal/acceptable-use', 'Acceptable use'], ['/login', 'Sign in']]} />
+          <FooterCol title="Company" links={[['/contact', 'Contact & support'], ['/legal/terms', 'Terms of service'], ['/legal/privacy', 'Privacy policy'], ['/legal/acceptable-use', 'Acceptable use']]} />
         </div>
         <div className="mx-auto max-w-6xl border-t border-slate-200 px-5 py-6 text-xs text-slate-500">© {new Date().getFullYear()} Elite Media Networks. EMN Outreach OS is a product of Elite Media Networks.</div>
       </footer>

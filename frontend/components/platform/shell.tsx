@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { createContext, useContext, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, BarChart3, Building, FileClock, Layers, LifeBuoy, ShieldAlert, UserCog } from 'lucide-react';
+import { Activity, ArrowLeft, BarChart3, Building, FileClock, Layers, LifeBuoy, ShieldAlert, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Loading } from '@/components/ui';
 
@@ -17,6 +17,7 @@ const NAV = [
   { href: '/platform/plans', label: 'Plans', icon: Layers, perm: 'tenants:read' },
   { href: '/platform/support', label: 'Support access', icon: LifeBuoy, perm: 'support:access' },
   { href: '/platform/users', label: 'User accounts', icon: UserCog, perm: 'tenants:read' },
+  { href: '/platform/operations', label: 'Operations', icon: Activity, perm: 'metrics:read' },
   { href: '/platform/audit', label: 'Audit trail', icon: FileClock, perm: 'audit:read' },
 ];
 

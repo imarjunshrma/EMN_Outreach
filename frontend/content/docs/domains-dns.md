@@ -36,10 +36,22 @@ Connect Cloudflare under **Settings → Integrations** with an API token limited
 
 1. Review the record — type, name and value — exactly as it will be created.
 2. Choose **Create in Cloudflare**. This explicit click is the approval; nothing is created in the background.
-3. The record is created in the zone that matches the domain. Existing records are never changed or deleted.
+3. The record is created in the zone that matches the domain. Creating a record never changes or deletes existing ones.
 
 > [!warning]
 > If an SPF record already exists, a second one is refused (two SPF records break SPF). Edit the existing record in Cloudflare and merge the `include:` instead.
+
+## Edit or delete existing records
+
+With Cloudflare connected, the domain page lists the zone's live records (**DNS records at your provider**). You can change the value of one record or delete one record:
+
+- **Edit** shows the current value next to the new one. If anyone changed the record since you opened the page, the change is refused, so you never overwrite something you did not see.
+- **Delete** asks you to type the record's full name first.
+- NS and SOA records, and records outside this domain, cannot be changed here.
+- Every change is written to the audit log with the old and new value.
+
+> [!warning]
+> Deleting or changing MX, SPF or DKIM records can stop email from being delivered. Change one thing at a time and check propagation afterwards.
 
 ## Propagation
 

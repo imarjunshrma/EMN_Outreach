@@ -15,7 +15,7 @@ test('public website pages render, stay light, and link to sign-up', async ({ pa
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(/Cold email that shows you did the homework/);
   expect(await page.evaluate(() => document.documentElement.classList.contains('dark'))).toBe(false);
   await shot(page, 'site-home');
-  for (const [path, h] of [['/features', /Everything between/], ['/security', /How we protect/], ['/legal/terms', /Terms of Service/], ['/legal/privacy', /Privacy Policy/]] as const) {
+  for (const [path, h] of [['/features', /Everything between/], ['/security', /How we protect/], ['/contact', /Talk to us/], ['/legal/terms', /Terms of Service/], ['/legal/privacy', /Privacy Policy/]] as const) {
     await page.goto(path);
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(h);
   }
@@ -180,5 +180,12 @@ test('platform console: staff need 2FA, then metrics, tenant search, audited sus
   await expect(page.getByText('Reactivate: done')).toBeVisible();
   await page.goto('/platform/audit');
   await expect(page.getByText('tenant.viewed').first()).toBeVisible();
+  await page.goto('/platform/operations');
+  await expect(page.getByRole('heading', { name: 'Operations' })).toBeVisible();
+  await expect(page.getByText('maintenance').first()).toBeVisible();
+  // the customer can see that support was never used, and the organization access log works
+  await page.goto('/platform/users');
+  await page.getByLabel('Search users').fill('bina');
+  await expect(page.getByText(CUSTOMER.email)).toBeVisible();
   expect(errors).toEqual([]);
 });

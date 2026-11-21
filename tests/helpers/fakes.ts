@@ -123,4 +123,6 @@ export class FakeCloudflare {
   async findZone(_t: string, domain: string) { const id = this.zones.get(domain); return id ? { id, name: domain, status: 'active' } : null; }
   async listRecords(_t: string, zoneId: string, q: { type?: string; name?: string }) { return this.records.filter((r) => r.zoneId === zoneId && (!q.type || r.type === q.type) && (!q.name || r.name === q.name)); }
   async createRecord(_t: string, zoneId: string, r: { type: string; name: string; content: string; ttl?: number }) { const rec = { id: `rec${this.records.length + 1}`, zoneId, ttl: 1, ...r }; this.records.push(rec as never); return rec; }
+  async updateRecord(_t: string, zoneId: string, id: string, r: { type: string; name: string; content: string; ttl?: number }) { const rec = this.records.find((x) => x.id === id && x.zoneId === zoneId); if (!rec) throw new Error('not found'); Object.assign(rec, r); return rec; }
+  async deleteRecord(_t: string, zoneId: string, id: string) { this.records = this.records.filter((x) => !(x.id === id && x.zoneId === zoneId)); }
 }

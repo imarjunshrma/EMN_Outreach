@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.0 — 2026-11-21 — Production hardening
+
+### Security and access
+- Platform staff must use 2FA (cannot be turned off in production); staff cannot disable their own 2FA; support grants require 2FA.
+- Platform **User accounts** screen: search, disable (ends all sessions) and re-enable, audited.
+- Customers see a banner while support is viewing and a **Support access log** in organization settings.
+- `/readyz` no longer returns error text; Prometheus `/metrics` behind `METRICS_TOKEN`.
+
+### Billing and usage
+- Refunds from the platform console (idempotent; confirmed only by provider webhook) and dispute handling (a lost dispute suspends the organization).
+- Out-of-order webhook protection and a reconciliation job every 6 hours.
+- Annual plans can pool allowances for the year.
+- One free trial per person and a per-user organization cap (`MAX_ORGS_PER_USER`).
+- Storage metered from real bytes, enforced at upload and reconciled daily.
+
+### Operations
+- Per-queue job timeouts, dead-letter logging and an **Operations** screen with retry.
+- DNS: list, edit (refused if the record changed meanwhile) and delete (typed confirmation) zone records; NS/SOA protected.
+- `scripts/restore-drill.sh` (non-destructive) and `scripts/load-test.ts`.
+- Fixed: concurrent lead creation for the same company returned 409.
+
+### Website and docs
+- Contact page; platform overview adds trial conversion, payment failures, refunds/disputes and growth.
+- docs/saas: inventory, execution plan, security audit, isolation, billing/usage, provider readiness, deployment and recovery, launch checklist, changed files; final report with release gates.
+
 ## 1.3.0 — 2026-11-21 — Multi-tenant SaaS, public website, documentation
 
 ### Multi-tenancy

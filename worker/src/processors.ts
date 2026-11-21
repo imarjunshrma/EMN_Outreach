@@ -78,6 +78,22 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
   },
   [QUEUES.verify]: {
     'verify.lead': async (j) => enrichment.verifyWaterfall(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force }),
+    'verify.address': async (j) => {
+      const verifier = await import('../../backend/src/services/first-party-verification.js');
+      try { return await verifier.processFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), j.attemptsMade + 1); }
+      catch (e) {
+        if (j.attemptsMade + 1 >= (j.opts.attempts ?? 1)) await verifier.failFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), (e as Error).message);
+        throw e;
+      }
+    },
+    'verify.csv-import': async (j) => {
+      const csv = await import('../../backend/src/services/verification-csv.js');
+      try { return await csv.processVerificationCsvBatch(s(j.data.workspaceId), s(j.data.batchId)); }
+      catch (e) {
+        if (j.attemptsMade + 1 >= (j.opts.attempts ?? 1)) await csv.markCsvImportFailed(s(j.data.workspaceId), s(j.data.batchId), (e as Error).message);
+        throw e;
+      }
+    },
   },
   [QUEUES.domain]: {
     'domain.check': async (j) => ops.runDomainCheck(s(j.data.workspaceId), s(j.data.domainId)),
@@ -95,6 +111,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'tenant.sync': async () => tenancy.syncTenantStatuses(),
     'tenant.purge': async () => tenancy.purgeDueTenants(),
     'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
+    'emailVerification.datasets.refresh': async () => (await import('../../backend/src/services/email-verification-datasets.js')).refreshDisposableDataset(),
     'billing.reconcile': async () => (await import('../../backend/src/services/billing.js')).reconcileSubscriptions(),
   },
   [QUEUES.automation]: {
@@ -163,6 +180,18 @@ async function acquireSlot(queueName: QueueName, org: string, jobId: string): Pr
   return null;
 }
 
+/** Hard ceiling per job so a hung provider call cannot hold a worker slot forever (the job is retried with back-off). */
+const TIMEOUT_MS: Partial<Record<QueueName, number>> = {
+  [QUEUES.send]: 120_000, [QUEUES.replySend]: 120_000, [QUEUES.prepare]: 120_000, [QUEUES.ai]: 180_000, [QUEUES.personalize]: 240_000,
+  [QUEUES.research]: 300_000, [QUEUES.verify]: 120_000, [QUEUES.sync]: 300_000, [QUEUES.webhooks]: 30_000, [QUEUES.imports]: 30 * 60_000, [QUEUES.maintenance]: 30 * 60_000,
+};
+export const jobTimeoutMs = (q: QueueName) => Number(process.env.JOB_TIMEOUT_MS ?? 0) || TIMEOUT_MS[q] || 10 * 60_000;
+export class JobTimeoutError extends Error {}
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: NodeJS.Timeout;
+  return Promise.race([p, new Promise<never>((_, rej) => { t = setTimeout(() => rej(new JobTimeoutError(`${label} exceeded ${Math.round(ms / 1000)} s`)), ms); })]).finally(() => clearTimeout(t));
+}
+
 /** Wraps a handler with JobRun bookkeeping and error logging. */
 export function processorFor(queueName: QueueName) {
   return async (job: Job<Data>, token?: string) => {
@@ -180,7 +209,7 @@ export function processorFor(queueName: QueueName) {
     }
     const started = Date.now();
     try {
-      const result = await handler(job);
+      const result = await withTimeout(handler(job), jobTimeoutMs(queueName), `${queueName}/${job.name}`);
       if (!NOISY.has(job.name)) {
         await db().jobRun.create({ data: { workspaceId: wsOf(job.data), queue: queueName, jobName: job.name, jobId: String(job.id), status: 'COMPLETED', attempt: job.attemptsMade + 1, durationMs: Date.now() - started } }).catch(() => undefined);
       }

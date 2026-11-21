@@ -1,6 +1,10 @@
 # EMN Outreach OS — API documentation
 
+<<<<<<< yours
 Generated from the route registry by `npm run api-docs` (336 operations). The machine-readable
+=======
+Generated from the route registry by `npm run api-docs` (328 operations). The machine-readable
+>>>>>>> claude
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -289,6 +293,9 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/domains/:id/propagation` | session/API key · MEMBER+ | 30/600s per workspace | — | — | Compare SPF/DMARC/verification across Cloudflare, Google and Quad9 resolvers |
 | GET | `/w/:workspaceId/domains/:id/recommended-records` | session/API key · VIEWER+ | — | — | — | DNS guidance for the mailbox providers on this domain |
 | POST | `/w/:workspaceId/domains/:id/dns-records` | session/API key · ADMIN+ | — | `type`: TXT\|CNAME, `name`: string, `content`: string | — | Create one DNS record via the connected DNS provider (Cloudflare) — explicit action only |
+| GET | `/w/:workspaceId/domains/:id/zone-records` | session/API key · ADMIN+ | — | — | — | Live DNS records of the domain from the connected DNS provider |
+| PUT | `/w/:workspaceId/domains/:id/zone-records/:recordId` | session/API key · ADMIN+ | 30/600s per workspace | `content`: string, `ttl?`: integer, `expectedContent`: string | — | Change one record’s value (refused if it changed since you loaded it; NS/SOA protected); audited |
+| DELETE | `/w/:workspaceId/domains/:id/zone-records/:recordId` | session/API key · ADMIN+ | 30/600s per workspace | `confirmName`: string, `expectedContent`: string | — | Delete one record after typing its name (NS/SOA protected); audited |
 | PATCH | `/w/:workspaceId/domains/:id/renewal` | session/API key · ADMIN+ | — | `registrar?`: object, `expiresAt?`: object, `autoRenew?`: boolean\|null | — | Registrar, expiry date and auto-renew (for renewal reminders) |
 
 ## Enrichment
@@ -469,6 +476,8 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/platform/plans` | session/API key · VIEWER+ | — | `code`: string, `name`: string, `description?`: string, `priceMonthlyCents`: integer, `priceYearlyCents`: integer, `currency?`: string, `trialDays?`: integer, `isPublic?`: boolean, `isActive?`: boolean, `sortOrder?`: integer, `providerPriceIds?`: object, `entitlements`: object | — | Create a plan |
 | PUT | `/platform/plans/:id` | session/API key · VIEWER+ | — | `code`: string, `name`: string, `description?`: string, `priceMonthlyCents`: integer, `priceYearlyCents`: integer, `currency?`: string, `trialDays?`: integer, `isPublic?`: boolean, `isActive?`: boolean, `sortOrder?`: integer, `providerPriceIds?`: object, `entitlements`: object | — | Update a plan (prices, limits, features, provider price ids) |
 | POST | `/platform/plans/:id/archive` | session/API key · VIEWER+ | — | `archived`: boolean | — | Archive / unarchive a plan |
+| GET | `/platform/operations` | session/API key · VIEWER+ | — | — | — | Queue depths, dead-lettered jobs and failure counters (last 24 h) |
+| POST | `/platform/operations/retry` | session/API key · VIEWER+ | — | `queue`: string, `jobId`: string, `reason`: string | — | Retry one dead-lettered job (reason required, audited) |
 | GET | `/platform/support/grants` | session/API key · VIEWER+ | — | — | — | My active support-access grants |
 | POST | `/platform/support/grants` | session/API key · VIEWER+ | — | `organizationId`: string, `reason`: string, `minutes?`: integer | — | Open time-limited, read-only, audited access to one tenant (reason required) |
 | DELETE | `/platform/support/grants/:id` | session/API key · VIEWER+ | — | — | — | End a support-access grant |

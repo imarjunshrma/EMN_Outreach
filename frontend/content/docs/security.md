@@ -35,7 +35,7 @@ Mailbox tokens, SMTP passwords, AI keys, DNS tokens and integration secrets are 
 
 ## Staff access
 
-EMN staff have platform roles (Super admin, Support, Finance) that are separate from customer roles. Staff cannot open a customer's workspace by default. Support access requires a **grant** for one organization, with a written reason, for at most four hours. Granted access is read-only, recorded in the customer's audit log, and every page viewed is recorded in the platform audit log, which cannot be edited or deleted.
+EMN staff have platform roles (Super admin, Support, Finance) that are separate from customer roles, and must use two-factor sign-in. Staff cannot open a customer's workspace by default. Support access requires a **grant** for one organization, with a written reason, for at most four hours. Granted access is read-only, shown to the customer under **Organization settings → Support access log** (including how many pages were viewed), and every page viewed is recorded in the platform audit log, which cannot be edited or deleted.
 
 ## Web security
 

@@ -458,6 +458,9 @@ model Workspace {
   leads                    Lead[]
   statusChanges            LeadStatusChange[]
   verifications            EmailVerification[]
+  verificationBatches      EmailVerificationBatch[]
+  verificationDomainOverrides EmailVerificationDomainOverride[]
+  verificationRolePatterns EmailVerificationRolePattern[]
   icps                     IdealCustomerProfile[]
   researchReports          ResearchReport[]
   researchEvidence         ResearchEvidence[]
@@ -964,15 +967,19 @@ model LeadStatusChange {
 model EmailVerification {
   id          String                  @id @default(uuid()) @db.Uuid
   workspaceId String                  @db.Uuid
-  leadId      String                  @db.Uuid
+  leadId      String?                 @db.Uuid
+  batchId     String?                 @db.Uuid
   email       String
   provider    String
   result      EmailVerificationStatus
   rawResult   String?
+  details     Json                    @default("{}")
+  expiresAt   DateTime?               @db.Timestamptz(3)
   createdAt   DateTime                @default(now()) @db.Timestamptz(3)
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  workspace Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead?                   @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  batch     EmailVerificationBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
 
   kind        String @default("VERIFY")
   step        Int    @default(1)
@@ -981,6 +988,81 @@ model EmailVerification {
 
   @@index([leadId])
   @@index([workspaceId, createdAt])
+  @@index([workspaceId, email, createdAt])
+  @@index([batchId])
+  @@unique([batchId, email])
+}
+
+model EmailVerificationBatch {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  createdBy   String?   @db.Uuid
+  status      String    @default("QUEUED")
+  total       Int       @default(0)
+  processed   Int       @default(0)
+  fileName    String?
+  storageKey  String?   @unique
+  fileSizeBytes BigInt?
+  emailColumn String?
+  hasHeader   Boolean   @default(true)
+  csvHeaders  Json?
+  error       String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt DateTime? @db.Timestamptz(3)
+
+  workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  verifications EmailVerification[]
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, status])
+}
+
+model DisposableEmailDomain {
+  domain     String   @id
+  source     String
+  sourceUrl  String
+  fetchedAt  DateTime @db.Timestamptz(3)
+
+  @@index([source, fetchedAt])
+}
+
+model EmailVerificationDomainOverride {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  domain      String
+  disposable  Boolean
+  createdBy   String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, domain])
+  @@index([workspaceId, disposable])
+}
+
+model EmailVerificationRolePattern {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  localPart   String
+  enabled     Boolean  @default(true)
+  createdBy   String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, localPart])
+  @@index([workspaceId, enabled])
+}
+
+model EmailVerificationDataset {
+  key          String   @id
+  sourceUrl    String
+  lastUpdated  DateTime? @db.Timestamptz(3)
+  domainCount  Int      @default(0)
+  checksum     String?
+  lastStatus   String   @default("NEVER_UPDATED")
+  lastError    String?
 }
 
 model IdealCustomerProfile {

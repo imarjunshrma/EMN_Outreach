@@ -62,9 +62,9 @@ Each test starts from an empty database and creates, through the real `POST /aut
 
 | Suite | Result |
 |---|---|
-| Vitest (unit + integration) | 19 files, 160 tests, all passing (includes 4 tests from the parallel hardening pass merged from the Mac copy) |
+| Vitest (unit + integration) | 21 files, 179 tests, all passing (v1.4 adds `billing-v14` and `ops-dns-v14`, 8 tests each, plus staff-MFA, user-disable and support-visibility cases) |
 | Playwright (browser, real API + production build) | 16 tests, all passing — includes 6 new SaaS tests (website, docs, sign-up/onboarding, cross-tenant URL, organization settings, platform console) |
-| ESLint | 0 errors |
+| ESLint | 0 errors (8 warnings) |
 | TypeScript (backend, frontend) | 0 errors |
 
-Run: `npm test`, `npm run test:e2e` (needs Postgres, Redis and Chrome).
+Run: `npm test`; browser tests: `E2E_DATABASE_URL=postgresql://…/emn_e2e_<new> E2E_REDIS_URL=redis://127.0.0.1:6379/<empty db> bash scripts/e2e.sh` (needs a fresh empty database, an empty Redis db and Chrome).

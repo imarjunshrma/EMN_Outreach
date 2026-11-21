@@ -3,7 +3,6 @@ import { db, Prisma } from '../core/db.js';
 import { sha256 } from '../core/crypto.js';
 import { AppError, NotFound } from '../core/errors.js';
 import { audit, type Actor } from '../core/audit.js';
-import { store } from '../core/storage.js';
 import {
   KnowledgeSchema, WritingSchema, ResearchSchema, WritingOverridesSchema, CampaignAiOverridesSchema,
   resolveConfig, type Knowledge, type Writing, type Research, type ResolvedConfig, type WritingOverrides, type CampaignAiOverrides,

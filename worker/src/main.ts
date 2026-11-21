@@ -27,8 +27,19 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
 const workers: Worker[] = [];
 for (const name of Object.keys(HANDLERS) as QueueName[]) {
   if (Object.keys(HANDLERS[name]).length === 0) continue;
-  const w = new Worker(name, processorFor(name), { connection: newRedis(), concurrency: CONCURRENCY[name] ?? 2, prefix: process.env.QUEUE_PREFIX ?? 'emn' });
-  w.on('failed', (job, err) => logger.warn({ queue: name, job: job?.name, jobId: job?.id, attempts: job?.attemptsMade, err: err.message }, 'job failed'));
+  const w = new Worker(name, processorFor(name), {
+    connection: newRedis(), concurrency: name === QUEUES.verify ? 1 : CONCURRENCY[name] ?? 2, prefix: process.env.QUEUE_PREFIX ?? 'emn',
+    settings: { backoffStrategy: (attempt, type) => {
+      if (type !== 'emnVerify') return -1;
+      const base = cfg.EMAIL_VERIFY_RETRY_DELAYS_MS[Math.min(attempt - 1, cfg.EMAIL_VERIFY_RETRY_DELAYS_MS.length - 1)];
+      return Math.round(base * (0.9 + Math.random() * 0.2));
+    } },
+  });
+  w.on('failed', (job, err) => {
+    const final = !!job && job.attemptsMade >= (job.opts.attempts ?? 1);
+    // Final failures are "dead letters": kept by BullMQ for 7 days, listed in /platform/operations, retryable by staff.
+    logger[final ? 'error' : 'warn']({ queue: name, job: job?.name, jobId: job?.id, attempts: job?.attemptsMade, deadLetter: final, err: err.message }, final ? 'job dead-lettered' : 'job failed');
+  });
   w.on('error', (err) => logger.error({ queue: name, err }, 'worker error'));
   workers.push(w);
 }
@@ -48,6 +59,7 @@ async function schedules() {
   await queue(QUEUES.maintenance).upsertJobScheduler('billing-reconcile', { pattern: '53 */6 * * *' }, { name: 'billing.reconcile', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('tenant-purge', { pattern: '23 1 * * *' }, { name: 'tenant.purge', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('task-reminders', { every: 300_000 }, { name: 'maintenance.taskReminders', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('verification-datasets-daily', { pattern: '41 2 * * *' }, { name: 'emailVerification.datasets.refresh', data: {} });
 }
 schedules().then(() => logger.info({ queues: workers.length }, 'EMN worker started')).catch((e) => { logger.fatal({ err: e }, 'failed to register schedules'); process.exit(1); });
 

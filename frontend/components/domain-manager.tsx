@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fmtDay } from '@/lib/format';
 import { Badge, Button, Card, Checkbox, ConfirmButton, Field, Input, Notice, Select, Table } from '@/components/ui';
+import { ZoneRecords } from '@/components/zone-records';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /** Ownership verification, propagation check, recommended records (+ one-click apply via Cloudflare) and renewal tracking. */
@@ -53,6 +54,7 @@ export function DomainManager({ domain: d }: { domain: any }) {
           return <tr key={`${r.type}-${r.name}`}><td className="td">{r.type}</td><td className="td break-all font-mono text-xs">{r.name}</td><td className="td break-all font-mono text-xs">{r.value}</td><td className="td text-xs">{r.purpose}</td><td className="td">{cfConnected && !placeholder && <ConfirmButton variant="secondary" confirm={`Create ${r.type} ${r.name} at Cloudflare?`} onConfirm={() => apply.mutate({ type: r.type, name: r.name, content: r.value })}>Create</ConfirmButton>}</td></tr>;
         })}</Table>}
       </Card>
+      {cfConnected && <ZoneRecords domainId={d.id} domainName={d.name} />}
     </div>
   );
 }

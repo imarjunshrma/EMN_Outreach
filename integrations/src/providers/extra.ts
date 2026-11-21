@@ -56,7 +56,13 @@ export interface DnsProviderAdapter {
   findZone(token: string, domain: string): Promise<{ id: string; name: string; status: string } | null>;
   listRecords(token: string, zoneId: string, q: { type?: string; name?: string }): Promise<DnsRecord[]>;
   createRecord(token: string, zoneId: string, r: { type: 'TXT' | 'CNAME' | 'MX'; name: string; content: string; ttl?: number; priority?: number }): Promise<DnsRecord>;
+  /** Replaces content/TTL of one existing record (type and name are kept). */
+  updateRecord(token: string, zoneId: string, recordId: string, r: { type: string; name: string; content: string; ttl?: number; priority?: number }): Promise<DnsRecord>;
+  deleteRecord(token: string, zoneId: string, recordId: string): Promise<void>;
 }
+// Adding another DNS provider (Route 53, DigitalOcean, …) means implementing DnsProviderAdapter and
+// registering it in backend/src/core/container.ts under `dnsProviders`; the domain service selects
+// the adapter by the workspace's connected DNS integration and never hard-codes a provider.
 
 /** Cloudflare API v4 (DNS only — Cloudflare Registrar has no public API for registering domains). */
 export class CloudflareDns implements DnsProviderAdapter {
@@ -78,6 +84,12 @@ export class CloudflareDns implements DnsProviderAdapter {
   }
   async createRecord(token: string, zoneId: string, r: { type: 'TXT' | 'CNAME' | 'MX'; name: string; content: string; ttl?: number; priority?: number }) {
     return this.call<DnsRecord>(token, `/zones/${zoneId}/dns_records`, { method: 'POST', body: JSON.stringify({ ...r, ttl: r.ttl ?? 1 }) });
+  }
+  async updateRecord(token: string, zoneId: string, recordId: string, r: { type: string; name: string; content: string; ttl?: number; priority?: number }) {
+    return this.call<DnsRecord>(token, `/zones/${zoneId}/dns_records/${recordId}`, { method: 'PUT', body: JSON.stringify({ ...r, ttl: r.ttl ?? 1 }) });
+  }
+  async deleteRecord(token: string, zoneId: string, recordId: string) {
+    await this.call(token, `/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE' });
   }
 }
 

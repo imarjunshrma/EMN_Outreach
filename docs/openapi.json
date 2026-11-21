@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "EMN Outreach OS API",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "description": "Error codes:\n- VALIDATION_FAILED: Request body, query or params failed validation (400)\n- UNAUTHENTICATED: Missing or expired session / API key (401)\n- CSRF_FAILED: Missing or wrong X-CSRF-Token header (403)\n- FORBIDDEN: Role does not allow this action (403)\n- NOT_FOUND: Resource does not exist in this workspace (404)\n- RATE_LIMITED: Too many requests (429)\n- CONFLICT: Unique constraint or state conflict (409)\n- CAMPAIGN_INVALID: Campaign failed validation and cannot be approved/started (400)\n- CAMPAIGN_STATE: Action not allowed in the campaign current status (409)\n- PROVIDER_NOT_CONFIGURED: Integration / AI provider / OAuth app not configured (400)\n- PROVIDER_ERROR: External provider returned an error (502)\n- AI_BUDGET_EXCEEDED: Monthly AI budget for this task is used up (402)\n- AI_COST_LIMIT: Per-lead AI cost limit would be exceeded (402)\n- QUALITY_CHECK_FAILED: Personalization has failing quality checks and cannot be approved (400)\n- AI_OUTPUT_INVALID: AI response failed schema validation (502)\n- WEAK_PASSWORD: Password does not meet the strength policy (400)\n- INVALID_PASSWORD: Current password is wrong (400)\n- REGISTRATION_CLOSED: Public registration is disabled; use an invitation (403)\n- LOGIN_REQUIRED: Invitation belongs to an existing account; log in first (400)\n- INVITATION_INVALID: Invitation token invalid, used or expired (400)\n- INVITATION_EMAIL_MISMATCH: Logged-in user is not the invited email (400)\n- LAST_OWNER: Cannot remove/demote the last workspace owner (400)\n- OAUTH_STATE_INVALID: OAuth state expired, reused or for another provider (400)\n- OAUTH_DENIED: User or tenant admin denied consent (400)\n- OAUTH_NO_REFRESH: Provider returned no refresh token (400)\n- ACCOUNT_NOT_CONNECTED: Mailbox is disconnected / needs re-authentication (400/409)\n- UNRESOLVED_VARIABLES: Template still contains unresolved {{variables}} (400)\n- FACT_CHECK_FAILED: Independent fact-check found unsupported claims (400)\n- ICP_REQUIRED: Scoring needs an ICP first (400)\n- NOT_ELIGIBLE: Lead fails a compliance/suppression/verification gate (400)\n- REVIEW_REQUIRED: Country rule needs explicit review before enabling (400)\n- INVALID_TOKEN: Unsubscribe/booking token invalid (400)\n- MFA_REQUIRED: Workspace requires two-factor authentication (403)\n- INVALID_CODE: Two-factor code invalid (400)\n- QUOTA_EXCEEDED: Plan limit reached for this resource (402)\n- SUBSCRIPTION_INACTIVE: Subscription inactive; feature unavailable (402)\n- INVALID_SIGNATURE: Webhook signature verification failed (400)\n- TENANT_INACTIVE: Organization is suspended, cancelled or being deleted; writes are blocked (403)\n- EMAIL_NOT_VERIFIED: Confirm your email address before this action (403)\n- INVALID_TRANSITION: Organization status change not allowed from the current status (409)\n- SUPPRESSED: Recipient is on the suppression list (400)\n- INTERNAL: Unexpected server error (500)"
   },
   "servers": [
@@ -24004,13 +24004,22 @@
         }
       }
     },
+<<<<<<< yours
     "/api/v1/w/{workspaceId}/enrichment/stats": {
+=======
+    "/api/v1/w/{workspaceId}/domains/{id}/zone-records": {
+>>>>>>> claude
       "get": {
         "tags": [
           "Enrichment"
         ],
+<<<<<<< yours
         "summary": "Provider comparison: checks, definitive rate, credits",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+=======
+        "summary": "Live DNS records of the domain from the connected DNS provider",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+>>>>>>> claude
         "parameters": [
           {
             "name": "workspaceId",
@@ -24075,12 +24084,855 @@
         }
       }
     },
+<<<<<<< yours
     "/api/v1/w/{workspaceId}/leads/{id}/verifications": {
       "get": {
         "tags": [
           "Enrichment"
         ],
         "summary": "Verification / enrichment history for a lead",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+=======
+    "/api/v1/w/{workspaceId}/domains/{id}/zone-records/{recordId}": {
+      "put": {
+        "tags": [
+          "Deliverability"
+        ],
+        "summary": "Change one record’s value (refused if it changed since you loaded it; NS/SOA protected); audited",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: 30 requests / 600s per workspace",
+>>>>>>> claude
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+<<<<<<< yours
+=======
+          },
+          {
+            "name": "recordId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+>>>>>>> claude
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "ttl": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400
+                  },
+                  "expectedContent": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "content",
+                  "expectedContent"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 30,
+            "windowSec": 600,
+            "key": "workspace"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+<<<<<<< yours
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/verify": {
+      "post": {
+=======
+      },
+      "delete": {
+>>>>>>> claude
+        "tags": [
+          "Deliverability"
+        ],
+<<<<<<< yours
+        "summary": "Queue first-party syntax, disposable, role, free-provider and DNS checks (no SMTP probe)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 60 requests / 3600s per workspace",
+=======
+        "summary": "Delete one record after typing its name (NS/SOA protected); audited",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: 30 requests / 600s per workspace",
+>>>>>>> claude
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+<<<<<<< yours
+=======
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recordId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+>>>>>>> claude
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+<<<<<<< yours
+                  "email": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 254
+                  },
+                  "leadId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "email"
+=======
+                  "confirmName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "expectedContent": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "confirmName",
+                  "expectedContent"
+>>>>>>> claude
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+<<<<<<< yours
+            "limit": 60,
+            "windowSec": 3600,
+=======
+            "limit": 30,
+            "windowSec": 600,
+>>>>>>> claude
+            "key": "workspace"
+          },
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+<<<<<<< yours
+    "/api/v1/w/{workspaceId}/email-verification/bulk": {
+      "post": {
+=======
+    "/api/v1/w/{workspaceId}/domains/{id}/renewal": {
+      "patch": {
+>>>>>>> claude
+        "tags": [
+          "Deliverability"
+        ],
+<<<<<<< yours
+        "summary": "Queue deduplicated first-party DNS verification for an email list",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 10 requests / 3600s per workspace",
+=======
+        "summary": "Registrar, expiry date and auto-renew (for renewal reminders)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+>>>>>>> claude
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+<<<<<<< yours
+                  "emails": {
+                    "minItems": 1,
+                    "maxItems": 1000,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 254
+                    }
+                  }
+                },
+                "required": [
+                  "emails"
+                ]
+=======
+                  "registrar": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "expiresAt": {
+                    "anyOf": [
+                      {},
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "autoRenew": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+>>>>>>> claude
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+<<<<<<< yours
+          "rateLimit": {
+            "limit": 10,
+            "windowSec": 3600,
+            "key": "workspace"
+          },
+          "status": 202,
+=======
+          "rateLimit": null,
+          "status": 200,
+>>>>>>> claude
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+<<<<<<< yours
+    "/api/v1/w/{workspaceId}/email-verification/batches": {
+=======
+    "/api/v1/w/{workspaceId}/mailbox-health": {
+>>>>>>> claude
+      "get": {
+        "tags": [
+          "Mailboxes"
+        ],
+<<<<<<< yours
+        "summary": "List first-party verification batches",
+=======
+        "summary": "Connection, auth, sync, send/receive, errors, bounces, complaints and DNS per mailbox",
+>>>>>>> claude
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+<<<<<<< yours
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}": {
+      "get": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Get tenant-scoped verification batch and results",
+=======
+    "/api/v1/w/{workspaceId}/leads/{id}/verify-waterfall": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Verify one lead now through the verifier waterfall",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 300 requests / 3600s per workspace",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "force": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MEMBER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 300,
+            "windowSec": 3600,
+            "key": "workspace"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/enrichment/verify-bulk": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Queue waterfall verification (skips recently verified unless force)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "leadIds": {
+                    "minItems": 1,
+                    "maxItems": 5000,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    }
+                  },
+                  "force": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "leadIds"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MEMBER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/enrichment/find-email": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Email discovery waterfall (name + company domain)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 300 requests / 3600s per workspace",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "domain": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 253
+                  }
+                },
+                "required": [
+                  "firstName",
+                  "lastName",
+                  "domain"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MEMBER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 300,
+            "windowSec": 3600,
+            "key": "workspace"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/enrichment/stats": {
+      "get": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Provider comparison: checks, definitive rate, credits",
+>>>>>>> claude
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/{id}": {
+      "get": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Get tenant-scoped first-party verification result",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
         "parameters": [
           {
@@ -28564,6 +29416,112 @@
             "$ref": "#/components/responses/Error"
           }
         }
+<<<<<<< yours
+=======
+      },
+      "delete": {
+        "tags": [
+          "Organizations"
+        ],
+        "summary": "Cancel a scheduled deletion",
+        "description": "Authentication: organization member (session cookie)\n\nOrganization permission: own\n\nAvailable while the organization is suspended or cancelled\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "organizationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "org",
+          "role": null,
+          "orgPermission": "own",
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/me": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "My platform role, permissions and whether 2FA is on (required for every other platform route)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+>>>>>>> claude
       }
     },
     "/api/v1/platform/users": {
@@ -29120,6 +30078,165 @@
           "role": null,
           "orgPermission": null,
           "platformPermission": "tenants:lifecycle",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/refunds": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Refund all or part of a paid invoice (optionally cancelling the subscription); idempotent on requestKey",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: billing:refund\n\nRate limit: 20 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "invoiceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "amountCents": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  },
+                  "cancelSubscription": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "requestKey": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "invoiceId",
+                  "reason",
+                  "requestKey"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "billing:refund",
+          "rateLimit": {
+            "limit": 20,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/billing": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Invoices, refunds and disputes of a tenant (no payment secrets)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: billing:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "billing:read",
           "rateLimit": null,
           "status": 200,
           "allowWhenInactive": false
@@ -29921,6 +31038,132 @@
           "role": null,
           "orgPermission": null,
           "platformPermission": "plans:write",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/operations": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Queue depths, dead-lettered jobs and failure counters (last 24 h)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: metrics:read\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "metrics:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/operations/retry": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Retry one dead-lettered job (reason required, audited)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:lifecycle\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "jobId": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "queue",
+                  "jobId",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:lifecycle",
           "rateLimit": null,
           "status": 200,
           "allowWhenInactive": false

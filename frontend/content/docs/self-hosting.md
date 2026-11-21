@@ -41,6 +41,14 @@ The worker registers these automatically:
 | `maintenance.retention` | daily 02:43 UTC | Apply data retention |
 | `domain.checkAll` | daily 03:17 UTC | Re-check every domain's DNS |
 
+## Monitoring
+
+Set `METRICS_TOKEN` and scrape `GET /metrics` with `Authorization: Bearer <token>` (Prometheus format): database and Redis reachability, queue depth by state, failed job attempts, errors, organizations by status, billing anomalies and failed sign-ins in the last hour. `/readyz` reports database and Redis health without internal details. Suggested alerts are listed in `docs/saas/DEPLOYMENT_AND_RECOVERY_GUIDE.md`.
+
 ## Backups
 
-Back up PostgreSQL daily (for example `pg_dump -Fc`) and keep backups encrypted, off the server, for a fixed period such as 30 days, so data deleted by customers also disappears from backups within that period. Back up the encryption key separately — without it, stored credentials cannot be decrypted. Test a restore regularly.
+Back up PostgreSQL daily (for example `pg_dump -Fc`) and keep backups encrypted, off the server, for a fixed period such as 30 days, so data deleted by customers also disappears from backups within that period. Back up the encryption key separately — without it, stored credentials cannot be decrypted. Test a restore regularly with the non-destructive drill, which dumps the database, restores it into a new throwaway database, compares row counts of every table and re-applies migrations:
+
+```bash title="Restore drill"
+SOURCE_DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/emn bash scripts/restore-drill.sh
+```

@@ -35,10 +35,20 @@ export function createApp(): Express {
   app.get('/healthz', (_req, res) => { res.json({ ok: true }); });
   app.get('/readyz', async (_req, res) => {
     const checks: Record<string, string> = {};
-    try { await db().$queryRaw`SELECT 1`; checks.database = 'ok'; } catch (e) { checks.database = (e as Error).message; }
-    try { await redis().ping(); checks.redis = 'ok'; } catch (e) { checks.redis = (e as Error).message; }
+    // Details go to the log, never to the (public) response.
+    try { await db().$queryRaw`SELECT 1`; checks.database = 'ok'; } catch (e) { checks.database = 'error'; logger.error({ err: (e as Error).message }, 'readyz: database'); }
+    try { await redis().ping(); checks.redis = 'ok'; } catch (e) { checks.redis = 'error'; logger.error({ err: (e as Error).message }, 'readyz: redis'); }
     const ok = Object.values(checks).every((v) => v === 'ok');
     res.status(ok ? 200 : 503).json({ ok, checks });
+  });
+  // Prometheus metrics for monitoring/alerting. Disabled (404) unless METRICS_TOKEN is set; scrapers send it as a bearer token.
+  app.get('/metrics', async (req, res, next) => {
+    try {
+      const token = process.env.METRICS_TOKEN;
+      const given = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+      if (!token || given.length !== token.length || !(await import('node:crypto')).timingSafeEqual(Buffer.from(given), Buffer.from(token))) { res.status(404).end(); return; }
+      res.type('text/plain; version=0.0.4').send(await (await import('./core/metrics.js')).prometheusText());
+    } catch (e) { next(e); }
   });
 
   // ---------------- raw-body public endpoints (registered before the JSON parser)
@@ -124,7 +134,10 @@ export function createApp(): Express {
   app.get('/api/v1/w/:workspaceId/events', async (req, res, next) => {
     try {
       const resolve = res.locals.resolveMembership as ((id: string) => Promise<unknown>) | undefined;
-      if (!resolve || !(await resolve(String(req.params.workspaceId)))) throw new AppError('NOT_FOUND', 'Workspace not found', 404);
+      const m = resolve ? await resolve(String(req.params.workspaceId)) as { orgStatus?: string } | null : null;
+      if (!m) throw new AppError('NOT_FOUND', 'Workspace not found', 404);
+      // Organizations being deleted (or deleted) get no live stream, like every other workspace route.
+      if (m.orgStatus === 'DELETION_PENDING' || m.orgStatus === 'DELETED') throw new AppError('TENANT_INACTIVE', 'This organization is closed', 403);
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
       res.write(': connected\n\n');
       const sub = newRedis();

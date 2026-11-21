@@ -6,7 +6,6 @@ import { db, Prisma } from '../core/db.js';
 import { AppError, Forbidden, NotFound } from '../core/errors.js';
 import { audit, notifyWorkspace, WORKER_ACTOR, type Actor } from '../core/audit.js';
 import { enqueue, QUEUES } from '../core/queues.js';
-import { store } from '../core/storage.js';
 import { randomToken, sha256, safeEqual } from '../core/crypto.js';
 import { GraphSchema, WORKFLOW_TRIGGERS, evalCondition, type Block } from '../../../shared/src/workflow.js';
 import { assertPublicUrl } from '../../../integrations/src/research/fetcher.js';

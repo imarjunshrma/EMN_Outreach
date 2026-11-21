@@ -1,41 +1,25 @@
-# Unresolved issues and limitations
+# Unresolved issues and limitations — v1.4.0
 
-Honest list of what is not done, not verified, or deliberately out of scope. Ordered by importance for a commercial launch.
+## Resolved in v1.4
+Storage metering and enforcement; refunds and disputes; out-of-order webhooks; billing reconciliation; annual pooled allowances; trial abuse (one trial per person, organization cap); platform staff MFA; DNS record listing, editing and deletion; SSE tenant status; restore drill (scripted and run); load test (scripted and run on one node).
 
-## Requires live credentials (code exists, not verified live here)
+## Requires live credentials (code exists, not verified live)
+Stripe, Razorpay, system SMTP, Gmail and Microsoft 365 OAuth, Cloudflare DNS, AI providers, Apollo, verifiers, search. See `PROVIDER_READINESS_MATRIX.md`.
 
-| Item | What is needed |
-|---|---|
-| Stripe checkout, portal and webhooks | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, prices created, price ids entered on each plan; run a test-mode purchase end to end |
-| Razorpay subscriptions and webhooks | `RAZORPAY_*` keys, plans created, plan ids on each plan |
-| Verification / password-reset / notification emails | `SYSTEM_SMTP_URL` (transactional provider). Without it, verification links are not delivered and users stay unverified (SaaS mode blocks invitations/campaigns) |
-| Gmail / Microsoft 365 mailboxes | OAuth client ids/secrets and app verification (Google restricted scopes require a security assessment for public SaaS) |
-| Cloudflare DNS | Customer tokens; tested only with a fake adapter |
-| OpenAI / Anthropic, Apollo, verifiers, search | Customer keys; tested with fakes |
+## Not implemented
+1. HubSpot / Pipedrive native connectors (webhooks and API remain the path).
+2. Per-domain daily send cap (per-mailbox limits exist).
+3. Revoking Google/Microsoft OAuth tokens at the provider when a tenant is deleted (tokens are deleted locally).
+4. Payment-method fingerprinting for trial abuse (trial-once is by normalized email).
+5. Malware scanning of uploaded files.
+6. Seat-based pricing; overage billing (overage is a hard stop).
+7. Custom organization roles; per-tenant data residency; row-level security (rejected with reasons).
 
-## Incomplete
+## Not verified
+- External penetration test — none has taken place.
+- Legal documents — drafts for lawyer review.
+- Load — single node, 2 vCPU VM only; no multi-node or production capacity numbers.
+- Staging/production infrastructure, alerts and backups on real servers.
 
-1. **Storage metering** — `storage_bytes` is defined and the storage adapters can measure usage, but nothing records it and `storageMb` is not enforced.
-2. **Refunds** — refund/chargeback webhook events are ignored; no refunded state on invoices.
-3. **Annual usage periods** — allowances are monthly for every plan; no annual pooling. Overage is a hard stop, not billed.
-4. **Trial abuse** — a signed-in user can create additional organizations (`POST /workspaces` without an organization, or a new sign-up with another email), each with a new trial. Needs a per-user organization cap or trial-once policy.
-5. **Seat billing** — plans limit users but price is flat per plan.
-6. **Platform staff MFA** — not enforced for platform routes.
-7. **DNS** — no zone record browser, no editing of existing records, Cloudflare only. Tracking-domain automation limited to the recommended CNAME.
-8. **CRM connectors** — no native HubSpot/Pipedrive sync; webhooks + API are the integration path.
-9. **Legal documents** — Terms, Privacy and AUP are drafts marked for lawyer review on the live pages.
-10. **Organization-level custom roles** — four fixed roles; no custom roles.
-11. **SSE** ignores tenant status (still membership-gated).
-12. **Backups** — documented procedure only; no automated backup job or restore test.
-
-## Not implemented (out of scope for this pass)
-
-- Row-level security (evaluated, rejected — see the assessment).
-- Load testing and capacity numbers. No claim of scale is made.
-- External penetration test.
-- Data residency choices per tenant.
-- Moving a workspace between organizations (deliberately blocked by a trigger).
-
-## Environment notes
-
-- Runtime verification was performed in the Linux build VM (PostgreSQL 16, Redis 7, Chrome). The user's Mac runs the same code via `scripts/mac-dev.sh`; the new migration is applied there by `bash scripts/mac-dev.sh setup` or `npm run db:migrate`.
+## Accepted risks
+- `npm audit`: 3 high (backend, build-time Prisma tooling), 1 high + 1 moderate (frontend, build-time). Fixes need major-version changes; revisit when Prisma and Next releases allow.

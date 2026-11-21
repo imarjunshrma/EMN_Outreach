@@ -37,6 +37,9 @@ export default function PlatformOverview() {
           <dl className="space-y-3 text-sm">
             <div><dt className="text-slate-500">New tenants</dt><dd className="text-lg font-bold tnum">{m.movement30d.newTenants}</dd></div>
             <div title={m.definitions.newPaid}><dt className="text-slate-500">New paid subscriptions</dt><dd className="font-bold tnum">{m.movement30d.newPaidSubscriptions}</dd></div>
+            <div title={m.definitions.trialConversion}><dt className="text-slate-500">Trial conversion</dt><dd className="font-bold tnum">{m.movement30d.trialConversionPct === null ? '—' : `${m.movement30d.trialConversionPct}%`} <span className="font-normal text-slate-500">({m.movement30d.trialsConverted} of {m.movement30d.trialsEnded})</span></dd></div>
+            <div title={m.definitions.paymentFailures}><dt className="text-slate-500">Payment failures</dt><dd className="font-bold tnum">{m.movement30d.paymentFailures}</dd></div>
+            <div><dt className="text-slate-500">Refunded · open disputes</dt><dd className="font-bold">{perCur(m.movement30d.refundedCents)} · {m.movement30d.openDisputes}</dd></div>
             <div title={m.definitions.churn}><dt className="text-slate-500">Churned tenants</dt><dd className="font-bold tnum">{m.movement30d.churnedTenants} {m.movement30d.churnRatePct !== null && <span className="font-normal text-slate-500">({m.movement30d.churnRatePct}%)</span>}</dd></div>
           </dl>
         </Card>
@@ -53,6 +56,7 @@ export default function PlatformOverview() {
           {m.usageThisMonth?.length ? <Table head={['Metric', 'Total', 'Tenants using it']}>{m.usageThisMonth.map((u: any) => <tr key={u.metric}><td className="td">{METRIC[u.metric] ?? u.metric}</td><td className="td tnum">{u.total.toLocaleString()}</td><td className="td tnum">{u.tenants}</td></tr>)}</Table> : <p className="text-sm text-slate-500">No metered usage this month.</p>}
         </Card>
       </div>
+      <Card title="New organizations per month" className="mt-4"><div className="flex items-end gap-3">{m.growth.map((g: any) => { const max = Math.max(1, ...m.growth.map((x: any) => x.newTenants)); return <div key={g.month} className="flex flex-1 flex-col items-center gap-1"><span className="text-xs font-bold tnum">{g.newTenants}</span><div className="w-full rounded-t bg-brand-500" style={{ height: `${Math.max(2, (g.newTenants / max) * 120)}px` }} aria-hidden /><span className="text-[11px] text-slate-500">{g.month}</span></div>; })}</div></Card>
       <Card title="Definitions" className="mt-4"><dl className="grid gap-3 text-sm md:grid-cols-2">{Object.entries(m.definitions).map(([k, v]) => <div key={k}><dt className="font-semibold">{k}</dt><dd className="text-slate-600">{String(v)}</dd></div>)}</dl></Card>
     </>
   );

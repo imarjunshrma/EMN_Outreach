@@ -49,6 +49,8 @@ export interface RouteDef<B = unknown, Q = unknown> {
   allowWithoutMfa?: boolean;
   body?: ZodType<B>;
   query?: ZodType<Q>;
+  /** Optional parser run after authentication/tenant authorization and before body validation. */
+  prepare?: (ctx: Ctx<any, any>) => Promise<void>;
   rateLimit?: { limit: number; windowSec: number; key?: 'ip' | 'user' | 'workspace' };
   /** If true the handler writes the response itself (streams, redirects, files). */
   raw?: boolean;
@@ -155,6 +157,8 @@ export function mountRoutes(app: Express) {
           if (!res.locals.mfaEnabled && !def.allowWithoutMfa && !mfaOptional) throw new AppError('MFA_REQUIRED', 'Platform staff must turn on two-factor authentication (My account → Security) before using the platform console.', 403, { platform: true });
           ctx.platformRole = pr;
         }
+
+        if (def.prepare) await def.prepare(ctx as Ctx<any, any>);
 
         if (def.body) {
           const parsed = def.body.safeParse(req.body ?? {});

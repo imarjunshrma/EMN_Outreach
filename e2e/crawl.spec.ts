@@ -57,7 +57,7 @@ test('every screen works with real data: no errors, every tab opens', async ({ p
   page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) problems.push(`${where} console: ${m.text().slice(0, 300)}`); });
   page.on('response', (r) => { if (r.url().includes('/api/v1/') && r.status() >= 500) problems.push(`${where} API ${r.status()} ${r.request().method()} ${new URL(r.url()).pathname}`); });
 
-  const absolute = ['/admin', '/platform', '/platform/tenants', '/platform/plans', '/platform/support', '/platform/audit'];
+  const absolute = ['/admin', '/platform', '/platform/tenants', '/platform/plans', '/platform/support', '/platform/audit', '/platform/users', '/platform/operations', '/contact'];
   for (const p of [...statics, ...details, ...absolute]) {
     where = p;
     await page.goto(absolute.includes(p) ? p : base + p);

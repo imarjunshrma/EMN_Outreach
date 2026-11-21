@@ -33,9 +33,9 @@ export async function verifyWaterfall(workspaceId: string, leadId: string, opts:
   const domain = lead.emailNormalized.split('@')[1] ?? '';
   let final: string | null = null;
   if (DISPOSABLE_DOMAINS.has(domain)) {
-    await save('offline-disposable-list', 'INVALID', 'disposable domain', 0, 0);
-    steps.push({ provider: 'offline-disposable-list', result: 'INVALID' });
-    final = 'INVALID';
+    await save('offline-disposable-list', 'UNKNOWN', 'disposable domain attribute; mailbox validity not checked', 0, 0);
+    steps.push({ provider: 'offline-disposable-list', result: 'UNKNOWN' });
+    final = 'UNKNOWN';
   } else {
     const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
     const st = readSettings(ws.settings);

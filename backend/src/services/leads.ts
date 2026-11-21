@@ -54,11 +54,19 @@ export async function upsertCompany(workspaceId: string, name: string | null | u
     return existing ?? db().company.create({ data: { workspaceId, name, ...extra } });
   }
   if (domain) {
-    return db().company.upsert({
+    const args = {
       where: { workspaceId_domain: { workspaceId, domain } },
-      update: { ...(name ? {} : {}), ...Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== null && v !== undefined)) },
+      update: { ...Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== null && v !== undefined)) },
       create: { workspaceId, name: name || domain, domain, website: `https://${domain}`, ...extra },
-    });
+    };
+    try {
+      return await db().company.upsert(args);
+    } catch (e) {
+      // Two leads from the same company created at the same moment: the loser of the insert race
+      // retries once and finds the row the winner created (found by the v1.4 load test).
+      if ((e as { code?: string }).code !== 'P2002') throw e;
+      return db().company.upsert(args);
+    }
   }
   const existing = await db().company.findFirst({ where: { workspaceId, name: name!, domain: null } });
   return existing ?? db().company.create({ data: { workspaceId, name: name!, ...extra } });

@@ -128,6 +128,8 @@ export async function canContact(workspaceId: string, lead: { emailNormalized: s
   if (sup.suppressed) reasons.push(`suppressed (${sup.reason})`);
   if (['UNSUBSCRIBED', 'BOUNCED', 'CUSTOMER', 'DISQUALIFIED', 'NOT_INTERESTED'].includes(lead.status)) reasons.push(`lead status ${lead.status}`);
   if (lead.emailVerificationStatus === 'INVALID') reasons.push('email verified as invalid');
+  const recentCheck = await db().emailVerification.findFirst({ where: { workspaceId, email: lead.emailNormalized, provider: { in: ['first-party-dns', 'offline-disposable-list'] }, createdAt: { gte: new Date(Date.now() - 7 * 86400_000) } }, orderBy: { createdAt: 'desc' }, select: { details: true, rawResult: true } });
+  if ((recentCheck?.details as { attributes?: { disposable?: boolean } } | null)?.attributes?.disposable || recentCheck?.rawResult?.toLowerCase().includes('disposable domain')) reasons.push('email uses a known disposable domain');
   if (opts.requireVerified && !['VALID', 'CATCH_ALL'].includes(lead.emailVerificationStatus)) reasons.push(`email not verified (${lead.emailVerificationStatus})`);
   const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { postalAddress: true } });
   const rules = await db().complianceRule.findMany({ where: { workspaceId } });

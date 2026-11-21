@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, describeError } from '@/lib/api';
-import { Badge, Button, Checkbox, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Checkbox, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Textarea } from '@/components/ui';
 import { useToast } from '@/components/toast';
 import { usePlatform } from '@/components/platform/shell';
 
@@ -63,6 +63,9 @@ export default function Plans() {
           <div className="flex gap-6"><Checkbox label="Show on pricing page" checked={edit.isPublic} onChange={(v) => setEdit({ ...edit, isPublic: v })} /><Checkbox label="Available for new subscriptions" checked={edit.isActive} onChange={(v) => setEdit({ ...edit, isActive: v })} /></div>
           <p className="mb-2 mt-4 text-sm font-bold">Limits <span className="font-normal text-slate-500">— {BIG.toLocaleString()} or more means unlimited</span></p>
           <div className="grid gap-x-4 sm:grid-cols-3">{LIMITS.map(([k, l]) => <Field key={k} label={l}><Input type="number" min={0} value={edit.entitlements[k]} onChange={(e) => setEnt(k, Number(e.target.value))} /></Field>)}</div>
+          <Field label="How monthly allowances apply to yearly billing" hint="Pooled: 12 months of allowance usable at any time during the paid year. Monthly billing always resets each month.">
+            <Select value={edit.entitlements.allowancePeriod ?? 'monthly'} onChange={(e) => setEnt('allowancePeriod', e.target.value)} options={[{ value: 'monthly', label: 'Reset every calendar month' }, { value: 'annual_pooled', label: 'Pooled across the paid year' }]} />
+          </Field>
           <p className="mb-2 mt-2 text-sm font-bold">Features</p>
           <div className="grid gap-2 sm:grid-cols-3">{FEATURES.map(([k, l]) => <Checkbox key={k} label={l} checked={!!edit.entitlements.features[k]} onChange={(v) => setEnt('features', { ...edit.entitlements.features, [k]: v })} />)}</div>
           <Field label="Allowed integrations" hint="Comma-separated provider ids, or * for all (e.g. openai, anthropic, millionverifier)."><Input value={(edit.entitlements.integrations ?? []).join(', ')} onChange={(e) => setEnt('integrations', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} /></Field>

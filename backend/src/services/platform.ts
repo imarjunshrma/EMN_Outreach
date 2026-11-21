@@ -173,6 +173,17 @@ export async function saasMetrics(now = new Date()) {
   const churned = new Set(changes.filter((c) => c.toStatus === 'CANCELLED').map((c) => c.organizationId)).size;
   const newTenants = await db().organization.count({ where: { createdAt: { gte: since30 } } });
   const activeAtStart = await db().organization.count({ where: { createdAt: { lt: since30 }, status: { in: ['ACTIVE', 'PAST_DUE', 'CANCELLED', 'SUSPENDED'] } } });
+  // Trial conversion: of the trials that ended (left TRIAL) in the last 30 days, the share that became ACTIVE.
+  const trialExits = changes.filter((c) => c.fromStatus === 'TRIAL');
+  const trialConverted = new Set(trialExits.filter((c) => c.toStatus === 'ACTIVE').map((c) => c.organizationId)).size;
+  const trialEnded = new Set(trialExits.map((c) => c.organizationId)).size;
+  const paymentFailures30d = await db().invoice.count({ where: { status: 'payment_failed', createdAt: { gte: since30 } } });
+  const refunds30 = await db().refund.groupBy({ by: ['currency'], where: { status: 'succeeded', updatedAt: { gte: since30 } }, _sum: { amountCents: true } });
+  const openDisputes = await db().billingDispute.count({ where: { status: 'open' } });
+  // Growth: new organizations per calendar month (UTC), last 6 months.
+  const sixAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1));
+  const created = await db().organization.findMany({ where: { createdAt: { gte: sixAgo } }, select: { createdAt: true } });
+  const growth = Array.from({ length: 6 }, (_, i) => { const d = new Date(Date.UTC(sixAgo.getUTCFullYear(), sixAgo.getUTCMonth() + i, 1)); const key = d.toISOString().slice(0, 7); return { month: key, newTenants: created.filter((c) => c.createdAt.toISOString().slice(0, 7) === key).length }; });
   const planDist = await db().subscription.groupBy({ by: ['planId', 'status'], _count: { _all: true } });
   const plans = await db().plan.findMany({ select: { id: true, code: true, name: true } });
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -186,7 +197,8 @@ export async function saasMetrics(now = new Date()) {
     generatedAt: now,
     tenants: { total: byStatus.filter((x) => x.status !== 'DELETED').reduce((s, x) => s + x._count._all, 0), active: count('ACTIVE'), trial: count('TRIAL'), pastDue: count('PAST_DUE'), suspended: count('SUSPENDED'), cancelled: count('CANCELLED'), deletionPending: count('DELETION_PENDING'), pendingSetup: count('PENDING_SETUP'), paying },
     revenue: { mrrCents: round(mrr), arrCents: Object.fromEntries(Object.entries(round(mrr)).map(([k, v]) => [k, v * 12])), manualMrrCents: round(mrrManual), collectedLast30dCents: Object.fromEntries(revenue30.map((r) => [r.currency, r._sum.amountCents ?? 0])) },
-    movement30d: { newTenants, newPaidSubscriptions: newPaid, churnedTenants: churned, churnRatePct: activeAtStart ? +(100 * churned / activeAtStart).toFixed(2) : null },
+    movement30d: { newTenants, newPaidSubscriptions: newPaid, churnedTenants: churned, churnRatePct: activeAtStart ? +(100 * churned / activeAtStart).toFixed(2) : null, trialsEnded: trialEnded, trialsConverted: trialConverted, trialConversionPct: trialEnded ? +(100 * trialConverted / trialEnded).toFixed(1) : null, paymentFailures: paymentFailures30d, refundedCents: Object.fromEntries(refunds30.map((r) => [r.currency, r._sum.amountCents ?? 0])), openDisputes },
+    growth,
     planDistribution: planDist.map((p) => ({ plan: plans.find((x) => x.id === p.planId)?.code ?? p.planId, status: p.status, tenants: p._count._all })),
     usageThisMonth: usage.map((u) => ({ metric: u.metric, total: Number(u._sum.value ?? 0), tenants: u._count._all })),
     operations: { failedJobs24h, errors24h },
@@ -195,6 +207,10 @@ export async function saasMetrics(now = new Date()) {
       paying: 'Tenants counted in MRR (excludes manual/admin-granted subscriptions).',
       churn: 'Tenants that moved to CANCELLED in the last 30 days ÷ tenants that existed 30 days ago and were active, past due, suspended or cancelled.',
       newPaid: 'Tenants that moved to ACTIVE from TRIAL, PENDING_SETUP, SUSPENDED or CANCELLED in the last 30 days.',
+      trialConversion: 'Of tenants that left TRIAL in the last 30 days, the share whose next status was ACTIVE.',
+      paymentFailures: 'Invoices recorded as payment_failed by verified provider webhooks in the last 30 days.',
+      usage: 'Sums of idempotent usage counters for the current calendar month (UTC). AI cost is estimated from provider token prices (micro-USD); emails count provider-accepted sends.',
+      growth: 'New organizations created per calendar month (UTC).',
     },
   };
 }
@@ -271,4 +287,37 @@ export async function supportAccessForOrg(organizationId: string) {
   const reads = await db().platformAuditEvent.findMany({ where: { organizationId, action: 'support.read', createdAt: { gte: grants.at(-1)?.createdAt ?? now } }, select: { metadata: true } });
   const count = (id: string) => reads.filter((r) => (r.metadata as { grantId?: string } | null)?.grantId === id).length;
   return grants.map((g) => ({ pagesViewed: count(g.id), id: g.id, staffName: staff.find((s) => s.id === g.adminUserId)?.name ?? 'EMN support', reason: g.reason, scope: g.scope, createdAt: g.createdAt, expiresAt: g.expiresAt, revokedAt: g.revokedAt, active: !g.revokedAt && g.expiresAt > now }));
+}
+
+// ------------------------------------------------------------------ operations (queues, dead letters, failures)
+
+export async function operations() {
+  const { queueOverview } = await import('./ops.js');
+  const { queue } = await import('../core/queues.js');
+  const queues = await queueOverview();
+  const deadLetters: Array<{ queue: string; id: string | undefined; name: string; failedReason: string; attemptsMade: number; finishedOn?: number; workspaceId: string | null }> = [];
+  for (const q of queues) {
+    if (!q.counts.failed) continue;
+    const jobs = await queue(q.name as never).getFailed(0, 19);
+    for (const j of jobs) deadLetters.push({ queue: q.name, id: j.id, name: j.name, failedReason: String(j.failedReason ?? '').slice(0, 300), attemptsMade: j.attemptsMade, finishedOn: j.finishedOn, workspaceId: (j.data as { workspaceId?: string })?.workspaceId ?? null });
+  }
+  const since = new Date(Date.now() - 86400_000);
+  const [failuresByQueue, webhookFailures, staleEvents, reconcileFailures] = await Promise.all([
+    db().jobRun.groupBy({ by: ['queue'], where: { status: 'FAILED', createdAt: { gte: since } }, _count: { _all: true } }),
+    db().webhookDelivery.count({ where: { status: 'FAILED', createdAt: { gte: since } } }).catch(() => 0),
+    db().platformAuditEvent.count({ where: { action: 'billing.webhook_stale', createdAt: { gte: since } } }),
+    db().platformAuditEvent.count({ where: { action: 'billing.reconcile_failed', createdAt: { gte: since } } }),
+  ]);
+  return { queues, deadLetters, last24h: { failuresByQueue: failuresByQueue.map((f) => ({ queue: f.queue, failed: f._count._all })), outboundWebhookFailures: webhookFailures, staleBillingEvents: staleEvents, billingReconcileFailures: reconcileFailures } };
+}
+
+export const RetrySchema = z.object({ queue: z.string().max(40), jobId: z.string().max(200), reason: z.string().trim().min(5).max(300) });
+export async function retryDeadLetter(input: z.infer<typeof RetrySchema>, admin: Admin) {
+  const { queue, ALL_QUEUE_NAMES } = await import('../core/queues.js');
+  if (!(ALL_QUEUE_NAMES as readonly string[]).includes(input.queue)) throw NotFound('Queue');
+  const job = await queue(input.queue as never).getJob(input.jobId);
+  if (!job || !(await job.isFailed())) throw NotFound('Failed job');
+  await job.retry();
+  await platformAudit({ actorUserId: admin.userId, action: 'ops.job_retried', targetType: 'job', targetId: `${input.queue}/${input.jobId}`, reason: input.reason, ip: admin.ip });
+  return { retried: true };
 }

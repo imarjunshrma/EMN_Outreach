@@ -33,6 +33,18 @@ export default function TenantDetail() {
   const [override, setOverride] = useState(false);
   const [ov, setOv] = useState({ planCode: '', status: '', trialEndsAt: '', graceUntil: '', reason: '' });
   const canLifecycle = me.permissions.includes('tenants:lifecycle');
+  const canRefund = me.permissions.includes('billing:refund');
+  const [refund, setRefund] = useState<{ invoice: any; amount: string; reason: string; cancel: boolean; key: string } | null>(null);
+  async function doRefund() {
+    if (!refund) return;
+    setBusy(true);
+    try {
+      const cents = Math.round(Number(refund.amount) * 100);
+      const full = cents >= refund.invoice.amountCents - refund.invoice.amountRefundedCents;
+      const r = await api<any>(`/platform/tenants/${id}/refunds`, { body: { invoiceId: refund.invoice.id, amountCents: full ? undefined : cents, reason: refund.reason, cancelSubscription: refund.cancel, requestKey: refund.key } });
+      toast.success(`Refund ${r.status === 'succeeded' ? 'completed' : 'requested — it completes when the provider confirms it'}`); setRefund(null); refresh();
+    } catch (e) { toast.error(describeError(e)); } finally { setBusy(false); }
+  }
   const refresh = () => { void qc.invalidateQueries({ queryKey: ['platform-tenant', id] }); void qc.invalidateQueries({ queryKey: ['platform-tenants'] }); };
   async function runAction() {
     setBusy(true);
@@ -93,7 +105,7 @@ export default function TenantDetail() {
           <ul className="space-y-2 text-sm">{o.statusHistory.map((h: any) => <li key={h.id}><b>{(h.fromStatus ?? '—').toLowerCase()} → {h.toStatus.toLowerCase()}</b><br /><span className="text-xs text-slate-500">{fmtDate(h.createdAt)}{h.reason ? ` · ${h.reason}` : ''}</span></li>)}</ul>
         </Card>
         <Card title="Invoices">
-          {d.invoices.length === 0 ? <p className="text-sm text-slate-500">No invoices.</p> : <Table head={['Date', 'Amount', 'Status']}>{d.invoices.map((i: any) => <tr key={i.id}><td className="td text-xs">{fmtDay(i.createdAt)}</td><td className="td tnum">{(i.amountCents / 100).toFixed(2)} {i.currency.toUpperCase()}</td><td className="td text-xs">{i.status}</td></tr>)}</Table>}
+          {d.invoices.length === 0 ? <p className="text-sm text-slate-500">No invoices.</p> : <Table head={['Date', 'Amount', 'Status', '']}>{d.invoices.map((i: any) => <tr key={i.id}><td className="td text-xs">{fmtDay(i.createdAt)}</td><td className="td tnum">{(i.amountCents / 100).toFixed(2)} {i.currency.toUpperCase()}{i.amountRefundedCents > 0 && <span className="block text-xs text-slate-500">refunded {(i.amountRefundedCents / 100).toFixed(2)}</span>}</td><td className="td text-xs">{i.status.replace(/_/g, ' ')}</td><td className="td text-right">{canRefund && ['paid', 'partially_refunded'].includes(i.status) && i.providerPaymentId && <Button size="sm" variant="ghost" onClick={() => setRefund({ invoice: i, amount: ((i.amountCents - i.amountRefundedCents) / 100).toFixed(2), reason: '', cancel: false, key: crypto.randomUUID() })}>Refund</Button>}</td></tr>)}</Table>}
         </Card>
         <Card title="Audit" className="lg:col-span-3">
           <Table head={['When', 'Action', 'Reason', 'Detail']}>{d.audit.map((a: any) => <tr key={a.id}><td className="td whitespace-nowrap text-xs">{fmtDate(a.createdAt)}</td><td className="td text-xs font-semibold">{a.action}</td><td className="td text-xs">{a.reason ?? ''}</td><td className="td max-w-[420px] truncate text-xs text-slate-500">{a.targetId ?? ''}</td></tr>)}</Table>
@@ -102,6 +114,14 @@ export default function TenantDetail() {
       <Modal open={!!action} title={`${action?.label ?? ''} — ${o.name}`} onClose={() => setAction(null)} footer={<><Button variant="ghost" onClick={() => setAction(null)}>Back</Button><Button variant={action?.danger ? 'danger' : 'primary'} loading={busy} disabled={reason.trim().length < 5} onClick={runAction}>{action?.label}</Button></>}>
         {action?.id === 'purge_now' && <div className="mb-3"><Notice kind="danger">This permanently erases every workspace, record and file of this tenant. It cannot be undone.</Notice></div>}
         <Field label="Reason" hint="Required. Stored in the tenant's status history and the platform audit trail."><Textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      </Modal>
+      <Modal open={!!refund} title={`Refund invoice of ${refund ? (refund.invoice.amountCents / 100).toFixed(2) : ''} ${refund?.invoice.currency.toUpperCase() ?? ''}`} onClose={() => setRefund(null)} footer={<><Button variant="ghost" onClick={() => setRefund(null)}>Back</Button><Button variant="danger" loading={busy} disabled={!refund || refund.reason.trim().length < 5 || !(Number(refund.amount) > 0)} onClick={doRefund}>Request refund</Button></>}>
+        {refund && <>
+          <Notice kind="warning">This asks {refund.invoice.provider} to return real money to the customer. It cannot be undone.</Notice>
+          <Field label={`Amount (${refund.invoice.currency.toUpperCase()})`} hint="Up to what has not been refunded yet."><Input type="number" min={0.01} step="0.01" value={refund.amount} onChange={(e) => setRefund({ ...refund, amount: e.target.value })} /></Field>
+          <Field label="Reason" hint="Required; recorded in the audit trail."><Textarea rows={2} value={refund.reason} onChange={(e) => setRefund({ ...refund, reason: e.target.value })} /></Field>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={refund.cancel} onChange={(e) => setRefund({ ...refund, cancel: e.target.checked })} />Also end the subscription now</label>
+        </>}
       </Modal>
       <Modal open={override} title="Override subscription" onClose={() => setOverride(false)} footer={<><Button variant="ghost" onClick={() => setOverride(false)}>Back</Button><Button loading={busy} disabled={ov.reason.trim().length < 5} onClick={saveOverride}>Apply</Button></>}>
         <Field label="Plan code"><Input value={ov.planCode} onChange={(e) => setOv({ ...ov, planCode: e.target.value })} placeholder={o.subscription?.plan.code ?? 'growth'} /></Field>
