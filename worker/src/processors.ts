@@ -94,6 +94,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
         throw e;
       }
     },
+    'verify.batch-resume': async (j) => (await import('../../backend/src/services/verification-csv.js')).enqueueBatchPending(s(j.data.workspaceId), s(j.data.batchId), s(j.data.actionId)),
   },
   [QUEUES.domain]: {
     'domain.check': async (j) => ops.runDomainCheck(s(j.data.workspaceId), s(j.data.domainId)),

@@ -11,7 +11,7 @@ export function classifySmtpReply(reply: string): Pick<SmtpResult, 'classificati
   if ([250, 251, 252].includes(code)) return { classification: 'ACCEPTED_BUT_UNCONFIRMED', code, enhancedCode, response };
   if (code === 535 || code === 530) return { classification: 'AUTHENTICATION_REQUIRED', code, enhancedCode, response };
   if (code >= 400 && code < 500) return { classification: enhancedCode === '4.7.1' || /grey.?list|try again later/i.test(response) ? 'GREYLISTED' : 'TEMPORARY_FAILURE', code, enhancedCode, response };
-  if (code === 550 && (enhancedCode === '5.1.1' || /user unknown|no such (user|mailbox)|recipient address rejected/i.test(response))) return { classification: 'USER_UNKNOWN', code, enhancedCode, response };
+  if (code === 550 && (enhancedCode === '5.1.1' || /user unknown|no such (user|mailbox)|mailbox (was )?not found/i.test(response))) return { classification: 'USER_UNKNOWN', code, enhancedCode, response };
   if (code >= 500 && code < 600) return { classification: 'POLICY_REJECTION', code, enhancedCode, response };
   return { classification: 'INCONCLUSIVE', ...(Number.isFinite(code) ? { code } : {}), ...(enhancedCode ? { enhancedCode } : {}), response };
 }

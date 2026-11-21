@@ -1,10 +1,6 @@
 # EMN Outreach OS — API documentation
 
-<<<<<<< yours
-Generated from the route registry by `npm run api-docs` (336 operations). The machine-readable
-=======
-Generated from the route registry by `npm run api-docs` (328 operations). The machine-readable
->>>>>>> claude
+Generated from the route registry by `npm run api-docs` (352 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -307,6 +303,17 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/enrichment/find-email` | session/API key · MEMBER+ | 300/3600s per workspace | `firstName`: string, `lastName`: string, `domain`: string | — | Email discovery waterfall (name + company domain) |
 | GET | `/w/:workspaceId/enrichment/stats` | session/API key · VIEWER+ | — | — | `days?`: integer | Provider comparison: checks, definitive rate, credits |
 | GET | `/w/:workspaceId/leads/:id/verifications` | session/API key · VIEWER+ | — | — | — | Verification / enrichment history for a lead |
+| POST | `/w/:workspaceId/email-verification/verify` | session/API key · MEMBER+ | 60/3600s per workspace | `email`: string, `leadId?`: string | — | Queue first-party syntax, disposable, role, free-provider and DNS checks (no SMTP probe) |
+| POST | `/w/:workspaceId/email-verification/bulk` | session/API key · MEMBER+ | 10/3600s per workspace | `emails`: array | — | Queue deduplicated first-party DNS verification for an email list |
+| GET | `/w/:workspaceId/email-verification/batches` | session/API key · VIEWER+ | — | — | `page?`: integer, `pageSize?`: integer | List first-party verification batches |
+| GET | `/w/:workspaceId/email-verification/batches/:id` | session/API key · VIEWER+ | — | — | — | Get tenant-scoped verification batch and results |
+| GET | `/w/:workspaceId/email-verification/datasets` | session/API key · VIEWER+ | — | — | — | List shared disposable dataset metadata and workspace overrides |
+| POST | `/w/:workspaceId/email-verification/datasets/refresh` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Queue refresh from the pinned public disposable-domain source |
+| POST | `/w/:workspaceId/email-verification/domain-overrides` | session/API key · ADMIN+ | — | `domain`: string, `disposable`: boolean | — | Add or exclude a domain from this workspace disposable-domain classification |
+| DELETE | `/w/:workspaceId/email-verification/domain-overrides/:id` | session/API key · ADMIN+ | — | — | — | Remove a workspace disposable-domain override |
+| POST | `/w/:workspaceId/email-verification/role-patterns` | session/API key · ADMIN+ | — | `localPart`: string, `enabled?`: boolean | — | Add or disable a workspace role-based local-part pattern |
+| GET | `/w/:workspaceId/email-verification/:id` | session/API key · VIEWER+ | — | — | — | Get tenant-scoped first-party verification result |
+| POST | `/w/:workspaceId/email-verification/diagnostics` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Admin-only outbound SMTP port 25 diagnostic to the configured MAIL FROM domain MX; sends no recipient commands or email |
 
 ## ICP
 

@@ -14,13 +14,15 @@ export async function createVerification(workspaceId: string, email: string, opt
   const input = email.trim().normalize('NFC');
   const syntax = validateEmailSyntax(input);
   const normalized = (syntax.valid ? syntax.normalizedEmail : input).toLowerCase();
+  const dictionaries = await verificationDictionaries(workspaceId);
   const cached = await db().emailVerification.findFirst({
     where: { workspaceId, email: normalized, provider: 'first-party-dns', expiresAt: { gt: new Date() }, ...(opts.leadId ? { leadId: opts.leadId } : { leadId: null }) },
     orderBy: { createdAt: 'desc' },
   });
-  if (cached && !opts.batchId) return { id: cached.id, status: cached.result, cached: true, details: cached.details };
-  if (cached && opts.batchId) {
-    const copy = await db().emailVerification.create({ data: { workspaceId, batchId: opts.batchId, email: normalized, provider: 'first-party-dns', result: cached.result, rawResult: cached.rawResult, details: cached.details as Prisma.InputJsonValue, expiresAt: cached.expiresAt } });
+  const currentCached = cached && (cached.details as { datasetVersion?: string } | null)?.datasetVersion === dictionaries.datasetVersion ? cached : null;
+  if (currentCached && !opts.batchId) return { id: currentCached.id, status: currentCached.result, cached: true, details: currentCached.details };
+  if (currentCached && opts.batchId) {
+    const copy = await db().emailVerification.create({ data: { workspaceId, batchId: opts.batchId, email: normalized, provider: 'first-party-dns', result: currentCached.result, rawResult: currentCached.rawResult, details: currentCached.details as Prisma.InputJsonValue, expiresAt: currentCached.expiresAt } });
     return { id: copy.id, status: copy.result, cached: true, details: copy.details };
   }
   const row = await db().emailVerification.create({ data: {
@@ -35,14 +37,18 @@ export async function processFirstPartyVerification(workspaceId: string, verific
   const row = await db().emailVerification.findFirst({ where: { id: verificationId, workspaceId, provider: 'first-party-dns' } });
   if (!row) return { skipped: 'verification record not found' };
   if (row.rawResult !== 'queued') return { skipped: 'already processed' };
+  if (row.batchId) {
+    const batch = await db().emailVerificationBatch.findFirst({ where: { id: row.batchId, workspaceId }, select: { status: true } });
+    if (batch?.status === 'PAUSED' || batch?.status === 'CANCELLED') return { skipped: `batch ${batch.status.toLowerCase()}` };
+  }
   const result = await inspectEmail(row.email, undefined, 2500, await verificationDictionaries(workspaceId));
   const env = config();
   if (result.syntax.valid && result.dns.mx.length && env.EMAIL_VERIFY_SMTP_ENABLED && env.EMAIL_VERIFY_MAIL_FROM) {
-    const release = await acquireLock(`email-verify-domain:${result.domain}`, Math.max(20_000, env.EMAIL_VERIFY_SMTP_TIMEOUT_MS * 4));
+    const release = await acquireLock(`email-verify-domain:${result.domain}`, 120_000);
     if (!release) throw new Error('SMTP domain cooldown is active; retry later');
     try {
       const mx = result.dns.mx.flatMap((m) => m.addresses.slice(0, 2).map((address) => ({ exchange: m.exchange, priority: m.priority, addresses: [address] }))).slice(0, 4);
-      const [domainLimit, globalLimit] = await Promise.all([rateLimit(`email-verify-smtp-domain:${result.domain}`, 5, 60), rateLimit('email-verify-smtp-global', 60, 60)]);
+      const [domainLimit, globalLimit] = await Promise.all([rateLimit(`email-verify-smtp-domain:${result.domain}`, env.EMAIL_VERIFY_PER_DOMAIN_PER_MINUTE, 60), rateLimit('email-verify-smtp-global', env.EMAIL_VERIFY_GLOBAL_PER_MINUTE, 60)]);
       if (!domainLimit.allowed || !globalLimit.allowed) throw new Error('SMTP verification rate limit reached; retry scheduled');
       result.smtp = await probeRecipientSmtp({ email: result.normalizedEmail, domain: result.domain, mx }, { enabled: true, mailFrom: env.EMAIL_VERIFY_MAIL_FROM, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
       if (env.EMAIL_VERIFY_CATCH_ALL_ENABLED && result.smtp.classification === 'ACCEPTED_BUT_UNCONFIRMED') {
@@ -83,9 +89,9 @@ export async function processFirstPartyVerification(workspaceId: string, verific
     if (row.batchId) {
       const batch = await tx.emailVerificationBatch.findFirst({ where: { id: row.batchId, workspaceId } });
       if (batch) {
-        await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { processed: { increment: 1 }, ...(batch.status === 'INGESTING' ? {} : { status: 'PROCESSING' }) } });
+        await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { processed: { increment: 1 }, ...(['INGESTING','PAUSED','CANCELLED','FAILED_IMPORT'].includes(batch.status) ? {} : { status: 'PROCESSING' }) } });
         const current = await tx.emailVerificationBatch.findUnique({ where: { id: batch.id }, select: { processed: true, total: true, status: true } });
-        if (current && current.status !== 'INGESTING' && current.status !== 'FAILED_IMPORT' && current.processed >= current.total) await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'COMPLETED', completedAt: new Date() } });
+        if (current && !['INGESTING','PAUSED','CANCELLED','FAILED_IMPORT'].includes(current.status) && current.processed >= current.total) await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'COMPLETED', completedAt: new Date() } });
       }
     }
   });

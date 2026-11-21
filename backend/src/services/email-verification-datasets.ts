@@ -25,11 +25,13 @@ export async function verificationDictionaries(workspaceId: string): Promise<Ver
     db().emailVerificationDomainOverride.findMany({ where: { workspaceId } }),
     db().emailVerificationRolePattern.findMany({ where: { workspaceId, enabled: true }, select: { localPart: true } }),
   ]);
+  const dataset = await db().emailVerificationDataset.findUnique({ where: { key: SOURCE }, select: { checksum: true, lastUpdated: true } });
   const disposableDomains = new Set([...DISPOSABLE_DOMAINS, ...domains.map((d) => d.domain)]);
   const disposableExclusions = new Set<string>();
   for (const o of overrides) (o.disposable ? disposableDomains : disposableExclusions).add(o.domain);
   const roleLocals = new Set(patterns.map((p) => p.localPart));
-  const dictionaries = { disposableDomains, disposableExclusions, roleLocals };
+  const datasetVersion = createHash('sha256').update(JSON.stringify({ checksum: dataset?.checksum ?? 'bundled-fallback', updated: dataset?.lastUpdated?.toISOString() ?? null, overrides: overrides.map((o) => [o.domain,o.disposable]).sort(), roles: patterns.map((p) => p.localPart).sort(), smtp: process.env.EMAIL_VERIFY_SMTP_ENABLED === 'true', catchAll: process.env.EMAIL_VERIFY_CATCH_ALL_ENABLED === 'true' })).digest('hex');
+  const dictionaries = { disposableDomains, disposableExclusions, roleLocals, datasetVersion };
   cache.set(workspaceId, { expiresAt: Date.now() + 300_000, dictionaries });
   return dictionaries;
 }

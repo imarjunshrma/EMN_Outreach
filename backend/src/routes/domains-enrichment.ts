@@ -56,13 +56,12 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk', tag: 'E
   return { batchId: batch.id, total: emails.length, queued: emails.length - cachedCount, cached: cachedCount };
 } });
 
-route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk.csv', tag: 'Enrichment', summary: 'Upload a bounded CSV for streaming background verification; maximum 10 MB', auth: 'workspace', role: 'MANAGER', status: 202, rateLimit: { limit: 5, windowSec: 3600, key: 'workspace' }, prepare: parseCsvUpload, handler: async (c) => {
+route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk.csv', tag: 'Enrichment', summary: 'Upload a bounded CSV for streaming background verification; maximum 10 MB', auth: 'workspace', role: 'MANAGER', status: 202, rateLimit: { limit: 5, windowSec: 3600, key: 'workspace' }, body: z.object({ emailColumn: z.string().trim().max(100).optional(), hasHeader: z.enum(['true','false']).default('true') }), prepare: parseCsvUpload, handler: async (c) => {
   const file = c.req.file;
   if (!file || !file.originalname.toLowerCase().endsWith('.csv')) throw new AppError('VALIDATION_FAILED', 'Upload one .csv file', 400);
-  const fields = z.object({ emailColumn: z.string().trim().max(100).optional(), hasHeader: z.enum(['true','false']).default('true') }).safeParse(c.req.body ?? {});
-  if (!fields.success) throw new AppError('VALIDATION_FAILED', 'Invalid CSV column settings', 400, fields.error.issues);
+  const fields = c.body;
   const safeName = file.originalname.replace(/[\\/\r\n\t]/g, '_').slice(0, 120) || 'verification.csv';
-  const batch = await db().emailVerificationBatch.create({ data: { workspaceId: c.workspaceId, createdBy: c.userId, status: 'INGESTING', fileName: safeName, fileSizeBytes: BigInt(file.size), emailColumn: fields.data.emailColumn ?? null, hasHeader: fields.data.hasHeader === 'true' } });
+  const batch = await db().emailVerificationBatch.create({ data: { workspaceId: c.workspaceId, createdBy: c.userId, status: 'INGESTING', fileName: safeName, fileSizeBytes: BigInt(file.size), emailColumn: fields.emailColumn ?? null, hasHeader: fields.hasHeader === 'true' } });
   let storageKey: string | undefined;
   try {
     storageKey = await putTracked(c.workspaceId, 'email-verification', file.buffer, 'csv', { enforce: true });
@@ -90,11 +89,60 @@ route({ method: 'get', path: '/w/:workspaceId/email-verification/batches/:id', t
 
 route({ method: 'get', path: '/w/:workspaceId/email-verification/batches/:id/export.csv', tag: 'Enrichment', summary: 'Stream a tenant-scoped CSV export with verification columns and spreadsheet formula protection', auth: 'workspace', role: 'VIEWER', raw: true, handler: async (c) => verificationCsv.streamVerificationBatchCsv(c.workspaceId, c.params.id, c.res) });
 
+route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/pause', tag: 'Enrichment', summary: 'Pause a processing batch; active checks may finish', auth: 'workspace', role: 'MANAGER', handler: async (c) => {
+  const batch = await db().emailVerificationBatch.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId } });
+  if (!batch) throw NotFound('Verification batch');
+  if (batch.status !== 'PROCESSING') throw new AppError('CAMPAIGN_STATE', `Cannot pause batch from ${batch.status}`, 409);
+  await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'PAUSED' } });
+  return { status: 'PAUSED' };
+} });
+
+route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/resume', tag: 'Enrichment', summary: 'Resume queued rows of a paused verification batch', auth: 'workspace', role: 'MANAGER', status: 202, handler: async (c) => {
+  const batch = await db().emailVerificationBatch.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId } });
+  if (!batch) throw NotFound('Verification batch');
+  if (batch.status !== 'PAUSED') throw new AppError('CAMPAIGN_STATE', `Cannot resume batch from ${batch.status}`, 409);
+  const actionId = String(Date.now());
+  await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'PROCESSING', completedAt: null } });
+  await enqueue(QUEUES.verify, 'verify.batch-resume', { workspaceId: c.workspaceId, batchId: batch.id, actionId }, { jobId: `fpv-resume-${batch.id}-${actionId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+  return { status: 'PROCESSING', batchId: batch.id };
+} });
+
+route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/retry', tag: 'Enrichment', summary: 'Retry failed rows in a verification batch', auth: 'workspace', role: 'MANAGER', status: 202, handler: async (c) => {
+  const batch = await db().emailVerificationBatch.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId } });
+  if (!batch) throw NotFound('Verification batch');
+  const failed = await db().emailVerification.count({ where: { batchId: batch.id, workspaceId: c.workspaceId, provider: 'first-party-dns', rawResult: 'failed' } });
+  if (!failed) return { batchId: batch.id, retried: 0 };
+  await db().$transaction(async (tx) => {
+    await tx.emailVerification.updateMany({ where: { batchId: batch.id, workspaceId: c.workspaceId, provider: 'first-party-dns', rawResult: 'failed' }, data: { rawResult: 'queued', result: 'UNKNOWN', details: { state: 'QUEUED', manualRetry: true }, step: 1 } });
+    await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { processed: Math.max(0, batch.processed - failed), status: 'PROCESSING', completedAt: null, error: null } });
+  });
+  const actionId = String(Date.now());
+  await enqueue(QUEUES.verify, 'verify.batch-resume', { workspaceId: c.workspaceId, batchId: batch.id, actionId }, { jobId: `fpv-retry-${batch.id}-${actionId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+  return { batchId: batch.id, retried: failed };
+} });
+
+route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/cancel', tag: 'Enrichment', summary: 'Cancel pending rows in a verification batch', auth: 'workspace', role: 'MANAGER', handler: async (c) => {
+  const batch = await db().emailVerificationBatch.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId } });
+  if (!batch) throw NotFound('Verification batch');
+  if (['COMPLETED','COMPLETED_WITH_ERRORS','CANCELLED'].includes(batch.status)) throw new AppError('CAMPAIGN_STATE', `Cannot cancel batch from ${batch.status}`, 409);
+  await db().$transaction(async (tx) => {
+    await tx.emailVerification.updateMany({ where: { batchId: batch.id, workspaceId: c.workspaceId, rawResult: { in: ['queued','failed'] } }, data: { rawResult: 'cancelled' } });
+    await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'CANCELLED', processed: batch.total, completedAt: new Date() } });
+  });
+  return { status: 'CANCELLED', note: 'Active SMTP checks may finish before worker shutdown.' };
+} });
+
 route({ method: 'get', path: '/w/:workspaceId/email-verification/datasets', tag: 'Enrichment', summary: 'List shared disposable dataset metadata and workspace overrides', auth: 'workspace', role: 'VIEWER', handler: (c) => verificationDatasets.listVerificationDatasets(c.workspaceId) });
 route({ method: 'post', path: '/w/:workspaceId/email-verification/datasets/refresh', tag: 'Enrichment', summary: 'Queue refresh from the pinned public disposable-domain source', auth: 'workspace', role: 'ADMIN', status: 202, rateLimit: { limit: 1, windowSec: 3600, key: 'workspace' }, handler: async (c) => { const j = await enqueue(QUEUES.maintenance, 'emailVerification.datasets.refresh', { workspaceId: c.workspaceId }, { jobId: `verification-dataset-refresh-${Math.floor(Date.now() / 3600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 60_000 } }); return { queued: true, jobId: j.id }; } });
 route({ method: 'post', path: '/w/:workspaceId/email-verification/domain-overrides', tag: 'Enrichment', summary: 'Add or exclude a domain from this workspace disposable-domain classification', auth: 'workspace', role: 'ADMIN', body: z.object({ domain: z.string().min(1).max(253), disposable: z.boolean() }), handler: (c) => verificationDatasets.setDomainOverride(c.workspaceId, c.body, c.actor) });
 route({ method: 'delete', path: '/w/:workspaceId/email-verification/domain-overrides/:id', tag: 'Enrichment', summary: 'Remove a workspace disposable-domain override', auth: 'workspace', role: 'ADMIN', handler: (c) => verificationDatasets.removeDomainOverride(c.workspaceId, c.params.id, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/email-verification/role-patterns', tag: 'Enrichment', summary: 'Add or disable a workspace role-based local-part pattern', auth: 'workspace', role: 'ADMIN', body: z.object({ localPart: z.string().min(1).max(64), enabled: z.boolean().default(true) }), handler: (c) => verificationDatasets.setRolePattern(c.workspaceId, c.body, c.actor) });
+
+route({ method: 'get', path: '/w/:workspaceId/email-verification/history', tag: 'Enrichment', summary: 'Search tenant-scoped first-party verification history', auth: 'workspace', role: 'VIEWER', query: z.object({ email: z.string().max(254).optional(), status: z.enum(['UNVERIFIED','VALID','INVALID','RISKY','CATCH_ALL','UNKNOWN']).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }), handler: async (c) => {
+  const where = { workspaceId: c.workspaceId, provider: 'first-party-dns', ...(c.query.email ? { email: { contains: c.query.email.trim().toLowerCase() } } : {}), ...(c.query.status ? { result: c.query.status } : {}) };
+  const [data,total] = await Promise.all([db().emailVerification.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (c.query.page-1)*c.query.pageSize, take: c.query.pageSize }), db().emailVerification.count({ where })]);
+  return { data,total,page:c.query.page,pageSize:c.query.pageSize };
+} });
 
 route({ method: 'get', path: '/w/:workspaceId/email-verification/:id', tag: 'Enrichment', summary: 'Get tenant-scoped first-party verification result', auth: 'workspace', role: 'VIEWER', handler: async (c) => {
   const result = await db().emailVerification.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId, provider: 'first-party-dns' } });

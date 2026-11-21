@@ -36,6 +36,9 @@ const EnvSchema = z.object({
   EMAIL_VERIFY_CATCH_ALL_ENABLED: bool.default(false),
   EMAIL_VERIFY_MAIL_FROM: z.string().email().optional(),
   EMAIL_VERIFY_SMTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(15000).default(5000),
+  EMAIL_VERIFY_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  EMAIL_VERIFY_PER_DOMAIN_PER_MINUTE: z.coerce.number().int().min(1).max(60).default(5),
+  EMAIL_VERIFY_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).max(600).default(60),
   EMAIL_VERIFY_RETRY_DELAYS_MS: z.string().default('300000,1800000,7200000').transform((v) => v.split(',').map((n) => Number(n.trim()))).refine((v) => v.length === 3 && v.every((n) => Number.isInteger(n) && n >= 1000 && n <= 86_400_000), 'Expected three comma-separated retry delays in milliseconds'),
   TRUST_PROXY: bool.default(true),
 });

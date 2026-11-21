@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Resolver } from 'node:dns/promises';
 import { calculateEmailRisk, inspectEmail, validateEmailSyntax } from '../../integrations/src/email-verification.js';
 import { classifySmtpReply, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
+import { chooseEmailColumn, csvSafe } from '../../backend/src/services/verification-csv.js';
 
 const resolver = (overrides: Record<string, unknown> = {}) => ({
   resolveMx: vi.fn().mockResolvedValue([{ exchange: 'mx.example.com', priority: 10 }]),
@@ -47,6 +48,7 @@ describe('first-party email verification primitives', () => {
     expect(classifySmtpReply('250 2.1.5 Recipient OK').classification).toBe('ACCEPTED_BUT_UNCONFIRMED');
     expect(classifySmtpReply('550 5.1.1 User unknown').classification).toBe('USER_UNKNOWN');
     expect(classifySmtpReply('550 5.7.1 Policy block').classification).toBe('POLICY_REJECTION');
+    expect(classifySmtpReply('550 Recipient address rejected: access denied').classification).toBe('POLICY_REJECTION');
     expect(classifySmtpReply('451 4.7.1 Greylisted, try again later').classification).toBe('GREYLISTED');
     expect(classifySmtpReply('451 4.3.0 Temporary failure').classification).toBe('TEMPORARY_FAILURE');
   });
@@ -81,5 +83,13 @@ describe('first-party email verification primitives', () => {
     const result = await probeRecipientSmtp({ email: 'person@example.com', domain: 'example.com', mx: [] }, { enabled: false });
     expect(result.classification).toBe('SMTP_UNAVAILABLE');
     expect(result.reason).toMatch(/disabled/);
+  });
+
+  it('maps CSV email headers and neutralizes spreadsheet formulas on export', () => {
+    expect(chooseEmailColumn(['First name','Email address','Company'])).toBe(1);
+    expect(chooseEmailColumn(['Name','Email'], 'Email')).toBe(1);
+    expect(chooseEmailColumn(['Name','Email'], '0')).toBe(0);
+    expect(csvSafe('=HYPERLINK("https://bad")')).toBe("'=HYPERLINK(\"https://bad\")");
+    expect(csvSafe('normal@example.com')).toBe('normal@example.com');
   });
 });

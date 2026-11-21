@@ -28,7 +28,7 @@ const workers: Worker[] = [];
 for (const name of Object.keys(HANDLERS) as QueueName[]) {
   if (Object.keys(HANDLERS[name]).length === 0) continue;
   const w = new Worker(name, processorFor(name), {
-    connection: newRedis(), concurrency: name === QUEUES.verify ? 1 : CONCURRENCY[name] ?? 2, prefix: process.env.QUEUE_PREFIX ?? 'emn',
+    connection: newRedis(), concurrency: name === QUEUES.verify ? cfg.EMAIL_VERIFY_WORKER_CONCURRENCY : CONCURRENCY[name] ?? 2, prefix: process.env.QUEUE_PREFIX ?? 'emn',
     settings: { backoffStrategy: (attempt, type) => {
       if (type !== 'emnVerify') return -1;
       const base = cfg.EMAIL_VERIFY_RETRY_DELAYS_MS[Math.min(attempt - 1, cfg.EMAIL_VERIFY_RETRY_DELAYS_MS.length - 1)];

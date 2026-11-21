@@ -56,7 +56,7 @@ One additive migration `20261121150000_v1_4_billing_storage_trials` and guard `p
 
 | Suite | Environment | Command | Passed | Failed | Skipped | Blocked |
 |---|---|---|---|---|---|---|
-| Unit + integration (Vitest, 21 files) | Build VM, PG 16, Redis 7 | `npx vitest run` | 179 | 0 | 0 | 0 |
+| Unit + integration (Vitest, 21 files) | Build VM, v1.4 tree before merge, PG 16, Redis 7 | `npx vitest run` | 179 | 0 | 0 | 0 |
 | Browser (Playwright, Chrome) | Build VM, fresh DB `emn_e2e_final*`, Redis db 9 | `E2E_DATABASE_URL=… E2E_REDIS_URL=… bash scripts/e2e.sh` | 16 | 0 | 0 | 0 |
 | Lint | Build VM | `npm run lint` | 0 errors | — | 8 warnings | — |
 | Type check backend / frontend | Build VM | `npx tsc --noEmit` (root and `frontend`) | OK | — | — | — |
@@ -65,6 +65,19 @@ One additive migration `20261121150000_v1_4_billing_storage_trials` and guard `p
 | Live provider check | — | `npm run live-check` | — | — | — | All providers (no credentials) |
 
 New v1.4 tests: `billing-v14.test.ts` (8: refunds, idempotency, disputes, out-of-order events, reconciliation, annual pooling, trial-once, org cap) and `ops-dns-v14.test.ts` (8: storage metering/enforcement/reconcile, job timeout, DNS list/edit/stale-edit/delete/NS protection, company race). Multi-tenant suite extended for staff MFA, user disable and support visibility.
+
+
+### Results on the merged Mac working tree
+
+After merging into the Mac folder (commit `07c6cf4` plus your uncommitted email-verification work plus v1.4), the same checks were run on that exact tree:
+
+| Check | Result |
+|---|---|
+| `npx vitest run` (25 files) | 203 passed, **2 failed**, 0 skipped |
+| Playwright (`scripts/e2e.sh`, fresh DB, Redis db 10) | 16 passed, 0 failed |
+| Lint / tsc backend / tsc frontend | 0 errors (8 warnings) / OK / OK |
+
+Both failures also fail on the pre-merge working tree, so they come from the in-progress email-verification work, not from the merge: (1) `tests/unit/tenant-guards.test.ts` — `prisma/sql/002_tenant_guards.sql` needs regenerating after the `EmailVerification` change (`node --import tsx scripts/generate-tenant-guards.ts`); (2) `domains-enrichment.test.ts` verification waterfall — a disposable address now returns `UNKNOWN` where the test expects `INVALID`. Until fixed, gate A is held at PASS only for the v1.4 scope; the new verification tables lack their regenerated guard triggers.
 
 ## Browser tests
 

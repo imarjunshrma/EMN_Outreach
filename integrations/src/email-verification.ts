@@ -13,13 +13,14 @@ export type EmailCheck = {
   smtp?: SmtpResult | { classification: 'DISABLED'; reason: string };
   catchAll?: { status: 'SUSPECTED' | 'NOT_CATCH_ALL' | 'UNKNOWN'; reason: string; controlClassification: string };
   risk?: { score: number; level: 'LOW' | 'MEDIUM' | 'HIGH'; meaning: string; signals: string[] };
+  datasetVersion?: string;
   limitations: string[];
 };
 
 const FREE_PROVIDERS = new Set(['gmail.com','googlemail.com','outlook.com','hotmail.com','live.com','yahoo.com','icloud.com','me.com','proton.me','protonmail.com','aol.com','gmx.com','mail.com','yandex.com']);
 const ROLE_LOCALS = new Set(['info','support','sales','contact','admin','office','hello','marketing','billing','careers','hr','jobs','webmaster','abuse','postmaster','help','team','service','enquiries']);
 const asciiDomain = (s: string) => domainToASCII(s.normalize('NFC').replace(/\.$/, '').toLowerCase());
-export type VerificationDictionaries = { disposableDomains?: ReadonlySet<string>; disposableExclusions?: ReadonlySet<string>; roleLocals?: ReadonlySet<string> };
+export type VerificationDictionaries = { disposableDomains?: ReadonlySet<string>; disposableExclusions?: ReadonlySet<string>; roleLocals?: ReadonlySet<string>; datasetVersion?: string };
 function isDisposable(domain: string, included: ReadonlySet<string>, excluded: ReadonlySet<string>) {
   const labels = domain.split('.');
   for (let i = 0; i < labels.length - 1; i++) {
@@ -71,7 +72,7 @@ export async function inspectEmail(input: string, resolver: Pick<Resolver, 'reso
   const local = parsed.normalizedEmail.split('@')[0].toLowerCase();
   const roleLocals = dictionaries.roleLocals ? new Set([...ROLE_LOCALS, ...dictionaries.roleLocals]) : ROLE_LOCALS;
   const attributes = { disposable: isDisposable(parsed.domain, dictionaries.disposableDomains ?? DISPOSABLE_DOMAINS, dictionaries.disposableExclusions ?? new Set()), freeProvider: FREE_PROVIDERS.has(parsed.domain), roleBased: roleLocals.has(local) };
-  const base: EmailCheck = { normalizedEmail: parsed.normalizedEmail.toLowerCase(), primaryStatus: parsed.valid ? 'UNKNOWN' : 'INVALID', syntax: { valid: parsed.valid, ...(parsed.reason ? { reason: parsed.reason } : {}) }, domain: parsed.domain, dns: { status: parsed.valid ? 'DNS_ERROR' : 'NOT_CHECKED', mx: [] }, attributes, limitations: ['DNS and domain checks cannot establish that a mailbox exists', 'No SMTP recipient probe or email delivery was performed'] };
+  const base: EmailCheck = { normalizedEmail: parsed.normalizedEmail.toLowerCase(), primaryStatus: parsed.valid ? 'UNKNOWN' : 'INVALID', syntax: { valid: parsed.valid, ...(parsed.reason ? { reason: parsed.reason } : {}) }, domain: parsed.domain, dns: { status: parsed.valid ? 'DNS_ERROR' : 'NOT_CHECKED', mx: [] }, attributes, ...(dictionaries.datasetVersion ? { datasetVersion: dictionaries.datasetVersion } : {}), limitations: ['DNS and domain checks cannot establish that a mailbox exists', 'No SMTP recipient probe or email delivery was performed'] };
   if (!parsed.valid) return base;
   const timed = async <T>(p: Promise<T>) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
