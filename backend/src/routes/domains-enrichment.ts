@@ -14,6 +14,7 @@ import * as verificationDatasets from '../services/email-verification-datasets.j
 import * as verificationCsv from '../services/verification-csv.js';
 import multer from 'multer';
 import { putTracked, deleteTracked } from '../services/storage-accounting.js';
+import { audit } from '../core/audit.js';
 
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, cb) => cb(null, file.originalname.toLowerCase().endsWith('.csv')) }).single('file');
 const parseCsvUpload = (ctx: import('../http/router.js').Ctx<any, any>) => new Promise<void>((resolve, reject) => csvUpload(ctx.req, ctx.res, (e) => e ? reject(e) : resolve()));
@@ -39,20 +40,26 @@ route({ method: 'post', path: '/w/:workspaceId/enrichment/find-email', tag: 'Enr
 route({ method: 'get', path: '/w/:workspaceId/enrichment/stats', tag: 'Enrichment', summary: 'Provider comparison: checks, definitive rate, credits', auth: 'workspace', role: 'VIEWER', query: z.object({ days: z.coerce.number().int().min(1).max(365).default(90) }), handler: (c) => enrichment.enrichmentStats(c.workspaceId, c.query.days) });
 route({ method: 'get', path: '/w/:workspaceId/leads/:id/verifications', tag: 'Enrichment', summary: 'Verification / enrichment history for a lead', auth: 'workspace', role: 'VIEWER', handler: (c) => enrichment.verificationHistory(c.workspaceId, c.params.id) });
 
-route({ method: 'post', path: '/w/:workspaceId/email-verification/verify', tag: 'Enrichment', summary: 'Queue first-party syntax, disposable, role, free-provider and DNS checks (no SMTP probe)', auth: 'workspace', role: 'MEMBER', status: 202, rateLimit: { limit: 60, windowSec: 3600, key: 'workspace' }, body: z.object({ email: z.string().trim().min(3).max(254), leadId: z.string().uuid().optional() }), handler: async (c) => {
+route({ method: 'post', path: '/w/:workspaceId/email-verification/verify', tag: 'Enrichment', summary: 'Queue first-party syntax, disposable, role, free-provider and DNS checks; optional SMTP RCPT probing when enabled (never sends email)', auth: 'workspace', role: 'MEMBER', status: 202, rateLimit: { limit: 60, windowSec: 3600, key: 'workspace' }, body: z.object({ email: z.string().trim().min(3).max(254), leadId: z.string().uuid().optional() }), handler: async (c) => {
   if (c.body.leadId && !await db().lead.findFirst({ where: { id: c.body.leadId, workspaceId: c.workspaceId }, select: { id: true } })) throw NotFound('Lead');
   const v = await firstParty.createVerification(c.workspaceId, c.body.email, { leadId: c.body.leadId });
   if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+  if (!v.cached) await audit(c.workspaceId, c.actor, 'email_verification.queued', { type: 'verification', id: v.id }, { source: 'individual', linkedLead: !!c.body.leadId });
   return v;
 } });
 
-route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk', tag: 'Enrichment', summary: 'Queue deduplicated first-party DNS verification for an email list', auth: 'workspace', role: 'MEMBER', status: 202, rateLimit: { limit: 10, windowSec: 3600, key: 'workspace' }, body: z.object({ emails: z.array(z.string().trim().min(3).max(254)).min(1).max(1000) }), handler: async (c) => {
+route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk', tag: 'Enrichment', summary: 'Queue deduplicated first-party verification for an email list; optional SMTP RCPT probing when enabled (never sends email)', auth: 'workspace', role: 'MEMBER', status: 202, rateLimit: { limit: 10, windowSec: 3600, key: 'workspace' }, body: z.object({ emails: z.array(z.string().trim().min(3).max(254)).min(1).max(1000) }), handler: async (c) => {
   const emails = [...new Map(c.body.emails.map((email) => [email.trim().normalize('NFC').toLowerCase(), email.trim().normalize('NFC')])).values()];
   const batch = await db().emailVerificationBatch.create({ data: { workspaceId: c.workspaceId, createdBy: c.userId, total: emails.length } });
-  const rows = await Promise.all(emails.map((email) => firstParty.createVerification(c.workspaceId, email, { batchId: batch.id })));
+  const rows: Awaited<ReturnType<typeof firstParty.createVerification>>[] = [];
+  // Bound concurrent Prisma work for large (up to 1,000 row) JSON batches.
+  for (let i = 0; i < emails.length; i += 20) {
+    rows.push(...await Promise.all(emails.slice(i, i + 20).map((email) => firstParty.createVerification(c.workspaceId, email, { batchId: batch.id }))));
+  }
   const cachedCount = rows.filter((v) => v.cached).length;
   await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { processed: cachedCount, status: cachedCount === emails.length ? 'COMPLETED' : 'PROCESSING', ...(cachedCount === emails.length ? { completedAt: new Date() } : {}) } });
   for (const v of rows) if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+  await audit(c.workspaceId, c.actor, 'email_verification.batch_queued', { type: 'verification_batch', id: batch.id }, { total: emails.length, queued: emails.length - cachedCount, cached: cachedCount });
   return { batchId: batch.id, total: emails.length, queued: emails.length - cachedCount, cached: cachedCount };
 } });
 
@@ -67,6 +74,7 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/bulk.csv', tag
     storageKey = await putTracked(c.workspaceId, 'email-verification', file.buffer, 'csv', { enforce: true });
     await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { storageKey } });
     const job = await enqueue(QUEUES.verify, 'verify.csv-import', { workspaceId: c.workspaceId, batchId: batch.id }, { jobId: `fpv-import-${batch.id}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+    await audit(c.workspaceId, c.actor, 'email_verification.csv_uploaded', { type: 'verification_batch', id: batch.id }, { bytes: file.size, hasHeader: fields.hasHeader === 'true' });
     return { batchId: batch.id, fileName: safeName, bytes: file.size, status: 'INGESTING', jobId: job.id };
   } catch (e) {
     if (storageKey) await deleteTracked(storageKey).catch(() => undefined);
@@ -94,6 +102,7 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/pa
   if (!batch) throw NotFound('Verification batch');
   if (batch.status !== 'PROCESSING') throw new AppError('CAMPAIGN_STATE', `Cannot pause batch from ${batch.status}`, 409);
   await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'PAUSED' } });
+  await audit(c.workspaceId, c.actor, 'email_verification.batch_paused', { type: 'verification_batch', id: batch.id }, {});
   return { status: 'PAUSED' };
 } });
 
@@ -104,6 +113,7 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/re
   const actionId = String(Date.now());
   await db().emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'PROCESSING', completedAt: null } });
   await enqueue(QUEUES.verify, 'verify.batch-resume', { workspaceId: c.workspaceId, batchId: batch.id, actionId }, { jobId: `fpv-resume-${batch.id}-${actionId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+  await audit(c.workspaceId, c.actor, 'email_verification.batch_resumed', { type: 'verification_batch', id: batch.id }, {});
   return { status: 'PROCESSING', batchId: batch.id };
 } });
 
@@ -118,6 +128,7 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/re
   });
   const actionId = String(Date.now());
   await enqueue(QUEUES.verify, 'verify.batch-resume', { workspaceId: c.workspaceId, batchId: batch.id, actionId }, { jobId: `fpv-retry-${batch.id}-${actionId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+  await audit(c.workspaceId, c.actor, 'email_verification.batch_retried', { type: 'verification_batch', id: batch.id }, { retried: failed });
   return { batchId: batch.id, retried: failed };
 } });
 
@@ -129,6 +140,7 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/ca
     await tx.emailVerification.updateMany({ where: { batchId: batch.id, workspaceId: c.workspaceId, rawResult: { in: ['queued','failed'] } }, data: { rawResult: 'cancelled' } });
     await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { status: 'CANCELLED', processed: batch.total, completedAt: new Date() } });
   });
+  await audit(c.workspaceId, c.actor, 'email_verification.batch_cancelled', { type: 'verification_batch', id: batch.id }, {});
   return { status: 'CANCELLED', note: 'Active SMTP checks may finish before worker shutdown.' };
 } });
 

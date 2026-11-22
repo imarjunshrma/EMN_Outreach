@@ -30,6 +30,7 @@ export default function Enrichment() {
   const runDiagnostics = useWsMutation(() => ({ path: '/email-verification/diagnostics', body: {} }), { onSuccess: (r: any) => setDiagnostic(r) });
   const refreshDataset = useWsMutation(() => ({ path: '/email-verification/datasets/refresh', body: {} }));
   const saveOverride = useWsMutation((body: typeof override) => ({ path: '/email-verification/domain-overrides', body }));
+  const deleteOverride = useWsMutation((id: string) => ({ path: `/email-verification/domain-overrides/${id}`, method: 'DELETE' }));
   const saveRole = useWsMutation((body: { localPart: string; enabled: boolean }) => ({ path: '/email-verification/role-patterns', body }));
   const uploadCsv = useWsMutation((form: FormData) => ({ path: '/email-verification/bulk.csv', form }), { onSuccess: (r: any) => setBatchResult(r) });
   const find = useWsMutation(() => ({ path: '/enrichment/find-email', body: f }), { invalidate: false, onSuccess: (r: any) => setFound(r) });
@@ -39,7 +40,7 @@ export default function Enrichment() {
       <PageHeader title="Verification & enrichment" subtitle="Email verification runs through a waterfall of providers until one gives a definitive answer. Recently verified leads are skipped to save credits." actions={<Link href={`/w/${ws}/settings/policies`}><Button variant="secondary">Change provider order</Button></Link>} />
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="First-party email checks" className="lg:col-span-3">
-          <p className="mb-3 text-sm text-slate-600">Checks syntax, IDN domain normalization, disposable/free/role attributes and DNS/MX routing. It does not probe mailboxes or send email; DNS cannot confirm that a mailbox exists.</p>
+          <p className="mb-3 text-sm text-slate-600">Checks syntax, IDN domain normalization, disposable/free/role attributes and DNS/MX routing. SMTP recipient probing is optional and disabled by default; it never sends a message, and acceptance cannot confirm a mailbox exists.</p>
           <div className="grid gap-4 lg:grid-cols-2">
             <div>
               <Field label="Verify one email"><Input type="email" value={verifyEmail} onChange={(e) => setVerifyEmail(e.target.value)} placeholder="person@example.com" /></Field>
@@ -65,13 +66,13 @@ export default function Enrichment() {
                 {(d: any) => <p className="text-xs">Source: {d.dataset?.sourceUrl ?? 'not refreshed yet'} · domains: {d.dataset?.domainCount ?? 0} · last update: {d.dataset?.lastUpdated ? new Date(d.dataset.lastUpdated).toLocaleString() : 'never'} · status: {d.dataset?.lastStatus ?? 'never updated'}{d.dataset?.lastError ? ` · ${d.dataset.lastError}` : ''}</p>}
               </QueryView>
               <div className="mt-2 flex flex-wrap gap-2"><Input value={override.domain} onChange={(e) => setOverride({ ...override, domain: e.target.value })} placeholder="domain.example" /><select className="input" value={String(override.disposable)} onChange={(e) => setOverride({ ...override, disposable: e.target.value === 'true' })}><option value="true">Mark disposable</option><option value="false">Exclude as non-disposable</option></select><Button variant="secondary" disabled={!override.domain} loading={saveOverride.isPending} onClick={() => saveOverride.mutate(override)}>Save override</Button><Button variant="secondary" loading={refreshDataset.isPending} onClick={() => refreshDataset.mutate({})}>Refresh list</Button></div>
-              <p className="mt-2 text-xs text-slate-500">Overrides: {(datasets.data?.overrides ?? []).map((x: any) => `${x.domain}=${x.disposable ? 'disposable' : 'excluded'}`).join(', ') || 'none'}</p>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">{(datasets.data?.overrides ?? []).map((x: any) => <span key={x.id} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-1">{x.domain}={x.disposable ? 'disposable' : 'excluded'}<button aria-label={`Remove ${x.domain} override`} className="font-bold" onClick={() => deleteOverride.mutate(x.id)}>×</button></span>)}</div>
             </div>
             <div>
               <h3 className="mb-2 text-sm font-semibold">Role-based address patterns</h3>
               <p className="mb-2 text-xs text-slate-500">Add a local-part token such as procurement. These patterns are attributes and do not assert mailbox validity.</p>
               <div className="flex gap-2"><Input value={roleLocalPart} onChange={(e) => setRoleLocalPart(e.target.value)} placeholder="procurement" /><Button variant="secondary" disabled={!roleLocalPart} loading={saveRole.isPending} onClick={() => saveRole.mutate({ localPart: roleLocalPart, enabled: true })}>Add pattern</Button></div>
-              <p className="mt-2 text-xs text-slate-500">Patterns: {(datasets.data?.rolePatterns ?? []).filter((x: any) => x.enabled).map((x: any) => x.localPart).join(', ') || 'built-in defaults only'}</p>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">{(datasets.data?.rolePatterns ?? []).map((x: any) => <button key={x.id} className="rounded bg-slate-100 px-2 py-1" onClick={() => saveRole.mutate({ localPart: x.localPart, enabled: !x.enabled })}>{x.localPart} · {x.enabled ? 'enabled (click to disable)' : 'disabled (click to enable)'}</button>)}</div>
             </div>
           </div>
           <div className="mt-4">

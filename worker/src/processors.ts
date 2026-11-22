@@ -30,6 +30,20 @@ const s = (v: unknown) => String(v);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const wsOf = (d: Data) => (typeof d.workspaceId === 'string' && UUID.test(d.workspaceId) ? d.workspaceId : null);
 
+/** Owner-only AI workflow stages. A busy provider slot re-queues the stage with a delay instead of failing it. */
+function AI_WORKFLOW_HANDLERS(): Record<string, Handler> {
+  return {
+    'aiwf.stage': async (j) => {
+      const runs = await import('../../backend/src/services/ai-workflow-runs.js');
+      const data = j.data as unknown as import('../../backend/src/services/ai-workflow-runs.js').StageJobData;
+      const r = await runs.processStageJob(data);
+      if (r.delayMs) await enqueue(j.queueName as QueueName, 'aiwf.stage', j.data, { delay: r.delayMs, attempts: 1, jobId: `aiwf-delay_${data.runId}_${data.stageIndex}_${data.attempt}_${Date.now()}` });
+      return r;
+    },
+    'aiwf.regenerate': async (j) => (await import('../../backend/src/services/ai-workflow-runs.js')).processRegenerateJob(j.data as never),
+  };
+}
+
 /** Job handlers by queue and job name. Every handler is idempotent. */
 export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
   [QUEUES.scheduler]: {
@@ -77,12 +91,14 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'import.csv': async (j) => leads.processImport(s(j.data.workspaceId), s(j.data.importId)),
   },
   [QUEUES.verify]: {
-    'verify.lead': async (j) => enrichment.verifyWaterfall(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force }),
+    'verify.lead': async (j) => enrichment.verifyWaterfall(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force, ...(typeof j.data.freshDays === 'number' ? { freshDays: j.data.freshDays } : {}) }),
     'verify.address': async (j) => {
       const verifier = await import('../../backend/src/services/first-party-verification.js');
-      try { return await verifier.processFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), j.attemptsMade + 1); }
+      const attempt = Math.max(j.attemptsMade, j.stalledCounter) + 1;
+      try { return await verifier.processFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), attempt); }
       catch (e) {
-        if (j.attemptsMade + 1 >= (j.opts.attempts ?? 1)) await verifier.failFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), (e as Error).message);
+        if (attempt >= (j.opts.attempts ?? 1)) await verifier.failFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId), (e as Error).message);
+        else await verifier.releaseFirstPartyVerification(s(j.data.workspaceId), s(j.data.verificationId));
         throw e;
       }
     },
@@ -105,10 +121,15 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
       return { queued: ds.length };
     },
   },
+  [QUEUES.aiClaude]: AI_WORKFLOW_HANDLERS(),
+  [QUEUES.aiCodex]: AI_WORKFLOW_HANDLERS(),
+  [QUEUES.aiApi]: AI_WORKFLOW_HANDLERS(),
   [QUEUES.maintenance]: {
+    'aiSubscriptions.refreshLimits': async () => (await import('../../backend/src/services/ai-subscriptions.js')).refreshLimits(),
     'reports.daily': async () => insights.runScheduledReports(),
     'maintenance.retention': async () => ops.runRetention(),
     'maintenance.taskReminders': async () => crm.sendTaskReminders(),
+    'maintenance.mailboxReadiness': async () => accounts.advanceMailboxReadiness(),
     'tenant.sync': async () => tenancy.syncTenantStatuses(),
     'tenant.purge': async () => tenancy.purgeDueTenants(),
     'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
@@ -184,7 +205,7 @@ async function acquireSlot(queueName: QueueName, org: string, jobId: string): Pr
 /** Hard ceiling per job so a hung provider call cannot hold a worker slot forever (the job is retried with back-off). */
 const TIMEOUT_MS: Partial<Record<QueueName, number>> = {
   [QUEUES.send]: 120_000, [QUEUES.replySend]: 120_000, [QUEUES.prepare]: 120_000, [QUEUES.ai]: 180_000, [QUEUES.personalize]: 240_000,
-  [QUEUES.research]: 300_000, [QUEUES.verify]: 120_000, [QUEUES.sync]: 300_000, [QUEUES.webhooks]: 30_000, [QUEUES.imports]: 30 * 60_000, [QUEUES.maintenance]: 30 * 60_000,
+  [QUEUES.research]: 300_000, [QUEUES.aiClaude]: 35 * 60_000, [QUEUES.aiCodex]: 35 * 60_000, [QUEUES.aiApi]: 35 * 60_000, [QUEUES.verify]: 120_000, [QUEUES.sync]: 300_000, [QUEUES.webhooks]: 30_000, [QUEUES.imports]: 30 * 60_000, [QUEUES.maintenance]: 30 * 60_000,
 };
 export const jobTimeoutMs = (q: QueueName) => Number(process.env.JOB_TIMEOUT_MS ?? 0) || TIMEOUT_MS[q] || 10 * 60_000;
 export class JobTimeoutError extends Error {}

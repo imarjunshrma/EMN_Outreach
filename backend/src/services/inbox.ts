@@ -171,15 +171,21 @@ export async function classifyMessage(workspaceId: string, messageId: string) {
   const msg = await db().emailMessage.findFirst({ where: { id: messageId, workspaceId }, include: { conversation: true } });
   if (!msg || msg.direction !== 'INBOUND' || msg.isBounce) return null;
   const text = (msg.bodyText ?? '').split(/\n(?:On .+wrote:|-{2,}\s*Original Message)/)[0].slice(0, 6000);
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const aiClassificationEnabled = readSettings(ws?.settings).aiReplyClassification;
   let result: { category: ReplyClassification['category']; confidence: number; sentiment?: string; meetingInterest?: boolean; objection?: string | null; unsubscribeIntent: boolean };
-  try {
-    const r = await runAi<ReplyClassification>(workspaceId, 'REPLY_CLASSIFICATION', { subject: neutralizeTags(msg.subject ?? ''), reply: neutralizeTags(text) }, { entity: { type: 'email_message', id: messageId }, critical: true });
-    result = r.data.confidence < 0.6 && !r.data.unsubscribeIntent ? { ...r.data, category: 'OTHER' } : r.data;
-    const h = heuristicClassify(text);
-    if (h.unsubscribeIntent && !result.unsubscribeIntent) result = { ...result, unsubscribeIntent: true, category: h.category }; // belt and braces
-  } catch (e) {
-    logger.warn({ err: e }, 'AI classification unavailable; using keyword fallback');
+  if (!aiClassificationEnabled) {
     result = heuristicClassify(text);
+  } else {
+    try {
+      const r = await runAi<ReplyClassification>(workspaceId, 'REPLY_CLASSIFICATION', { subject: neutralizeTags(msg.subject ?? ''), reply: neutralizeTags(text) }, { entity: { type: 'email_message', id: messageId }, critical: true });
+      result = r.data.confidence < 0.6 && !r.data.unsubscribeIntent ? { ...r.data, category: 'OTHER' } : r.data;
+      const h = heuristicClassify(text);
+      if (h.unsubscribeIntent && !result.unsubscribeIntent) result = { ...result, unsubscribeIntent: true, category: h.category }; // belt and braces
+    } catch (e) {
+      logger.warn({ err: e }, 'AI classification unavailable; using keyword fallback');
+      result = heuristicClassify(text);
+    }
   }
   await db().emailMessage.update({ where: { id: messageId }, data: { category: result.category, categoryConfidence: result.confidence, sentiment: result.sentiment ?? null, meetingInterest: result.meetingInterest ?? null, objection: result.objection ?? null } });
   await db().conversation.update({ where: { id: msg.conversationId }, data: { category: result.category } });
@@ -203,7 +209,8 @@ async function applyCategoryEffects(workspaceId: string, leadId: string, fromAdd
   if (r.category === 'COMPLAINT') {
     await addSuppression(workspaceId, { type: 'EMAIL', value: lead.emailNormalized, reason: 'COMPLAINT', source: 'reply_classifier' }, WORKER_ACTOR);
     const enr = await db().sequenceEnrollment.findFirst({ where: { leadId }, orderBy: { enrolledAt: 'desc' } });
-    await db().emailEvent.upsert({ where: { dedupeKey: `COMPLAINED:${messageId}` }, update: {}, create: { workspaceId, type: 'COMPLAINED', leadId, campaignId: enr?.campaignId, enrollmentId: enr?.id, emailMessageId: messageId, dedupeKey: `COMPLAINED:${messageId}`, metadata: { source: 'reply_classifier', note: 'Detected from reply content; provider complaint feedback is not available for mailbox sending.' } } });
+    const sourceMessage = await db().emailMessage.findFirst({ where: { id: messageId, workspaceId }, select: { emailAccountId: true } });
+    await db().emailEvent.upsert({ where: { dedupeKey: `COMPLAINED:${messageId}` }, update: {}, create: { workspaceId, type: 'COMPLAINED', leadId, campaignId: enr?.campaignId, enrollmentId: enr?.id, emailMessageId: messageId, emailAccountId: sourceMessage?.emailAccountId, dedupeKey: `COMPLAINED:${messageId}`, metadata: { source: 'reply_classifier', note: 'Detected from reply content; provider complaint feedback is not available for mailbox sending.' } } });
     await notifyWorkspace(workspaceId, 'MANAGER', { type: 'complaint', title: `Complaint from ${fromAddress}`, link: `/leads/${leadId}` });
   }
   if (['INTERESTED', 'WANTS_PRICING', 'WANTS_MEETING', 'NEEDS_INFO'].includes(r.category) && !['MEETING_BOOKED', 'CUSTOMER'].includes(lead.status)) {
@@ -305,6 +312,8 @@ export const ReplySchema = z.object({ bodyText: z.string().min(1).max(20000), id
 
 /** Queue a reply. It is always sent from the conversation's original mailbox. */
 export async function queueReply(workspaceId: string, conversationId: string, input: z.infer<typeof ReplySchema>, actor: Actor) {
+  const workspace = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  if (readSettings(workspace.settings).emergencyPause) throw new AppError('OUTREACH_PAUSED', 'Workspace emergency pause is active; outbound replies are temporarily blocked.', 409);
   const c = await db().conversation.findFirst({ where: { id: conversationId, workspaceId }, include: { emailAccount: true } });
   if (!c) throw NotFound('Conversation');
   if (c.emailAccount.status !== 'CONNECTED') throw new AppError('ACCOUNT_NOT_CONNECTED', `The original mailbox ${c.emailAccount.emailAddress} is ${c.emailAccount.status}; reconnect it to reply.`, 409);
@@ -321,6 +330,7 @@ export async function sendReply(workspaceId: string, conversationId: string, bod
   if (!lastInbound) throw new AppError('CONFLICT', 'Conversation has no messages', 409);
   const to = lastInbound.direction === 'INBOUND' ? lastInbound.fromAddress : lastInbound.toAddresses[0];
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
+  if (readSettings(ws.settings).emergencyPause) throw new AppError('OUTREACH_PAUSED', 'Workspace emergency pause is active; outbound replies are temporarily blocked.', 409);
   const id = randomUUID();
   const messageId = `<${id}@${c.emailAccount.emailAddress.split('@')[1]}>`;
   const subject = c.subject?.toLowerCase().startsWith('re:') ? c.subject : `Re: ${c.subject ?? ''}`;
@@ -341,6 +351,8 @@ export const ForwardSchema = z.object({ to: z.string().email(), note: z.string()
 
 /** Forward a conversation (human action) from its original mailbox. Suppressed addresses are refused. */
 export async function queueForward(workspaceId: string, conversationId: string, input: z.infer<typeof ForwardSchema>, actor: Actor) {
+  const workspace = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  if (readSettings(workspace.settings).emergencyPause) throw new AppError('OUTREACH_PAUSED', 'Workspace emergency pause is active; outbound forwarding is temporarily blocked.', 409);
   const c = await db().conversation.findFirst({ where: { id: conversationId, workspaceId }, include: { emailAccount: true } });
   if (!c) throw NotFound('Conversation');
   if (c.emailAccount.status !== 'CONNECTED') throw new AppError('ACCOUNT_NOT_CONNECTED', `The mailbox ${c.emailAccount.emailAddress} is ${c.emailAccount.status}`, 409);
@@ -354,6 +366,8 @@ export async function queueForward(workspaceId: string, conversationId: string, 
 
 export async function sendForward(workspaceId: string, conversationId: string, to: string, note: string, userId: string | null) {
   const c = await db().conversation.findFirstOrThrow({ where: { id: conversationId, workspaceId }, include: { emailAccount: true, messages: { orderBy: { sentAt: 'asc' } } } });
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  if (readSettings(ws.settings).emergencyPause) throw new AppError('OUTREACH_PAUSED', 'Workspace emergency pause is active; outbound forwarding is temporarily blocked.', 409);
   const quoted = c.messages.map((m) => `---------- ${m.direction === 'INBOUND' ? 'From' : 'Sent by'} ${m.fromAddress} on ${m.sentAt.toUTCString()}\nSubject: ${m.subject ?? ''}\n\n${(m.bodyText ?? '').slice(0, 20000)}`).join('\n\n');
   const text = `${note ? `${note}\n\n` : ''}${quoted}`;
   const id = randomUUID();

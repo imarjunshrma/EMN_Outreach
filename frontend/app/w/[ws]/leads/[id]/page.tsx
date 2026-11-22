@@ -1,20 +1,26 @@
 'use client';
 
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
-import { useState } from 'react';
+import { useParams, useSearchParams } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { GeneratePanel } from '@/components/ai/generate-panel';
+import { useAiOwner } from '@/components/ai/hooks';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fmtMoney, fullName } from '@/lib/format';
 import { Badge, Button, Card, Empty, Field, Input, Notice, PageHeader, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
 import { LEAD_STATUSES } from '@/lib/constants';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export default function LeadDetail() {
+export default function LeadDetail() { return <Suspense><LeadDetailInner /></Suspense>; }
+
+function LeadDetailInner() {
   const ws = useWs();
   const { id } = useParams<{ id: string }>();
+  const params = useSearchParams();
+  const owner = useAiOwner();
   const q = useWsQuery<any>(`/leads/${id}`);
   const check = useWsQuery<{ allowed: boolean; reasons: string[] }>(`/compliance/check/${id}`);
-  const [tab, setTab] = useState('overview');
+  const [tab, setTab] = useState(params.get('tab') ?? 'overview');
   const [note, setNote] = useState('');
   const research = useWsMutation(() => ({ path: `/leads/${id}/research`, body: { thenScore: true } }), { success: 'Research queued (results appear in a minute)' });
   const score = useWsMutation(() => ({ path: `/leads/${id}/score`, body: {} }), { success: (r: any) => `Score ${r.score} (${r.qualified ? 'qualified' : 'not qualified'})` });
@@ -39,7 +45,8 @@ export default function LeadDetail() {
               <Button loading={score.isPending} onClick={() => score.mutate()}>Score vs ICP</Button>
             </>} />
           {check.data && !check.data.allowed && <div className="mb-4"><Notice kind="warning"><b>Not currently contactable:</b> {check.data.reasons.join(' · ')}</Notice></div>}
-          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'research', label: 'Research', count: l.researchReports.length }, { id: 'activity', label: 'Activity', count: l.events.length }, { id: 'crm', label: 'CRM', count: l.notes.length + l.tasks.length + l.opportunities.length }, { id: 'history', label: 'Status history' }]} />
+          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'research', label: 'Research', count: l.researchReports.length }, { id: 'activity', label: 'Activity', count: l.events.length }, { id: 'crm', label: 'CRM', count: l.notes.length + l.tasks.length + l.opportunities.length }, { id: 'history', label: 'Status history' }, ...(owner.allowed ? [{ id: 'ai', label: 'Generate emails' }] : [])]} />
+          {tab === 'ai' && owner.allowed && <GeneratePanel leadId={id} defaultCampaignId={params.get('campaign')} />}
           {tab === 'overview' && (
             <div className="grid gap-4 lg:grid-cols-3">
               <Card title="Profile">

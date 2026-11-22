@@ -22,6 +22,10 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
   [QUEUES.webhooks]: 4,
   [QUEUES.replySend]: 2,
   [QUEUES.personalize]: 3,
+  // Real per-provider concurrency (default 1 for subscriptions) is enforced by the AI settings slot limiter.
+  [QUEUES.aiClaude]: 2,
+  [QUEUES.aiCodex]: 2,
+  [QUEUES.aiApi]: 4,
 };
 
 const workers: Worker[] = [];
@@ -57,11 +61,15 @@ async function schedules() {
   await queue(QUEUES.maintenance).upsertJobScheduler('tenant-sync', { every: 15 * 60_000 }, { name: 'tenant.sync', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('storage-reconcile', { pattern: '37 0 * * *' }, { name: 'storage.reconcile', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('billing-reconcile', { pattern: '53 */6 * * *' }, { name: 'billing.reconcile', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('ai-subscription-limits', { pattern: '*/5 * * * *' }, { name: 'aiSubscriptions.refreshLimits', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('tenant-purge', { pattern: '23 1 * * *' }, { name: 'tenant.purge', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('task-reminders', { every: 300_000 }, { name: 'maintenance.taskReminders', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('verification-datasets-daily', { pattern: '41 2 * * *' }, { name: 'emailVerification.datasets.refresh', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('mailbox-readiness-daily', { pattern: '31 5 * * *' }, { name: 'maintenance.mailboxReadiness', data: {} });
 }
-schedules().then(() => logger.info({ queues: workers.length }, 'EMN worker started')).catch((e) => { logger.fatal({ err: e }, 'failed to register schedules'); process.exit(1); });
+schedules()
+  .then(async () => { const r = await (await import('../../backend/src/services/ai-workflow-runs.js')).recoverAiRuns(); if (r.requeued) logger.info(r, 'AI workflow runs recovered after restart'); })
+  .then(() => logger.info({ queues: workers.length }, 'EMN worker started')).catch((e) => { logger.fatal({ err: e }, 'failed to register schedules'); process.exit(1); });
 
 let stopping = false;
 async function shutdown(signal: string) {

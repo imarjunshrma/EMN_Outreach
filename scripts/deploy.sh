@@ -48,7 +48,7 @@ rollback() {
 log "Copying source to $RELEASE"
 install -d -o emn -g emn "$RELEASE"
 rsync -a --delete --exclude node_modules --exclude .next --exclude dist --exclude .env --exclude storage \
-  --exclude 'backend/src/generated' --exclude '*.tsbuildinfo' "$SRC_DIR/" "$RELEASE/"
+  --exclude 'backend/src/generated' --exclude '*.tsbuildinfo' --exclude .ai-subscriptions "$SRC_DIR/" "$RELEASE/"
 chown -R emn:emn "$RELEASE"
 ln -sfn "$ENV_FILE" "$RELEASE/.env"
 

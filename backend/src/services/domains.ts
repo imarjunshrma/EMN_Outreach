@@ -8,6 +8,7 @@ import { audit, notifyWorkspace, type Actor } from '../core/audit.js';
 import { PROVIDER_REGISTRY } from '../../../shared/src/provider-registry.js';
 import { classifyMailboxHealth } from '../../../shared/src/mailbox-health.js';
 import { getSecret, requireSecret } from './integrations.js';
+import { readSettings } from './workspace.js';
 
 // Domain manager: ownership verification (TXT), DNS propagation across public resolvers, recommended
 // records per mailbox provider, optional one-click record creation via a DNS provider adapter
@@ -122,6 +123,8 @@ export function providerRegistry() { return PROVIDER_REGISTRY; }
 
 /** Mailbox health in one view (only data we actually have — no inferred inbox placement). */
 export async function mailboxHealth(workspaceId: string) {
+  const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const readinessManagementEnabled = readSettings(workspace?.settings).mailboxReadinessManagement;
   const since = new Date(Date.now() - 30 * 86400_000);
   const startDay = new Date(); startDay.setUTCHours(0, 0, 0, 0);
   const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true, connectionConfig: true } });
@@ -136,8 +139,11 @@ export async function mailboxHealth(workspaceId: string) {
     const complaints = n('COMPLAINED');
     const health = classifyMailboxHealth({ connectionStatus: a.status, sent30d: sent, hardBounces30d: hardBounces, complaints30d: complaints, domainHealth: dom?.healthStatus ?? null, domainVerified: !!dom?.verifiedAt, lastSyncedAt: a.lastSyncedAt, lastErrorAt: a.lastErrorAt });
     const { connectionConfig, ...publicAccount } = a;
-    const connectionHealth = (connectionConfig as { connectionHealth?: { smtp?: { ok?: boolean; error?: string | null }; imap?: { ok?: boolean; error?: string | null }; checkedAt?: string } } | null)?.connectionHealth;
-    return { ...publicAccount, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: today.find((t) => t.emailAccountId === a.id)?._count._all ?? 0, quota: { dailyLimit: a.dailySendLimit, source: 'workspace setting (providers do not expose remaining quota)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
+    const privateConfig = connectionConfig as { connectionHealth?: { smtp?: { ok?: boolean; error?: string | null }; imap?: { ok?: boolean; error?: string | null }; checkedAt?: string }; readiness?: Record<string, unknown> } | null;
+    const connectionHealth = privateConfig?.connectionHealth;
+    const rawReadiness = privateConfig?.readiness;
+    const readiness = rawReadiness ? { ...rawReadiness, globallyEnabled: readinessManagementEnabled, effectiveDailyCap: readinessManagementEnabled && rawReadiness.enabled === true ? Math.min(a.dailySendLimit, Number(rawReadiness.currentDailyCap ?? 5)) : a.dailySendLimit } : null;
+    return { ...publicAccount, readiness, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: today.find((t) => t.emailAccountId === a.id)?._count._all ?? 0, quota: { dailyLimit: readiness?.effectiveDailyCap ?? a.dailySendLimit, source: 'mailbox configuration and readiness cap (provider quotas are not exposed)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
   });
 }
 

@@ -20,6 +20,10 @@ END $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "AiExecution";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "AiExecution" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('promptTemplateId', 'PromptTemplate');
+DROP TRIGGER IF EXISTS emn_tenant_guard ON "AiWorkflowRun";
+CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "AiWorkflowRun" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('leadId', 'Lead', 'campaignId', 'Campaign');
+DROP TRIGGER IF EXISTS emn_tenant_guard ON "AiWorkflowStageExecution";
+CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "AiWorkflowStageExecution" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('runId', 'AiWorkflowRun');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "AutomationRun";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "AutomationRun" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('ruleId', 'AutomationRule');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "Campaign";
@@ -45,7 +49,7 @@ CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "EmailEvent" FOR EACH
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "EmailMessage";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "EmailMessage" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('conversationId', 'Conversation', 'emailAccountId', 'EmailAccount');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "EmailVerification";
-CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "EmailVerification" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('leadId', 'Lead');
+CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "EmailVerification" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('leadId', 'Lead', 'batchId', 'EmailVerificationBatch');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "Lead";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "Lead" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('companyId', 'Company', 'sourceId', 'LeadSource');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "LeadListMember";

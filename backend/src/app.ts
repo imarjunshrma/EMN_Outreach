@@ -20,6 +20,7 @@ import './routes/domains-enrichment.js';
 import './routes/workflows-billing.js';
 import './routes/insights.js';
 import './routes/saas.js';
+import './routes/ai-subscriptions.js';
 import * as billing from './services/billing.js';
 import * as workflows from './services/workflows.js';
 

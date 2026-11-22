@@ -10,6 +10,8 @@ const env = {
   DATABASE_URL: process.env.E2E_DATABASE_URL ?? 'postgresql://emn:emn@127.0.0.1:5432/emn_e2e', REDIS_URL: process.env.E2E_REDIS_URL ?? 'redis://127.0.0.1:6379/14',
   SESSION_SECRET: 'e2e-session-secret-that-is-long-enough-1234567890', ENCRYPTION_KEYS: `1:${Buffer.alloc(32, 3).toString('base64')}`, ENCRYPTION_ACTIVE_KEY: '1',
   STORAGE_ROOT: '/tmp/emn-e2e-storage', REGISTRATION_OPEN: 'true', LOG_LEVEL: 'warn', QUEUE_PREFIX: 'emne2e', EMN_API_INTERNAL_URL: `http://127.0.0.1:${API_PORT}`,
+  // Personal AI subscriptions: only this e2e account may use them; no real Claude/Codex account is connected.
+  AI_SUBSCRIPTION_OWNER_EMAILS: 'aiowner@emn-e2e.test', AI_SUBSCRIPTION_ENCRYPTION_KEY: Buffer.alloc(32, 5).toString('base64'), AI_SUBSCRIPTION_HOME: '/tmp/emn-e2e-ai-subs',
 };
 
 export default defineConfig({

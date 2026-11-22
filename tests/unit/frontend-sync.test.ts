@@ -17,3 +17,24 @@ describe('frontend ↔ shared workflow vocabulary', () => {
     expect(shared.GraphSchema.safeParse(g).success).toBe(true);
   });
 });
+
+import * as aiShared from '../../shared/src/ai-workflows.js';
+// eslint-disable-next-line no-restricted-imports -- deliberate: guards the UI copy of the AI workflow vocabulary
+import * as aiUi from '../../frontend/lib/ai-workflows.js';
+
+describe('frontend ↔ shared AI workflow vocabulary', () => {
+  it('matches exactly', () => {
+    expect([...aiUi.STAGE_PROVIDERS]).toEqual([...aiShared.STAGE_PROVIDERS]);
+    expect([...aiUi.TASK_TYPES]).toEqual([...aiShared.TASK_TYPES]);
+    expect([...aiUi.OUTPUT_FORMATS]).toEqual([...aiShared.OUTPUT_FORMATS]);
+    expect([...aiUi.CONDITIONS]).toEqual([...aiShared.CONDITIONS]);
+    expect(aiUi.TASK_LABELS).toEqual(aiShared.TASK_LABELS);
+    expect(aiUi.PROVIDER_LABELS).toEqual(aiShared.PROVIDER_LABELS);
+    expect(aiUi.DEFAULT_OUTPUT_FORMAT).toEqual(aiShared.DEFAULT_OUTPUT_FORMAT);
+    expect(aiUi.WEB_TASKS).toEqual(aiShared.WEB_TASKS);
+    expect(aiUi.INPUT_SOURCE_LABELS).toEqual(aiShared.INPUT_SOURCE_LABELS);
+  });
+  it('a stage built by the UI validates on the server for every task type', () => {
+    for (const t of aiUi.TASK_TYPES) expect(aiShared.StageSchema.safeParse(aiUi.newStage(t)).success, t).toBe(true);
+  });
+});

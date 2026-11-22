@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useState } from 'react';
-import { useWsQuery } from '@/lib/hooks';
+import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { Badge, Button, Card, Empty, PageHeader, QueryView, Table } from '@/components/ui';
 
 export default function VerificationBatchPage() {

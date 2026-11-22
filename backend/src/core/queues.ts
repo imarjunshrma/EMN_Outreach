@@ -19,6 +19,10 @@ export const QUEUES = {
   webhooks: 'webhooks',
   privacy: 'privacy',
   personalize: 'personalize',
+  // Owner-only AI workflow stages, one queue per provider family so each can be paused/limited separately.
+  aiClaude: 'ai-sub-claude',
+  aiCodex: 'ai-sub-codex',
+  aiApi: 'ai-workflow-api',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

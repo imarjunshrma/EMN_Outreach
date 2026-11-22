@@ -1,5 +1,7 @@
 import { connect, isIP } from 'node:net';
 import { Resolver as DefaultResolver, type Resolver } from 'node:dns/promises';
+import { domainToASCII } from 'node:url';
+import { validateEmailSyntax } from './email-verification.js';
 
 export type SmtpClassification = 'ACCEPTED_BUT_UNCONFIRMED' | 'USER_UNKNOWN' | 'TEMPORARY_FAILURE' | 'GREYLISTED' | 'POLICY_REJECTION' | 'SMTP_UNAVAILABLE' | 'CONNECTION_TIMEOUT' | 'CONNECTION_REFUSED' | 'CONNECTION_RESET' | 'AUTHENTICATION_REQUIRED' | 'INCONCLUSIVE';
 export type SmtpResult = { classification: SmtpClassification; code?: number; enhancedCode?: string; response?: string; mx?: string; durationMs: number; reason?: string };
@@ -25,19 +27,33 @@ function ipv4Public(ip: string) {
   const n = ip.split('.').map(Number);
   if (n.length !== 4 || n.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return false;
   const [a,b] = n;
-  return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168)) || (a === 198 && (b === 18 || b === 19)));
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168)) || (a === 192 && b === 88 && n[2] === 99) || (a === 198 && (b === 18 || b === 19 || b === 51 && n[2] === 100)) || (a === 203 && b === 0 && n[2] === 113));
 }
 
 function ipv6Public(ip: string) {
   if (!ip.includes(':') || ip.startsWith('::ffff:')) return false;
-  const first = parseInt(ip.split(':')[0] || '0', 16);
-  // Only globally routed 2000::/3 addresses; exclude documentation range 2001:db8::/32.
-  return first >= 0x2000 && first <= 0x3fff && !/^2001:db8:/i.test(ip);
+  const halves = ip.toLowerCase().split('::');
+  if (halves.length > 2) return false;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const zeros = 8 - left.length - right.length;
+  if (zeros < 0) return false;
+  const words = [...left, ...Array(zeros).fill('0'), ...right].map((x) => Number.parseInt(x || '0', 16));
+  const [first, second] = words;
+  // Only globally routed 2000::/3; exclude documentation, 6to4 and special 2001::/23 ranges.
+  return first >= 0x2000 && first <= 0x3fff && first !== 0x2002 && first !== 0x3fff && !(first === 0x2001 && (second <= 0x1ff || second === 0x0db8));
 }
 
 export function isPublicMxAddress(ip: string) {
   const family = isIP(ip);
   return family === 4 ? ipv4Public(ip) : family === 6 ? ipv6Public(ip) : false;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('DNS lookup timed out'), { code: 'ETIMEOUT' })), timeoutMs); })]);
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 type Reply = { code: number; text: string };
@@ -97,10 +113,17 @@ async function exchange(mx: string, ip: string, email: string, mailFrom: string,
 /** Opt-in probe; only connects to publicly routable addresses returned for the recipient's MX records. Never sends DATA. */
 export async function probeRecipientSmtp(input: { email: string; domain: string; mx: Array<{ exchange: string; priority: number; addresses: string[] }> }, options: { enabled: boolean; mailFrom?: string; timeoutMs?: number; resolver?: Pick<Resolver, 'resolveMx' | 'resolve4' | 'resolve6'> }): Promise<SmtpResult> {
   if (!options.enabled || !options.mailFrom) return { classification: 'SMTP_UNAVAILABLE', reason: 'SMTP verification is disabled or EMAIL_VERIFY_MAIL_FROM is not configured', durationMs: 0 };
-  const sorted = [...input.mx].sort((a,b) => a.priority-b.priority);
-  for (const record of sorted) for (const address of record.addresses) {
+  const recipient = validateEmailSyntax(input.email);
+  const sender = validateEmailSyntax(options.mailFrom);
+  const domain = domainToASCII(input.domain.trim().replace(/\.$/, '').toLowerCase());
+  if (!recipient.valid || !sender.valid || recipient.domain !== domain) return { classification: 'INCONCLUSIVE', reason: 'SMTP envelope address or recipient domain failed validation', durationMs: 0 };
+  if (!/^[\x00-\x7f]+$/.test(recipient.normalizedEmail.split('@')[0]) || !/^[\x00-\x7f]+$/.test(sender.normalizedEmail.split('@')[0])) return { classification: 'INCONCLUSIVE', reason: 'SMTPUTF8 envelope addresses are not probed by this client', durationMs: 0 };
+  const sorted = [...input.mx].sort((a,b) => a.priority-b.priority).slice(0, 10);
+  let attempts = 0;
+  for (const record of sorted) for (const address of record.addresses.slice(0, 2)) {
     if (!isPublicMxAddress(address)) continue;
-    const result = await exchange(record.exchange, address, input.email, options.mailFrom, options.timeoutMs ?? 5000);
+    if (attempts++ >= 4) return { classification: 'SMTP_UNAVAILABLE', reason: 'No conclusive result after the MX probe limit', durationMs: 0 };
+    const result = await exchange(record.exchange, address, recipient.normalizedEmail, sender.normalizedEmail, options.timeoutMs ?? 5000);
     if (!['SMTP_UNAVAILABLE','CONNECTION_REFUSED','CONNECTION_RESET','CONNECTION_TIMEOUT'].includes(result.classification)) return result;
   }
   return { classification: 'SMTP_UNAVAILABLE', reason: 'No publicly routable MX address could be verified', durationMs: 0 };
@@ -112,15 +135,16 @@ export async function diagnoseSmtpConnectivity(mailFrom: string | undefined, opt
   if (!domain) return { status: 'CONFIGURATION_ERROR' as const, message: 'MAIL FROM must be an email address' };
   const resolver = options.resolver ?? new DefaultResolver();
   const started = Date.now();
+  const timeoutMs = options.timeoutMs ?? 5000;
   try {
-    const records = (await resolver.resolveMx(domain)).filter((x) => x.exchange !== '.').sort((a,b) => a.priority-b.priority).slice(0, 3);
+    const records = (await withTimeout(resolver.resolveMx(domain), timeoutMs)).filter((x) => x.exchange !== '.').sort((a,b) => a.priority-b.priority).slice(0, 3);
     for (const record of records) {
-      const addresses = await Promise.allSettled([resolver.resolve4(record.exchange), resolver.resolve6(record.exchange)]);
+      const addresses = await Promise.allSettled([withTimeout(resolver.resolve4(record.exchange), timeoutMs), withTimeout(resolver.resolve6(record.exchange), timeoutMs)]);
       const ips = addresses.flatMap((x) => x.status === 'fulfilled' ? x.value : []).filter(isPublicMxAddress).slice(0, 2);
       for (const ip of ips) {
         let smtp: SmtpConversation | undefined;
         try {
-          smtp = new SmtpConversation(ip, 25, options.timeoutMs ?? 5000);
+          smtp = new SmtpConversation(ip, 25, timeoutMs);
           const greeting = await smtp.read();
           if (greeting.code !== 220) continue;
           smtp.write('EHLO emn-outreach-os.invalid');
@@ -133,6 +157,6 @@ export async function diagnoseSmtpConnectivity(mailFrom: string | undefined, opt
     return { status: 'UNAVAILABLE' as const, durationMs: Date.now() - started, message: 'No public MX host accepted an SMTP handshake; outbound port 25 may be blocked or the provider may refuse diagnostics' };
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    return { status: 'DNS_ERROR' as const, durationMs: Date.now() - started, message: code === 'ENOTFOUND' ? 'Configured MAIL FROM domain did not resolve' : 'Could not resolve the configured MAIL FROM domain MX records' };
+    return { status: 'DNS_ERROR' as const, durationMs: Date.now() - started, message: code === 'ENOTFOUND' ? 'Configured MAIL FROM domain did not resolve' : code === 'ETIMEOUT' ? 'DNS lookup timed out while resolving the configured MAIL FROM domain' : 'Could not resolve the configured MAIL FROM domain MX records' };
   }
 }

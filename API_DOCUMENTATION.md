@@ -1,6 +1,6 @@
 # EMN Outreach OS — API documentation
 
-Generated from the route registry by `npm run api-docs` (352 operations). The machine-readable
+Generated from the route registry by `npm run api-docs` (395 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -129,6 +129,47 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/ai-studio/documents` | session/API key · ADMIN+ | 60/3600s per workspace | — | — | Add a document (multipart "file" .txt/.md/.csv/.json/.html ≤5 MB, or fields title+text) |
 | PATCH | `/w/:workspaceId/ai-studio/documents/:id` | session/API key · ADMIN+ | — | `title?`: string, `isActive?`: boolean, `text?`: string | — | Rename, (de)activate or replace document text |
 | DELETE | `/w/:workspaceId/ai-studio/documents/:id` | session/API key · ADMIN+ | — | — | — | Delete a document |
+
+## AI subscriptions
+
+| Method | Path | Auth · role | Rate limit | Body | Query | Summary |
+|---|---|---|---|---|---|---|
+| GET | `/ai-subscriptions/access` | session | — | — | — | Whether the signed-in user may use personal AI subscriptions |
+| GET | `/ai-subscriptions/connections` | session | — | — | — | Subscription connection status (no credentials are returned) |
+| POST | `/ai-subscriptions/claude/connect` | session | 10/3600s per user | `token`: string | — | Connect Claude with a token from `claude setup-token` |
+| POST | `/ai-subscriptions/codex/login` | session | 10/3600s per user | — | — | Start Codex ChatGPT sign-in (device code) |
+| GET | `/ai-subscriptions/codex/login` | session | — | — | — | Codex sign-in progress |
+| DELETE | `/ai-subscriptions/codex/login` | session | — | — | — | Cancel a pending Codex sign-in |
+| POST | `/ai-subscriptions/:provider/test` | session | 20/3600s per user | — | — | Test a subscription connection with a minimal real request |
+| PUT | `/ai-subscriptions/:provider/settings` | session | — | `model?`: object, `concurrency?`: integer, `delayMs?`: integer, `paused?`: boolean | — | Model, concurrency, delay and pause for a subscription |
+| DELETE | `/ai-subscriptions/:provider` | session | — | — | — | Disconnect a subscription (removes the stored credential / signs Codex out) |
+| GET | `/ai-workflows` | session | — | — | — | List AI workflows (presets are created on first use) |
+| POST | `/ai-workflows` | session | — | `name`: string, `description?`: object, `stages`: array | — | Create a workflow |
+| GET | `/ai-workflows/:id` | session | — | — | — | Get a workflow |
+| PUT | `/ai-workflows/:id` | session | — | `name`: string, `description?`: object, `stages`: array | — | Update a workflow (stages, order, providers, instructions) |
+| DELETE | `/ai-workflows/:id` | session | — | — | — | Delete a workflow |
+| POST | `/ai-workflows/:id/duplicate` | session | — | — | — | Duplicate a workflow |
+| POST | `/ai-workflows/:id/activate` | session | — | — | — | Make this the workflow used by "Generate with selected workflow" |
+| GET | `/ai-stage-templates` | session | — | — | — | Saved stage templates |
+| POST | `/ai-stage-templates` | session | — | `name`: string, `stage`: object | — | Save a stage as a reusable template |
+| DELETE | `/ai-stage-templates/:id` | session | — | — | — | Delete a stage template |
+| GET | `/ai-playbook` | session | — | — | — | Current writing playbook and version history |
+| GET | `/ai-playbook/versions/:id` | session | — | — | — | One playbook version |
+| POST | `/ai-playbook` | session | — | `content`: string, `note?`: object | — | Save the playbook as a new version |
+| POST | `/ai-playbook/versions/:id/restore` | session | — | — | — | Restore a previous playbook version (creates a new version) |
+| POST | `/ai-queue/pause` | session | — | — | — | Pause all AI workflow queues |
+| POST | `/ai-queue/resume` | session | — | — | — | Resume all AI workflow queues |
+| POST | `/w/:workspaceId/ai-runs` | session/API key · MEMBER+ | 120/3600s per user | `leadId`: string, `campaignId?`: object, `mode?`: workflow\|claude\|codex, `workflowId?`: object | — | Generate emails for a prospect with a workflow, Claude or Codex (queued; never sends) |
+| GET | `/w/:workspaceId/ai-runs` | session/API key · VIEWER+ | — | — | `page?`: integer, `pageSize?`: integer, `leadId?`: string, `status?`: QUEUED\|RUNNING\|SUCCEEDED\|FAILED\|PAUSED\|PAUSED_LIMIT… | Generation history |
+| GET | `/w/:workspaceId/ai-runs/:id` | session/API key · VIEWER+ | — | — | — | Run detail: research, variants, stages and execution log |
+| POST | `/w/:workspaceId/ai-runs/:id/pause` | session/API key · VIEWER+ | — | — | — | Pause a run |
+| POST | `/w/:workspaceId/ai-runs/:id/resume` | session/API key · VIEWER+ | — | `stageProvider?`: CLAUDE_SUBSCRIPTION\|CODEX_SUBSCRIPTION\|API:OPENAI\|API:ANTHROPIC\|API:GOOGLE\|API:OPENROUTER…, `autoResume?`: boolean | — | Resume / retry a run, optionally choosing another provider for the paused stage |
+| POST | `/w/:workspaceId/ai-runs/:id/cancel` | session/API key · VIEWER+ | — | — | — | Cancel a run |
+| PUT | `/w/:workspaceId/ai-runs/:id/variants/:index` | session/API key · VIEWER+ | — | `subject`: string, `body`: string | — | Edit a variant subject/body |
+| POST | `/w/:workspaceId/ai-runs/:id/variants/:index/select` | session/API key · VIEWER+ | — | — | — | Select the preferred variant |
+| POST | `/w/:workspaceId/ai-runs/:id/variants/:index/regenerate` | session/API key · VIEWER+ | — | — | — | Regenerate one variant (queued) |
+| POST | `/w/:workspaceId/ai-runs/:id/draft` | session/API key · VIEWER+ | — | `index?`: integer | — | Save the selected variant as a draft (nothing is sent) |
+| GET | `/w/:workspaceId/ai-queue` | session/API key · VIEWER+ | — | — | — | AI generation queue dashboard |
 
 ## Analytics
 
@@ -303,15 +344,22 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/enrichment/find-email` | session/API key · MEMBER+ | 300/3600s per workspace | `firstName`: string, `lastName`: string, `domain`: string | — | Email discovery waterfall (name + company domain) |
 | GET | `/w/:workspaceId/enrichment/stats` | session/API key · VIEWER+ | — | — | `days?`: integer | Provider comparison: checks, definitive rate, credits |
 | GET | `/w/:workspaceId/leads/:id/verifications` | session/API key · VIEWER+ | — | — | — | Verification / enrichment history for a lead |
-| POST | `/w/:workspaceId/email-verification/verify` | session/API key · MEMBER+ | 60/3600s per workspace | `email`: string, `leadId?`: string | — | Queue first-party syntax, disposable, role, free-provider and DNS checks (no SMTP probe) |
-| POST | `/w/:workspaceId/email-verification/bulk` | session/API key · MEMBER+ | 10/3600s per workspace | `emails`: array | — | Queue deduplicated first-party DNS verification for an email list |
+| POST | `/w/:workspaceId/email-verification/verify` | session/API key · MEMBER+ | 60/3600s per workspace | `email`: string, `leadId?`: string | — | Queue first-party syntax, disposable, role, free-provider and DNS checks; optional SMTP RCPT probing when enabled (never sends email) |
+| POST | `/w/:workspaceId/email-verification/bulk` | session/API key · MEMBER+ | 10/3600s per workspace | `emails`: array | — | Queue deduplicated first-party verification for an email list; optional SMTP RCPT probing when enabled (never sends email) |
+| POST | `/w/:workspaceId/email-verification/bulk.csv` | session/API key · MANAGER+ | 5/3600s per workspace | `emailColumn?`: string, `hasHeader?`: true\|false | — | Upload a bounded CSV for streaming background verification; maximum 10 MB |
 | GET | `/w/:workspaceId/email-verification/batches` | session/API key · VIEWER+ | — | — | `page?`: integer, `pageSize?`: integer | List first-party verification batches |
-| GET | `/w/:workspaceId/email-verification/batches/:id` | session/API key · VIEWER+ | — | — | — | Get tenant-scoped verification batch and results |
+| GET | `/w/:workspaceId/email-verification/batches/:id` | session/API key · VIEWER+ | — | — | `page?`: integer, `pageSize?`: integer | Get tenant-scoped paginated verification batch results |
+| GET | `/w/:workspaceId/email-verification/batches/:id/export.csv` | session/API key · VIEWER+ | — | — | — | Stream a tenant-scoped CSV export with verification columns and spreadsheet formula protection |
+| POST | `/w/:workspaceId/email-verification/batches/:id/pause` | session/API key · MANAGER+ | — | — | — | Pause a processing batch; active checks may finish |
+| POST | `/w/:workspaceId/email-verification/batches/:id/resume` | session/API key · MANAGER+ | — | — | — | Resume queued rows of a paused verification batch |
+| POST | `/w/:workspaceId/email-verification/batches/:id/retry` | session/API key · MANAGER+ | — | — | — | Retry failed rows in a verification batch |
+| POST | `/w/:workspaceId/email-verification/batches/:id/cancel` | session/API key · MANAGER+ | — | — | — | Cancel pending rows in a verification batch |
 | GET | `/w/:workspaceId/email-verification/datasets` | session/API key · VIEWER+ | — | — | — | List shared disposable dataset metadata and workspace overrides |
 | POST | `/w/:workspaceId/email-verification/datasets/refresh` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Queue refresh from the pinned public disposable-domain source |
 | POST | `/w/:workspaceId/email-verification/domain-overrides` | session/API key · ADMIN+ | — | `domain`: string, `disposable`: boolean | — | Add or exclude a domain from this workspace disposable-domain classification |
 | DELETE | `/w/:workspaceId/email-verification/domain-overrides/:id` | session/API key · ADMIN+ | — | — | — | Remove a workspace disposable-domain override |
 | POST | `/w/:workspaceId/email-verification/role-patterns` | session/API key · ADMIN+ | — | `localPart`: string, `enabled?`: boolean | — | Add or disable a workspace role-based local-part pattern |
+| GET | `/w/:workspaceId/email-verification/history` | session/API key · VIEWER+ | — | — | `email?`: string, `status?`: UNVERIFIED\|VALID\|INVALID\|RISKY\|CATCH_ALL\|UNKNOWN, `page?`: integer, `pageSize?`: integer | Search tenant-scoped first-party verification history |
 | GET | `/w/:workspaceId/email-verification/:id` | session/API key · VIEWER+ | — | — | — | Get tenant-scoped first-party verification result |
 | POST | `/w/:workspaceId/email-verification/diagnostics` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Admin-only outbound SMTP port 25 diagnostic to the configured MAIL FROM domain MX; sends no recipient commands or email |
 

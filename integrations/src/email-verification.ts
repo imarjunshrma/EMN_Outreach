@@ -40,6 +40,8 @@ export function validateEmailSyntax(input: string): { valid: boolean; normalized
   const sourceDomain = normalizedEmail.slice(at + 1);
   const domain = asciiDomain(sourceDomain);
   if (!domain || domain.length > 253 || !domain.includes('.')) return { valid: false, normalizedEmail, domain, reason: 'Domain is not a valid fully qualified domain name' };
+  if (Buffer.byteLength(local, 'utf8') > 64) return { valid: false, normalizedEmail, domain, reason: 'Local part exceeds the 64-octet SMTP limit' };
+  if (Buffer.byteLength(`${local}@${domain}`, 'utf8') > 254) return { valid: false, normalizedEmail, domain, reason: 'Normalized email exceeds the 254-octet SMTP limit' };
   if (local.startsWith('.') || local.endsWith('.') || local.includes('..') || !/^[\p{L}\p{N}!#$%&'*+/=?^_`{|}~.-]+$/u.test(local)) return { valid: false, normalizedEmail, domain, reason: 'Local part contains invalid characters or dot placement' };
   if (domain.split('.').some((label) => !label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))) return { valid: false, normalizedEmail, domain, reason: 'Domain contains an invalid label' };
   // SMTPUTF8 local-parts are syntactically possible but need SMTPUTF8 support, which is not probed here.

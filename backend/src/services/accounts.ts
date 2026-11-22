@@ -10,7 +10,7 @@ import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { ProviderError } from '../../../integrations/src/http.js';
 import type { AuthHandle, ConnectionCheck, SmtpImapConfig } from '../../../integrations/src/email/types.js';
-import { decryptSecret, encryptSecret } from './workspace.js';
+import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
 import { SendingWindowSchema, startOfDayIn } from '../../../shared/src/schedule.js';
 
 type OAuthProvider = 'GMAIL' | 'MICROSOFT';
@@ -21,8 +21,10 @@ export const AccountWindowSchema = SendingWindowSchema.extend({ enabled: z.boole
 // the service boundary; API callers receive only the mailbox's public metadata.
 function publicAccount<T extends { connectionConfig: unknown }>(account: T) {
   const { connectionConfig: _privateConfig, ...safe } = account;
-  const connectionHealth = (_privateConfig as { connectionHealth?: unknown } | null)?.connectionHealth ?? null;
-  return { ...safe, connectionHealth };
+  const config = _privateConfig as { connectionHealth?: unknown; readiness?: unknown } | null;
+  const connectionHealth = config?.connectionHealth ?? null;
+  const readiness = config?.readiness ?? null;
+  return { ...safe, connectionHealth, readiness };
 }
 
 function redirectUri(provider: OAuthProvider) {
@@ -113,9 +115,10 @@ export async function connectSmtp(workspaceId: string, input: z.infer<typeof Smt
     throw new AppError('PROVIDER_ERROR', safeMessage, 400, connectionCheck ? { connection: connectionCheck } : undefined);
   }
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-  const priorAccount = await db().emailAccount.findUnique({ where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } }, select: { id: true, status: true, statusReason: true } });
+  const priorAccount = await db().emailAccount.findUnique({ where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } }, select: { id: true, status: true, statusReason: true, connectionConfig: true } });
   const verifiedHealth = connectionCheck ?? { smtp: { ok: true, error: null }, imap: { ok: true, error: null } };
-  const persistedConfig = { ...config, username: encryptSecret(smtpUsername), smtpUsername: encryptSecret(smtpUsername), imapUsername: encryptSecret(imapUsername), usernameEncrypted: true, smtpUsernameEncrypted: true, imapUsernameEncrypted: true, smtpPasswordEncrypted: encryptSecret(smtpPassword), imapPasswordEncrypted: encryptSecret(imapPassword), connectionHealth: { ...verifiedHealth, checkedAt: new Date().toISOString() } } as unknown as Prisma.InputJsonValue;
+  const priorReadiness = (priorAccount?.connectionConfig as { readiness?: unknown } | null)?.readiness;
+  const persistedConfig = { ...config, username: encryptSecret(smtpUsername), smtpUsername: encryptSecret(smtpUsername), imapUsername: encryptSecret(imapUsername), usernameEncrypted: true, smtpUsernameEncrypted: true, imapUsernameEncrypted: true, smtpPasswordEncrypted: encryptSecret(smtpPassword), imapPasswordEncrypted: encryptSecret(imapPassword), connectionHealth: { ...verifiedHealth, checkedAt: new Date().toISOString() }, ...(priorReadiness ? { readiness: priorReadiness } : {}) } as unknown as Prisma.InputJsonValue;
   const domainName = email.split('@')[1];
   const domain = await db().domain.upsert({ where: { workspaceId_name: { workspaceId, name: domainName } }, update: {}, create: { workspaceId, name: domainName } });
   const account = await db().emailAccount.upsert({
@@ -214,6 +217,7 @@ export const AccountUpdateSchema = z.object({
   dailySendLimit: z.number().int().min(1).max(2000).optional(),
   minSecondsBetweenSends: z.number().int().min(30).max(3600).optional(),
   sendingWindow: AccountWindowSchema.optional(),
+  readiness: z.object({ enabled: z.boolean(), initialDailyCap: z.number().int().min(1).max(500).default(5), dailyIncrease: z.number().int().min(1).max(500).default(5), reviewIntervalDays: z.number().int().min(3).max(30).default(7) }).optional(),
 });
 
 export async function updateAccount(workspaceId: string, id: string, input: z.infer<typeof AccountUpdateSchema>, actor: Actor) {
@@ -222,9 +226,81 @@ export async function updateAccount(workspaceId: string, id: string, input: z.in
   // Hard ceilings from provider published limits; workspace limits should be far lower.
   const ceiling = a.provider === 'GMAIL' ? 2000 : a.provider === 'MICROSOFT' ? 10000 : 2000;
   if (input.dailySendLimit && input.dailySendLimit > ceiling) throw new AppError('VALIDATION_FAILED', `Daily limit cannot exceed the provider maximum (${ceiling})`, 400);
-  const updated = await db().emailAccount.update({ where: { id }, data: { ...input, sendingWindow: input.sendingWindow as Prisma.InputJsonValue | undefined } });
+  const { readiness, ...fields } = input;
+  const config = (a.connectionConfig ?? {}) as Record<string, unknown>;
+  let connectionConfig: Prisma.InputJsonValue | undefined;
+  if (readiness) {
+    const previous = config.readiness as { enabled?: boolean; currentDailyCap?: number; startedAt?: string; lastProgressAt?: string | null; lastReviewedAt?: string | null } | undefined;
+    const enabling = readiness.enabled && !previous?.enabled;
+    config.readiness = {
+      enabled: readiness.enabled,
+      initialDailyCap: readiness.initialDailyCap,
+      currentDailyCap: readiness.enabled ? Math.min(previous?.currentDailyCap ?? readiness.initialDailyCap, fields.dailySendLimit ?? a.dailySendLimit) : null,
+      dailyIncrease: readiness.dailyIncrease,
+      reviewIntervalDays: readiness.reviewIntervalDays,
+      startedAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.startedAt ?? new Date().toISOString()) : null,
+      lastProgressAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.lastProgressAt ?? null) : null,
+      lastReviewedAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.lastReviewedAt ?? null) : null,
+      status: readiness.enabled ? 'OBSERVING' : 'DISABLED',
+      holdReason: readiness.enabled ? null : null,
+    };
+    connectionConfig = config as Prisma.InputJsonValue;
+  }
+  const updated = await db().emailAccount.update({ where: { id }, data: { ...fields, sendingWindow: fields.sendingWindow as Prisma.InputJsonValue | undefined, ...(connectionConfig ? { connectionConfig } : {}) } });
   await audit(workspaceId, actor, 'email_account.updated', { type: 'email_account', id }, { fields: Object.keys(input) });
   return publicAccount(updated);
+}
+
+/** Increase actual-send capacity only after a stable observation period with real volume and healthy signals. */
+export async function advanceMailboxReadiness() {
+  const workspaces = await db().workspace.findMany({ select: { id: true, settings: true } });
+  const now = new Date();
+  for (const workspace of workspaces) {
+    const settings = readSettings(workspace.settings);
+    if (!settings.mailboxReadinessManagement) continue;
+    const accounts = await db().emailAccount.findMany({ where: { workspaceId: workspace.id }, include: { domain: { select: { healthStatus: true } } } });
+    for (const account of accounts) {
+      const release = await acquireLock(`mailbox-readiness:${account.id}`, 10_000);
+      if (!release) continue;
+      try {
+        const config = account.connectionConfig as { readiness?: Record<string, unknown> } | null;
+        const state = config?.readiness;
+        if (!state || state.enabled !== true || account.status !== 'CONNECTED') continue;
+        const cap = Number(state.currentDailyCap ?? state.initialDailyCap ?? 5);
+        const intervalDays = Number(state.reviewIntervalDays ?? 7);
+        const lastProgress = new Date(String(state.lastProgressAt ?? state.startedAt ?? now.toISOString()));
+        if (!Number.isFinite(lastProgress.getTime()) || now.getTime() - lastProgress.getTime() < intervalDays * 86_400_000) continue;
+        const events = await db().emailEvent.findMany({ where: { workspaceId: workspace.id, emailAccountId: account.id, occurredAt: { gte: lastProgress }, type: { in: ['SENT', 'BOUNCED_HARD', 'BOUNCED_SOFT', 'COMPLAINED'] } }, select: { type: true, occurredAt: true }, take: 5000 });
+        const sent = events.filter((event) => event.type === 'SENT');
+        const hard = events.filter((event) => event.type === 'BOUNCED_HARD').length;
+        const soft = events.filter((event) => event.type === 'BOUNCED_SOFT').length;
+        const complaints = events.filter((event) => event.type === 'COMPLAINED').length;
+        const sentDays = new Set(sent.map((event) => event.occurredAt.toISOString().slice(0, 10))).size;
+        const hardRate = sent.length ? 100 * hard / sent.length : 0;
+        const abnormalDomain = !account.domain || !/healthy|configured|verified|ok/i.test(account.domain.healthStatus ?? '');
+        const holdReason = abnormalDomain ? 'Domain authentication needs attention or has not been checked'
+          : complaints > 0 ? 'Complaint signal observed; manual review required'
+          : sentDays < Math.min(5, intervalDays) ? 'Not enough days with real sends to evaluate progression'
+          : sent.length < Math.max(5, cap * 3) ? 'Not enough actual sends at the current cap to evaluate progression'
+          : hardRate > (settings.mailboxAutoPauseBounceRatePct ?? 5) ? 'Hard-bounce rate exceeds the workspace threshold'
+          : sent.length > 0 && settings.mailboxReadinessSoftBounceRatePct !== null && 100 * soft / sent.length > settings.mailboxReadinessSoftBounceRatePct ? `Soft-bounce rate exceeds the ${settings.mailboxReadinessSoftBounceRatePct}% readiness threshold`
+          : null;
+        const nextState = holdReason
+          ? { ...state, status: 'HOLD', holdReason, lastReviewedAt: now.toISOString() }
+          : { ...state, currentDailyCap: Math.min(account.dailySendLimit, cap + Number(state.dailyIncrease ?? 5)), status: cap + Number(state.dailyIncrease ?? 5) >= account.dailySendLimit ? 'AT_CONFIGURED_LIMIT' : 'PROGRESSED', holdReason: null, lastProgressAt: now.toISOString(), lastReviewedAt: now.toISOString() };
+        await db().emailAccount.update({ where: { id: account.id }, data: { connectionConfig: { ...config, readiness: nextState } as Prisma.InputJsonValue } });
+        if (!holdReason && nextState.status === 'PROGRESSED') {
+          const effectiveCap = Number((nextState as Record<string, unknown>).currentDailyCap ?? cap);
+          await audit(workspace.id, { type: 'WORKER', userId: null }, 'email_account.readiness_increased', { type: 'email_account', id: account.id }, { previousDailyCap: cap, currentDailyCap: effectiveCap, sentInPeriod: sent.length, hardBounceRatePct: +hardRate.toFixed(2) });
+          await notifyWorkspace(workspace.id, 'ADMIN', { type: 'account.readiness_increased', title: 'Mailbox sending cap increased', body: `${account.emailAddress} passed its readiness review using actual sending and health history.`, link: '/mailbox-health' });
+        } else if (holdReason && (state.holdReason !== holdReason)) {
+          await notifyWorkspace(workspace.id, 'ADMIN', { type: 'account.readiness_hold', title: 'Mailbox readiness progression paused', body: `${account.emailAddress}: ${holdReason}. Review Mailbox Health before increasing volume.`, link: '/mailbox-health' });
+        }
+      } catch (e) {
+        logger.warn({ err: e, workspaceId: workspace.id, emailAccountId: account.id }, 'mailbox readiness review failed');
+      } finally { await release(); }
+    }
+  }
 }
 
 export async function setPaused(workspaceId: string, id: string, paused: boolean, actor: Actor) {

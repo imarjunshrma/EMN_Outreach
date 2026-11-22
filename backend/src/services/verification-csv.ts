@@ -68,12 +68,19 @@ export async function processVerificationCsvBatch(workspaceId: string, batchId: 
         const details = previous ? { ...(previous.details as Record<string, unknown>), originalRow: r.row, sourceRow: r.sourceRow } : { state: 'QUEUED', originalRow: r.row, sourceRow: r.sourceRow };
         return { workspaceId, batchId, email: r.email, provider: 'first-party-dns', result: previous?.result ?? 'UNKNOWN', rawResult: previous?.rawResult ?? 'queued', details: details as Prisma.InputJsonValue, expiresAt: previous?.expiresAt ?? null };
       });
-      const inserted = await db().emailVerification.createMany({ data, skipDuplicates: true });
       const cacheHits = fresh.filter((r) => cached.has(r.email)).length;
-      await db().emailVerificationBatch.update({ where: { id: batchId }, data: { total: { increment: inserted.count }, processed: { increment: Math.min(inserted.count, cacheHits) }, status: 'INGESTING', emailColumn: String(emailIndex), csvHeaders: headers as unknown as Prisma.InputJsonValue } });
-      const current = await db().emailVerification.findMany({ where: { workspaceId, batchId, email: { in: fresh.map((r) => r.email) }, rawResult: 'queued' }, select: { id: true } });
-      await Promise.all(current.map((v) => enqueue(QUEUES.verify, 'verify.address', { workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } })));
+      const inserted = await db().$transaction(async (tx) => {
+        const state = await tx.$queryRaw<Array<{ status: string }>>`SELECT "status" FROM "EmailVerificationBatch" WHERE "id" = ${batchId}::uuid AND "workspaceId" = ${workspaceId}::uuid FOR UPDATE`;
+        if (state[0]?.status !== 'INGESTING') throw new Error('CSV batch is no longer ingesting');
+        const created = await tx.emailVerification.createMany({ data, skipDuplicates: true });
+        await tx.emailVerificationBatch.update({ where: { id: batchId }, data: { total: { increment: created.count }, processed: { increment: Math.min(created.count, cacheHits) }, emailColumn: String(emailIndex), csvHeaders: headers as unknown as Prisma.InputJsonValue } });
+        return created;
+      });
     }
+    // Also enqueue already-persisted queued rows. If a prior import attempt crashed after
+    // inserting rows or partially enqueueing jobs, a BullMQ retry must be able to recover them.
+    const pending = await db().emailVerification.findMany({ where: { workspaceId, batchId, email: { in: unique.map((r) => r.email) }, rawResult: 'queued' }, select: { id: true } });
+    await Promise.all(pending.map((v) => enqueue(QUEUES.verify, 'verify.address', { workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } })));
     chunk = [];
   };
 

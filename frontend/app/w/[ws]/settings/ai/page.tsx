@@ -1,6 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { SubscriptionCards } from '@/components/ai/subscription-cards';
+import { WorkflowBuilder } from '@/components/ai/workflow-builder';
+import { PlaybookEditor } from '@/components/ai/playbook-editor';
+import { AiQueue } from '@/components/ai/ai-queue';
+import { useAiOwner } from '@/components/ai/hooks';
 import { qs, type Paged } from '@/lib/api';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fmtUsd } from '@/lib/format';
@@ -35,17 +41,27 @@ function modelChoices(models: string[] | undefined, current: string) {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export default function AiSettings() {
-  const [tab, setTab] = useState('providers');
+export default function AiSettings() { return <Suspense><AiSettingsInner /></Suspense>; }
+
+function AiSettingsInner() {
+  const params = useSearchParams();
+  const owner = useAiOwner();
+  const [tab, setTab] = useState(params.get('tab') ?? 'providers');
+  const ownerTabs = owner.allowed ? [{ id: 'workflows', label: 'AI Workflow Builder' }, { id: 'playbook', label: 'Writing Playbook' }, { id: 'queue', label: 'AI queue' }] : [];
+  const ownerOnly = ['workflows', 'playbook', 'queue'];
+  const shown = ownerOnly.includes(tab) && !owner.allowed ? 'providers' : tab;
   return (
     <>
-      <PageHeader title="AI models & prompts" subtitle="Connect hosted or local language models. Keys are encrypted at rest; route each task and configure fallbacks." />
-      <Tabs active={tab} onChange={setTab} tabs={[{ id: 'providers', label: 'Providers & keys' }, { id: 'routes', label: 'Model routing' }, { id: 'prompts', label: 'Prompt versions' }, { id: 'logs', label: 'AI response logs' }, { id: 'prices', label: 'Prices' }]} />
-      {tab === 'providers' && <Providers />}
-      {tab === 'routes' && <Routes />}
-      {tab === 'prompts' && <Prompts />}
-      {tab === 'logs' && <Logs />}
-      {tab === 'prices' && <Prices />}
+      <PageHeader title="AI providers" subtitle="Connect hosted or local language models. Keys are encrypted at rest; route each task and configure fallbacks." />
+      <Tabs active={shown} onChange={setTab} tabs={[{ id: 'providers', label: 'Providers & keys' }, ...ownerTabs, { id: 'routes', label: 'Model routing' }, { id: 'prompts', label: 'Prompt versions' }, { id: 'logs', label: 'AI response logs' }, { id: 'prices', label: 'Prices' }]} />
+      {shown === 'providers' && <>{owner.allowed && <SubscriptionCards />}{owner.allowed && <h2 className="mb-3 text-base font-semibold text-ink">API providers</h2>}<Providers /></>}
+      {shown === 'workflows' && owner.allowed && <WorkflowBuilder />}
+      {shown === 'playbook' && owner.allowed && <PlaybookEditor />}
+      {shown === 'queue' && owner.allowed && <AiQueue />}
+      {shown === 'routes' && <Routes />}
+      {shown === 'prompts' && <Prompts />}
+      {shown === 'logs' && <Logs />}
+      {shown === 'prices' && <Prices />}
     </>
   );
 }

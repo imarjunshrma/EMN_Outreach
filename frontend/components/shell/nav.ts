@@ -56,6 +56,8 @@ export const NAV: NavGroup[] = [
   ] },
   { group: 'Settings', items: [
     { href: '/settings/general', label: 'Workspace', icon: Settings, keywords: 'sender address' },
+    { href: '/settings/outreach', label: 'Outreach automation', icon: Send, minRole: 'ADMIN', keywords: 'emergency pause sending followups limits scheduler' },
+    { href: '/settings/email-verification', label: 'Email verification', icon: MailCheck, minRole: 'ADMIN', keywords: 'first-party unknown disposable freshness smtp' },
     { href: '/settings/team', label: 'Team', icon: UsersRound, keywords: 'members invite' },
     { href: '/settings/policies', label: 'Security & AI policies', icon: ShieldCheck, minRole: 'ADMIN', keywords: '2fa reply mode' },
     { href: '/settings/ai', label: 'AI providers', icon: Cpu, minRole: 'ADMIN', keywords: 'openai anthropic keys prompts' },

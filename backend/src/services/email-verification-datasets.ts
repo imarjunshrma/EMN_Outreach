@@ -10,6 +10,7 @@ import { AppError } from '../core/errors.js';
 const SOURCE = 'disposable-email-domains';
 const SOURCE_URL = 'https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/main/disposable_email_blocklist.conf';
 const cache = new Map<string, { expiresAt: number; dictionaries: VerificationDictionaries }>();
+const loading = new Map<string, Promise<VerificationDictionaries>>();
 
 function normalizeDomain(input: string) {
   const domain = domainToASCII(input.trim().replace(/^@/, '').replace(/\.$/, '').toLowerCase());
@@ -20,20 +21,34 @@ function normalizeDomain(input: string) {
 export async function verificationDictionaries(workspaceId: string): Promise<VerificationDictionaries> {
   const cached = cache.get(workspaceId);
   if (cached && cached.expiresAt > Date.now()) return cached.dictionaries;
-  const [domains, overrides, patterns] = await Promise.all([
-    db().disposableEmailDomain.findMany({ where: { source: SOURCE }, select: { domain: true } }),
-    db().emailVerificationDomainOverride.findMany({ where: { workspaceId } }),
-    db().emailVerificationRolePattern.findMany({ where: { workspaceId, enabled: true }, select: { localPart: true } }),
-  ]);
-  const dataset = await db().emailVerificationDataset.findUnique({ where: { key: SOURCE }, select: { checksum: true, lastUpdated: true } });
-  const disposableDomains = new Set([...DISPOSABLE_DOMAINS, ...domains.map((d) => d.domain)]);
-  const disposableExclusions = new Set<string>();
-  for (const o of overrides) (o.disposable ? disposableDomains : disposableExclusions).add(o.domain);
-  const roleLocals = new Set(patterns.map((p) => p.localPart));
-  const datasetVersion = createHash('sha256').update(JSON.stringify({ checksum: dataset?.checksum ?? 'bundled-fallback', updated: dataset?.lastUpdated?.toISOString() ?? null, overrides: overrides.map((o) => [o.domain,o.disposable]).sort(), roles: patterns.map((p) => p.localPart).sort(), smtp: process.env.EMAIL_VERIFY_SMTP_ENABLED === 'true', catchAll: process.env.EMAIL_VERIFY_CATCH_ALL_ENABLED === 'true' })).digest('hex');
-  const dictionaries = { disposableDomains, disposableExclusions, roleLocals, datasetVersion };
-  cache.set(workspaceId, { expiresAt: Date.now() + 300_000, dictionaries });
-  return dictionaries;
+  const inFlight = loading.get(workspaceId);
+  if (inFlight) return inFlight;
+  const pending = (async () => {
+    const [domains, overrides, patterns] = await Promise.all([
+      db().disposableEmailDomain.findMany({ where: { source: SOURCE }, select: { domain: true } }),
+      db().emailVerificationDomainOverride.findMany({ where: { workspaceId } }),
+      db().emailVerificationRolePattern.findMany({ where: { workspaceId, enabled: true }, select: { localPart: true } }),
+    ]);
+    const dataset = await db().emailVerificationDataset.findUnique({ where: { key: SOURCE }, select: { checksum: true, lastUpdated: true } });
+    const disposableDomains = new Set([...DISPOSABLE_DOMAINS, ...domains.map((d) => d.domain)]);
+    const disposableExclusions = new Set<string>();
+    for (const o of overrides) (o.disposable ? disposableDomains : disposableExclusions).add(o.domain);
+    const roleLocals = new Set(patterns.map((p) => p.localPart));
+    const datasetVersion = createHash('sha256').update(JSON.stringify({
+      checksum: dataset?.checksum ?? 'bundled-fallback',
+      updated: dataset?.lastUpdated?.toISOString() ?? null,
+      overrides: overrides.map((o) => [o.domain, o.disposable]).sort(),
+      roles: patterns.map((p) => p.localPart).sort(),
+      smtp: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_SMTP_ENABLED ?? ''),
+      catchAll: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_CATCH_ALL_ENABLED ?? ''),
+    })).digest('hex');
+    const dictionaries = { disposableDomains, disposableExclusions, roleLocals, datasetVersion };
+    cache.set(workspaceId, { expiresAt: Date.now() + 300_000, dictionaries });
+    return dictionaries;
+  })();
+  loading.set(workspaceId, pending);
+  try { return await pending; }
+  finally { if (loading.get(workspaceId) === pending) loading.delete(workspaceId); }
 }
 
 export async function listVerificationDatasets(workspaceId: string) {

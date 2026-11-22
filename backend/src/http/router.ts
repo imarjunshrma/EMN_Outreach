@@ -47,6 +47,8 @@ export interface RouteDef<B = unknown, Q = unknown> {
   allowWhenInactive?: boolean;
   /** Platform routes only: reachable by staff who have not turned on 2FA yet (so the console can tell them to). */
   allowWithoutMfa?: boolean;
+  /** Personal AI subscriptions: only the configured owner account (AI_SUBSCRIPTION_OWNER_EMAILS). Everyone else gets 404; API keys never. */
+  aiOwnerOnly?: boolean;
   body?: ZodType<B>;
   query?: ZodType<Q>;
   /** Optional parser run after authentication/tenant authorization and before body validation. */
@@ -112,6 +114,7 @@ export function mountRoutes(app: Express) {
         // attribution grant access to account, workspace-creation, or platform
         // administrator endpoints that require a user session.
         if (def.auth === 'user' && auth?.apiKeyWorkspaceId) throw Forbidden('API keys cannot access user-level endpoints');
+        let viaSupport = false;
         if (def.auth === 'workspace') {
           const wsId = String(req.params.workspaceId ?? '');
           const membership = res.locals.resolveMembership ? await res.locals.resolveMembership(wsId) : null;
@@ -126,6 +129,7 @@ export function mountRoutes(app: Express) {
           const mutating = def.method !== 'get';
           if (access === 'closed' && !def.allowWhenInactive) throw new AppError('TENANT_INACTIVE', `This organization is ${String(membership.orgStatus).toLowerCase().replace(/_/g, ' ')}`, 403, { status: membership.orgStatus });
           if (access === 'readonly' && mutating && !def.allowWhenInactive) throw new AppError('TENANT_INACTIVE', `This organization is ${String(membership.orgStatus).toLowerCase()} — it is read-only until reactivated. Billing and exports remain available.`, 403, { status: membership.orgStatus });
+          viaSupport = membership.via === 'support';
           if (membership.via === 'support') {
             if (mutating) throw new AppError('FORBIDDEN', 'Support access is read-only', 403);
             await platformAudit({ actorUserId: auth?.userId ?? null, action: 'support.read', organizationId: membership.organizationId, targetType: 'route', targetId: `${def.method.toUpperCase()} ${req.path}`.slice(0, 300), metadata: { grantId: membership.supportGrantId }, ip: req.ip });
@@ -156,6 +160,12 @@ export function mountRoutes(app: Express) {
           const mfaOptional = process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production';
           if (!res.locals.mfaEnabled && !def.allowWithoutMfa && !mfaOptional) throw new AppError('MFA_REQUIRED', 'Platform staff must turn on two-factor authentication (My account → Security) before using the platform console.', 403, { platform: true });
           ctx.platformRole = pr;
+        }
+
+        if (def.aiOwnerOnly) {
+          if (!auth?.userId || auth.apiKeyWorkspaceId || viaSupport) throw new AppError('NOT_FOUND', 'Not found', 404);
+          const { isAiSubscriptionOwner } = await import('../services/ai-subscriptions.js');
+          if (!(await isAiSubscriptionOwner(auth.userId))) throw new AppError('NOT_FOUND', 'Not found', 404);
         }
 
         if (def.prepare) await def.prepare(ctx as Ctx<any, any>);

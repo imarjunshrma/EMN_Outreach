@@ -5,6 +5,7 @@ import { AppError, NotFound } from '../core/errors.js';
 import { audit, publish, type Actor } from '../core/audit.js';
 import { evaluateCompliance, type LawfulBasisValue } from '../../../shared/src/compliance.js';
 import { verifyPayload } from '../core/crypto.js';
+import type { WorkspaceSettings } from './workspace.js';
 
 // Suppression list, unsubscribe processing and country rules.
 // Technical safeguards only — not legal advice.
@@ -44,6 +45,23 @@ export async function removeSuppression(workspaceId: string, id: string, reason:
   }
   await db().suppressionEntry.delete({ where: { id } });
   await audit(workspaceId, actor, 'suppression.removed', { type: 'suppression', id }, { value: e.value, previousReason: e.reason, reason });
+}
+
+/** Pure policy portion of campaign email verification; useful for unit checks and previews. */
+export function emailVerificationPolicyReasons(input: {
+  status: string; verifiedAt?: Date | null; disposable?: boolean; roleBased?: boolean;
+  rawResult?: string | null;
+}, settings: Pick<WorkspaceSettings, 'verificationFreshnessDays' | 'verificationUnknownPolicy' | 'verificationDisposablePolicy' | 'verificationRolePolicy'>, now = Date.now()) {
+  const reasons: string[] = [];
+  if (input.status === 'INVALID') reasons.push('email verified as invalid');
+  if (settings.verificationDisposablePolicy === 'block' && (input.disposable || input.rawResult?.toLowerCase().includes('disposable domain'))) reasons.push('email uses a known disposable domain');
+  const allowed = ['VALID', 'CATCH_ALL'].includes(input.status)
+    || (input.status === 'UNKNOWN' && settings.verificationUnknownPolicy === 'allow')
+    || (input.status === 'ROLE_BASED' && settings.verificationRolePolicy === 'allow');
+  if (!allowed && input.status !== 'INVALID') reasons.push(`email not eligible for sending (${input.status})`);
+  if (input.roleBased && settings.verificationRolePolicy !== 'allow') reasons.push(`role-based address policy is ${settings.verificationRolePolicy}`);
+  if (allowed && (!input.verifiedAt || now - input.verifiedAt.getTime() > settings.verificationFreshnessDays * 86_400_000)) reasons.push('email verification is stale or has no verification timestamp');
+  return reasons;
 }
 
 export async function listSuppressions(workspaceId: string, q: { page: number; pageSize: number; q?: string; reason?: string }) {
@@ -122,16 +140,19 @@ export async function deleteRule(workspaceId: string, id: string, actor: Actor) 
 }
 
 /** Full eligibility check used at enrollment AND again right before every send. */
-export async function canContact(workspaceId: string, lead: { emailNormalized: string; country: string | null; lawfulBasis: LawfulBasisValue; status: string; emailVerificationStatus: string }, opts: { requireVerified: boolean }) {
+export async function canContact(workspaceId: string, lead: { emailNormalized: string; country: string | null; lawfulBasis: LawfulBasisValue; status: string; emailVerificationStatus: string; emailVerifiedAt?: Date | null }, opts: { requireVerified: boolean }) {
+  void opts; // retained for API compatibility; verification is a workspace-wide safety gate.
   const reasons: string[] = [];
   const sup = await isSuppressed(workspaceId, lead.emailNormalized);
   if (sup.suppressed) reasons.push(`suppressed (${sup.reason})`);
   if (['UNSUBSCRIBED', 'BOUNCED', 'CUSTOMER', 'DISQUALIFIED', 'NOT_INTERESTED'].includes(lead.status)) reasons.push(`lead status ${lead.status}`);
-  if (lead.emailVerificationStatus === 'INVALID') reasons.push('email verified as invalid');
-  const recentCheck = await db().emailVerification.findFirst({ where: { workspaceId, email: lead.emailNormalized, provider: { in: ['first-party-dns', 'offline-disposable-list'] }, createdAt: { gte: new Date(Date.now() - 7 * 86400_000) } }, orderBy: { createdAt: 'desc' }, select: { details: true, rawResult: true } });
-  if ((recentCheck?.details as { attributes?: { disposable?: boolean } } | null)?.attributes?.disposable || recentCheck?.rawResult?.toLowerCase().includes('disposable domain')) reasons.push('email uses a known disposable domain');
-  if (opts.requireVerified && !['VALID', 'CATCH_ALL'].includes(lead.emailVerificationStatus)) reasons.push(`email not verified (${lead.emailVerificationStatus})`);
-  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { postalAddress: true } });
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { postalAddress: true, settings: true } });
+  const { readSettings } = await import('./workspace.js');
+  const settings = readSettings(ws?.settings);
+  const recentCheck = await db().emailVerification.findFirst({ where: { workspaceId, email: lead.emailNormalized, provider: { in: ['first-party-dns', 'offline-disposable-list'] }, expiresAt: { gt: new Date() } }, orderBy: { createdAt: 'desc' }, select: { details: true, rawResult: true } });
+  const details = recentCheck?.details as { attributes?: { disposable?: boolean; roleBased?: boolean } } | null;
+  // Workspace-level verification is mandatory even when a campaign's legacy toggle is off.
+  reasons.push(...emailVerificationPolicyReasons({ status: lead.emailVerificationStatus, verifiedAt: lead.emailVerifiedAt, disposable: details?.attributes?.disposable, roleBased: details?.attributes?.roleBased, rawResult: recentCheck?.rawResult }, settings));
   const rules = await db().complianceRule.findMany({ where: { workspaceId } });
   const decision = evaluateCompliance(rules, { country: lead.country, lawfulBasis: lead.lawfulBasis, workspaceHasPostalAddress: !!ws?.postalAddress?.trim() });
   reasons.push(...decision.reasons);

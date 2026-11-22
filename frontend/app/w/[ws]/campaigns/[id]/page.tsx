@@ -9,6 +9,8 @@ import { fmtDate, fullName } from '@/lib/format';
 import { Badge, Button, Card, Checkbox, ConfirmButton, Empty, Field, Input, Notice, PageHeader, Pagination, QueryView, Select, Table, Tabs, Textarea, TimezoneSelect } from '@/components/ui';
 import { ReviewPanel } from '@/components/review-panel';
 import { CampaignAiPanel, VersionsPanel, PreviewPanel } from '@/components/personalization';
+import { GeneratePanel } from '@/components/ai/generate-panel';
+import { useAiOwner } from '@/components/ai/hooks';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 interface Variant { label: string; subject: string; body: string; weight: number; aiInstructions?: string | null }
@@ -21,6 +23,7 @@ export default function CampaignDetail() {
   const { id } = useParams<{ id: string }>();
   const q = useWsQuery<any>(`/campaigns/${id}`);
   const [tab, setTab] = useState('sequence');
+  const owner = useAiOwner();
   const [validation, setValidation] = useState<{ blocking: string[]; warnings: string[]; recipients: { total: number; eligible: number; excluded: Record<string, number> } } | null>(null);
   const validate = useWsMutation(() => ({ path: `/campaigns/${id}/validate`, body: {} }), { invalidate: false, onSuccess: (r: any) => setValidation(r) });
   const action = useWsMutation<{ a: string; body?: unknown }>((x) => ({ path: `/campaigns/${id}/${x.a}`, body: x.body ?? {} }), { success: (r: any) => (r?.status ? `Campaign ${String(r.status).toLowerCase()}` : 'Done'), onSuccess: (r: any) => r?.blocking && setValidation(r) });
@@ -51,14 +54,15 @@ export default function CampaignDetail() {
             </div>
           )}
           {['APPROVED', 'RUNNING', 'PAUSED'].includes(c.status) && <div className="mb-4"><Notice kind="warning">Editing the sequence or settings sends this campaign back for approval and stops sending until it is re-approved.</Notice></div>}
-          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'sequence', label: 'Sequence builder' }, { id: 'ai', label: 'AI personalization' }, { id: 'preview', label: 'Preview & test' }, { id: 'settings', label: 'Settings & schedule' }, { id: 'audience', label: 'Lists & mailboxes' }, { id: 'recipients', label: 'Recipients' }, { id: 'review', label: 'Review queue' }, { id: 'log', label: 'Send log' }, { id: 'results', label: 'A/B & step results' }, { id: 'versions', label: 'Versions' }]} />
+          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'sequence', label: 'Sequence builder' }, { id: 'ai', label: 'AI personalization' }, ...(owner.allowed ? [{ id: 'mygen', label: 'Generate with my AI' }] : []), { id: 'preview', label: 'Preview & test' }, { id: 'settings', label: 'Settings & schedule' }, { id: 'audience', label: 'Lists & mailboxes' }, { id: 'recipients', label: 'Recipients' }, { id: 'review', label: 'Review queue' }, { id: 'log', label: 'Send log' }, { id: 'results', label: 'A/B & step results' }, { id: 'versions', label: 'Versions' }]} />
           {tab === 'sequence' && <SequenceBuilder campaign={c} />}
           {tab === 'ai' && <CampaignAiPanel campaign={c} />}
+          {tab === 'mygen' && owner.allowed && <MyAiGenerate campaignId={c.id} />}
           {tab === 'preview' && <PreviewPanel campaign={c} />}
           {tab === 'versions' && <VersionsPanel campaign={c} />}
           {tab === 'settings' && <SettingsForm campaign={c} />}
           {tab === 'audience' && <Audience campaign={c} />}
-          {tab === 'recipients' && <Recipients id={id} />}
+          {tab === 'recipients' && <Recipients id={id} canGenerate={owner.allowed} />}
           {tab === 'review' && <ReviewPanel campaignId={id} />}
           {tab === 'log' && <SendLog id={id} />}
           {tab === 'results' && <StepResults id={id} />}
@@ -178,7 +182,7 @@ function Audience({ campaign }: { campaign: any }) {
   );
 }
 
-function Recipients({ id }: { id: string }) {
+function Recipients({ id, canGenerate }: { id: string; canGenerate?: boolean }) {
   const ws = useWs();
   const [status, setStatus] = useState('');
   const [page, setPage] = useState(1);
@@ -191,13 +195,33 @@ function Recipients({ id }: { id: string }) {
         {(d) => (
           <div className="card p-2">
             <Table head={['Prospect', 'Status', 'Step', 'Next send', 'Mailbox', 'Reason', '']}>
-              {d.data.map((e: any) => <tr key={e.id}><td className="td"><Link className="text-brand-700 hover:underline" href={`/w/${ws}/leads/${e.lead.id}`}>{fullName(e.lead)}</Link><div className="text-xs text-slate-500">{e.lead.email}</div></td><td className="td"><Badge>{e.status}</Badge></td><td className="td">{e.currentStepOrder}</td><td className="td text-xs">{fmtDate(e.nextActionAt)}</td><td className="td text-xs">{e.emailAccount.emailAddress}</td><td className="td text-xs">{e.stopReason}</td><td className="td">{['ACTIVE', 'PAUSED'].includes(e.status) && <Button variant="ghost" onClick={() => stop.mutate(e.id)}>Stop</Button>}</td></tr>)}
+              {d.data.map((e: any) => <tr key={e.id}><td className="td"><Link className="text-brand-700 hover:underline" href={`/w/${ws}/leads/${e.lead.id}`}>{fullName(e.lead)}</Link><div className="text-xs text-slate-500">{e.lead.email}</div>{canGenerate && <Link className="text-xs text-brand-700 underline" href={`/w/${ws}/leads/${e.lead.id}?tab=ai&campaign=${id}`}>Generate emails</Link>}</td><td className="td"><Badge>{e.status}</Badge></td><td className="td">{e.currentStepOrder}</td><td className="td text-xs">{fmtDate(e.nextActionAt)}</td><td className="td text-xs">{e.emailAccount.emailAddress}</td><td className="td text-xs">{e.stopReason}</td><td className="td">{['ACTIVE', 'PAUSED'].includes(e.status) && <Button variant="ghost" onClick={() => stop.mutate(e.id)}>Stop</Button>}</td></tr>)}
             </Table>
             <Pagination page={d.page} totalPages={d.totalPages} total={d.total} onPage={setPage} />
           </div>
         )}
       </QueryView>
     </>
+  );
+}
+
+/** Owner-only: pick a prospect and generate with a personal-subscription workflow, attributed to this campaign. */
+function MyAiGenerate({ campaignId }: { campaignId: string }) {
+  const [search, setSearch] = useState('');
+  const [leadId, setLeadId] = useState<string | null>(null);
+  const leads = useWsQuery<Paged<any>>(`/leads${qs({ q: search || undefined, pageSize: 10 })}`);
+  return (
+    <div className="space-y-4">
+      <Card title="Prospect">
+        <Field label="Find a prospect"><Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, email or company" /></Field>
+        <div className="flex flex-wrap gap-2">
+          {(leads.data?.data ?? []).map((l: any) => (
+            <button key={l.id} type="button" aria-pressed={leadId === l.id} onClick={() => setLeadId(l.id)} className={`rounded-md border px-2 py-1 text-xs ${leadId === l.id ? 'border-brand-400 bg-brand-50 dark:border-brand-600 dark:bg-brand-950/40' : 'border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800'}`}>{fullName(l)} · {l.email}</button>
+          ))}
+        </div>
+      </Card>
+      {leadId ? <GeneratePanel key={leadId} leadId={leadId} defaultCampaignId={campaignId} /> : <Empty title="Choose a prospect to generate emails" />}
+    </div>
   );
 }
 

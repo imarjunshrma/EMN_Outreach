@@ -1374,6 +1374,87 @@
                           "millionverifier"
                         ]
                       },
+                      "emailVerificationMode": {
+                        "default": "custom",
+                        "type": "string",
+                        "enum": [
+                          "custom",
+                          "external",
+                          "disabled"
+                        ]
+                      },
+                      "verificationFreshnessDays": {
+                        "default": 90,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 365
+                      },
+                      "verificationUnknownPolicy": {
+                        "default": "hold",
+                        "type": "string",
+                        "enum": [
+                          "hold",
+                          "allow"
+                        ]
+                      },
+                      "verificationDisposablePolicy": {
+                        "default": "block",
+                        "type": "string",
+                        "enum": [
+                          "block",
+                          "allow"
+                        ]
+                      },
+                      "verificationRolePolicy": {
+                        "default": "review",
+                        "type": "string",
+                        "enum": [
+                          "allow",
+                          "review",
+                          "block"
+                        ]
+                      },
+                      "verificationSmtpProbeEnabled": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "emergencyPause": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "automaticCampaignSending": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "automaticFollowups": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "aiReplyClassification": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "aiFollowupGeneration": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "mailboxReadinessManagement": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "dailyDomainSendLimit": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "trackingBaseUrl": {
                         "default": null,
                         "anyOf": [
@@ -1427,6 +1508,19 @@
                       },
                       "mailboxAutoPauseBounceRatePct": {
                         "default": 5,
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0.5,
+                            "maximum": 50
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "mailboxReadinessSoftBounceRatePct": {
+                        "default": 10,
                         "anyOf": [
                           {
                             "type": "number",
@@ -2663,7 +2757,10 @@
                 "automation",
                 "webhooks",
                 "privacy",
-                "personalize"
+                "personalize",
+                "ai-sub-claude",
+                "ai-sub-codex",
+                "ai-workflow-api"
               ]
             }
           }
@@ -2752,7 +2849,10 @@
                       "automation",
                       "webhooks",
                       "privacy",
-                      "personalize"
+                      "personalize",
+                      "ai-sub-claude",
+                      "ai-sub-codex",
+                      "ai-workflow-api"
                     ]
                   },
                   "jobId": {
@@ -12788,6 +12888,35 @@
                       "days",
                       "start",
                       "end"
+                    ]
+                  },
+                  "readiness": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "initialDailyCap": {
+                        "default": 5,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500
+                      },
+                      "dailyIncrease": {
+                        "default": 5,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500
+                      },
+                      "reviewIntervalDays": {
+                        "default": 7,
+                        "type": "integer",
+                        "minimum": 3,
+                        "maximum": 30
+                      }
+                    },
+                    "required": [
+                      "enabled"
                     ]
                   }
                 }
@@ -24429,7 +24558,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Queue first-party syntax, disposable, role, free-provider and DNS checks (no SMTP probe)",
+        "summary": "Queue first-party syntax, disposable, role, free-provider and DNS checks; optional SMTP RCPT probing when enabled (never sends email)",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 60 requests / 3600s per workspace",
         "parameters": [
           {
@@ -24518,7 +24647,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Queue deduplicated first-party DNS verification for an email list",
+        "summary": "Queue deduplicated first-party verification for an email list; optional SMTP RCPT probing when enabled (never sends email)",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 10 requests / 3600s per workspace",
         "parameters": [
           {
@@ -24571,6 +24700,94 @@
           "platformPermission": null,
           "rateLimit": {
             "limit": 10,
+            "windowSec": 3600,
+            "key": "workspace"
+          },
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/bulk.csv": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Upload a bounded CSV for streaming background verification; maximum 10 MB",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MANAGER\n\nRate limit: 5 requests / 3600s per workspace",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "emailColumn": {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  "hasHeader": {
+                    "default": "true",
+                    "type": "string",
+                    "enum": [
+                      "true",
+                      "false"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MANAGER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 5,
             "windowSec": 3600,
             "key": "workspace"
           },
@@ -24689,7 +24906,97 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Get tenant-scoped verification batch and results",
+        "summary": "Get tenant-scoped paginated verification batch results",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}/export.csv": {
+      "get": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Stream a tenant-scoped CSV export with verification columns and spreadsheet formula protection",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
         "parameters": [
           {
@@ -24729,6 +25036,278 @@
         },
         "responses": {
           "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}/pause": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Pause a processing batch; active checks may finish",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MANAGER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MANAGER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}/resume": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Resume queued rows of a paused verification batch",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MANAGER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MANAGER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}/retry": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Retry failed rows in a verification batch",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MANAGER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MANAGER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/batches/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Cancel pending rows in a verification batch",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MANAGER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MANAGER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
             "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
           },
           "400": {
@@ -25089,6 +25668,113 @@
         },
         "responses": {
           "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/email-verification/history": {
+      "get": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Search tenant-scoped first-party verification history",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 254
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "UNVERIFIED",
+                "VALID",
+                "INVALID",
+                "RISKY",
+                "CATCH_ALL",
+                "UNKNOWN"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
             "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
           },
           "400": {
@@ -31421,6 +32107,2951 @@
           "role": null,
           "orgPermission": null,
           "platformPermission": "audit:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/access": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Whether the signed-in user may use personal AI subscriptions",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/connections": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Subscription connection status (no credentials are returned)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/claude/connect": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Connect Claude with a token from `claude setup-token`",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: 10 requests / 3600s per user",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 10,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/codex/login": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Start Codex ChatGPT sign-in (device code)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: 10 requests / 3600s per user",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 10,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Codex sign-in progress",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Cancel a pending Codex sign-in",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/{provider}/test": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Test a subscription connection with a minimal real request",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: 20 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 20,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/{provider}/settings": {
+      "put": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Model, concurrency, delay and pause for a subscription",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 120
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4
+                  },
+                  "delayMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 600000
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-subscriptions/{provider}": {
+      "delete": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Disconnect a subscription (removes the stored credential / signs Codex out)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-workflows": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "List AI workflows (presets are created on first use)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Create a workflow",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "stages": {
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9-]{4,40}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "enabled": {
+                          "default": true,
+                          "type": "boolean"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "CLAUDE_SUBSCRIPTION",
+                            "CODEX_SUBSCRIPTION",
+                            "API:OPENAI",
+                            "API:ANTHROPIC",
+                            "API:GOOGLE",
+                            "API:OPENROUTER",
+                            "API:GROQ",
+                            "API:TOGETHER",
+                            "API:DEEPSEEK",
+                            "API:MISTRAL",
+                            "API:OLLAMA",
+                            "API:CUSTOM_OPENAI"
+                          ]
+                        },
+                        "model": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 120
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "taskType": {
+                          "type": "string",
+                          "enum": [
+                            "PROSPECT_RESEARCH",
+                            "WEBSITE_ANALYSIS",
+                            "SOCIAL_MEDIA_ANALYSIS",
+                            "BUSINESS_ANALYSIS",
+                            "PAIN_POINT_IDENTIFICATION",
+                            "EMAIL_ANGLE_SELECTION",
+                            "COLD_EMAIL_GENERATION",
+                            "EMAIL_HUMANIZATION",
+                            "GRAMMAR_REVIEW",
+                            "PERSONALIZATION_REVIEW",
+                            "FINAL_QUALITY_CHECK",
+                            "CUSTOM"
+                          ]
+                        },
+                        "instructions": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 8000
+                        },
+                        "inputs": {
+                          "default": [
+                            "prospect",
+                            "research_evidence",
+                            "playbook",
+                            "previous"
+                          ],
+                          "maxItems": 10,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^(prospect|research_evidence|playbook|previous|all|stage:[a-z0-9-]{4,40})$"
+                          }
+                        },
+                        "outputFormat": {
+                          "type": "string",
+                          "enum": [
+                            "RESEARCH_JSON",
+                            "ANGLES_JSON",
+                            "EMAIL_VARIANTS_JSON",
+                            "QUALITY_REVIEW_JSON",
+                            "TEXT"
+                          ]
+                        },
+                        "variants": {
+                          "default": 3,
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5
+                        },
+                        "temperature": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reasoningEffort": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "allowWebResearch": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "retry": {
+                          "default": {
+                            "maxAttempts": 2,
+                            "backoffSec": 30
+                          },
+                          "type": "object",
+                          "properties": {
+                            "maxAttempts": {
+                              "default": 2,
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 5
+                            },
+                            "backoffSec": {
+                              "default": 30,
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 3600
+                            }
+                          }
+                        },
+                        "timeoutSec": {
+                          "default": 300,
+                          "type": "integer",
+                          "minimum": 30,
+                          "maximum": 1800
+                        },
+                        "continueOnError": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "condition": {
+                          "default": "always",
+                          "type": "string",
+                          "enum": [
+                            "always",
+                            "if_previous_succeeded",
+                            "skip_if_provider_unavailable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "provider",
+                        "taskType",
+                        "outputFormat"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "stages"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-workflows/{id}": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Get a workflow",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Update a workflow (stages, order, providers, instructions)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "stages": {
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9-]{4,40}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "enabled": {
+                          "default": true,
+                          "type": "boolean"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "CLAUDE_SUBSCRIPTION",
+                            "CODEX_SUBSCRIPTION",
+                            "API:OPENAI",
+                            "API:ANTHROPIC",
+                            "API:GOOGLE",
+                            "API:OPENROUTER",
+                            "API:GROQ",
+                            "API:TOGETHER",
+                            "API:DEEPSEEK",
+                            "API:MISTRAL",
+                            "API:OLLAMA",
+                            "API:CUSTOM_OPENAI"
+                          ]
+                        },
+                        "model": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 120
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "taskType": {
+                          "type": "string",
+                          "enum": [
+                            "PROSPECT_RESEARCH",
+                            "WEBSITE_ANALYSIS",
+                            "SOCIAL_MEDIA_ANALYSIS",
+                            "BUSINESS_ANALYSIS",
+                            "PAIN_POINT_IDENTIFICATION",
+                            "EMAIL_ANGLE_SELECTION",
+                            "COLD_EMAIL_GENERATION",
+                            "EMAIL_HUMANIZATION",
+                            "GRAMMAR_REVIEW",
+                            "PERSONALIZATION_REVIEW",
+                            "FINAL_QUALITY_CHECK",
+                            "CUSTOM"
+                          ]
+                        },
+                        "instructions": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 8000
+                        },
+                        "inputs": {
+                          "default": [
+                            "prospect",
+                            "research_evidence",
+                            "playbook",
+                            "previous"
+                          ],
+                          "maxItems": 10,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^(prospect|research_evidence|playbook|previous|all|stage:[a-z0-9-]{4,40})$"
+                          }
+                        },
+                        "outputFormat": {
+                          "type": "string",
+                          "enum": [
+                            "RESEARCH_JSON",
+                            "ANGLES_JSON",
+                            "EMAIL_VARIANTS_JSON",
+                            "QUALITY_REVIEW_JSON",
+                            "TEXT"
+                          ]
+                        },
+                        "variants": {
+                          "default": 3,
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5
+                        },
+                        "temperature": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reasoningEffort": {
+                          "default": null,
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "allowWebResearch": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "retry": {
+                          "default": {
+                            "maxAttempts": 2,
+                            "backoffSec": 30
+                          },
+                          "type": "object",
+                          "properties": {
+                            "maxAttempts": {
+                              "default": 2,
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 5
+                            },
+                            "backoffSec": {
+                              "default": 30,
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 3600
+                            }
+                          }
+                        },
+                        "timeoutSec": {
+                          "default": 300,
+                          "type": "integer",
+                          "minimum": 30,
+                          "maximum": 1800
+                        },
+                        "continueOnError": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "condition": {
+                          "default": "always",
+                          "type": "string",
+                          "enum": [
+                            "always",
+                            "if_previous_succeeded",
+                            "skip_if_provider_unavailable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "provider",
+                        "taskType",
+                        "outputFormat"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "stages"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Delete a workflow",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-workflows/{id}/duplicate": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Duplicate a workflow",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-workflows/{id}/activate": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Make this the workflow used by \"Generate with selected workflow\"",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-stage-templates": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Saved stage templates",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Save a stage as a reusable template",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "stage": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9-]{4,40}$"
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "enum": [
+                          "CLAUDE_SUBSCRIPTION",
+                          "CODEX_SUBSCRIPTION",
+                          "API:OPENAI",
+                          "API:ANTHROPIC",
+                          "API:GOOGLE",
+                          "API:OPENROUTER",
+                          "API:GROQ",
+                          "API:TOGETHER",
+                          "API:DEEPSEEK",
+                          "API:MISTRAL",
+                          "API:OLLAMA",
+                          "API:CUSTOM_OPENAI"
+                        ]
+                      },
+                      "model": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "taskType": {
+                        "type": "string",
+                        "enum": [
+                          "PROSPECT_RESEARCH",
+                          "WEBSITE_ANALYSIS",
+                          "SOCIAL_MEDIA_ANALYSIS",
+                          "BUSINESS_ANALYSIS",
+                          "PAIN_POINT_IDENTIFICATION",
+                          "EMAIL_ANGLE_SELECTION",
+                          "COLD_EMAIL_GENERATION",
+                          "EMAIL_HUMANIZATION",
+                          "GRAMMAR_REVIEW",
+                          "PERSONALIZATION_REVIEW",
+                          "FINAL_QUALITY_CHECK",
+                          "CUSTOM"
+                        ]
+                      },
+                      "instructions": {
+                        "default": "",
+                        "type": "string",
+                        "maxLength": 8000
+                      },
+                      "inputs": {
+                        "default": [
+                          "prospect",
+                          "research_evidence",
+                          "playbook",
+                          "previous"
+                        ],
+                        "maxItems": 10,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(prospect|research_evidence|playbook|previous|all|stage:[a-z0-9-]{4,40})$"
+                        }
+                      },
+                      "outputFormat": {
+                        "type": "string",
+                        "enum": [
+                          "RESEARCH_JSON",
+                          "ANGLES_JSON",
+                          "EMAIL_VARIANTS_JSON",
+                          "QUALITY_REVIEW_JSON",
+                          "TEXT"
+                        ]
+                      },
+                      "variants": {
+                        "default": 3,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5
+                      },
+                      "temperature": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 2
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "reasoningEffort": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "allowWebResearch": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "retry": {
+                        "default": {
+                          "maxAttempts": 2,
+                          "backoffSec": 30
+                        },
+                        "type": "object",
+                        "properties": {
+                          "maxAttempts": {
+                            "default": 2,
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 5
+                          },
+                          "backoffSec": {
+                            "default": 30,
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3600
+                          }
+                        }
+                      },
+                      "timeoutSec": {
+                        "default": 300,
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 1800
+                      },
+                      "continueOnError": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "condition": {
+                        "default": "always",
+                        "type": "string",
+                        "enum": [
+                          "always",
+                          "if_previous_succeeded",
+                          "skip_if_provider_unavailable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "provider",
+                      "taskType",
+                      "outputFormat"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "stage"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-stage-templates/{id}": {
+      "delete": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Delete a stage template",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-playbook": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Current writing playbook and version history",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Save the playbook as a new version",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 50000
+                  },
+                  "note": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-playbook/versions/{id}": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "One playbook version",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-playbook/versions/{id}/restore": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Restore a previous playbook version (creates a new version)",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-queue/pause": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Pause all AI workflow queues",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/ai-queue/resume": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Resume all AI workflow queues",
+        "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "user",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Generate emails for a prospect with a workflow, Claude or Codex (queued; never sends)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 120 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "leadId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "campaignId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "mode": {
+                    "default": "workflow",
+                    "type": "string",
+                    "enum": [
+                      "workflow",
+                      "claude",
+                      "codex"
+                    ]
+                  },
+                  "workflowId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "leadId"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "MEMBER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 120,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 201,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "201": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Generation history",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "leadId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "QUEUED",
+                "RUNNING",
+                "SUCCEEDED",
+                "FAILED",
+                "PAUSED",
+                "PAUSED_LIMIT",
+                "CANCELLED"
+              ]
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Run detail: research, variants, stages and execution log",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/pause": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Pause a run",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/resume": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Resume / retry a run, optionally choosing another provider for the paused stage",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stageProvider": {
+                    "type": "string",
+                    "enum": [
+                      "CLAUDE_SUBSCRIPTION",
+                      "CODEX_SUBSCRIPTION",
+                      "API:OPENAI",
+                      "API:ANTHROPIC",
+                      "API:GOOGLE",
+                      "API:OPENROUTER",
+                      "API:GROQ",
+                      "API:TOGETHER",
+                      "API:DEEPSEEK",
+                      "API:MISTRAL",
+                      "API:OLLAMA",
+                      "API:CUSTOM_OPENAI"
+                    ]
+                  },
+                  "autoResume": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Cancel a run",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/variants/{index}": {
+      "put": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Edit a variant subject/body",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10000
+                  }
+                },
+                "required": [
+                  "subject",
+                  "body"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/variants/{index}/select": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Select the preferred variant",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/variants/{index}/regenerate": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Regenerate one variant (queued)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 202,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-runs/{id}/draft": {
+      "post": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "Save the selected variant as a draft (nothing is sent)",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/w/{workspaceId}/ai-queue": {
+      "get": {
+        "tags": [
+          "AI subscriptions"
+        ],
+        "summary": "AI generation queue dashboard",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
           "rateLimit": null,
           "status": 200,
           "allowWhenInactive": false

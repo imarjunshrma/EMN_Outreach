@@ -20,6 +20,7 @@ async function shutdown(signal: string) {
   stopping = true;
   logger.info({ signal }, 'shutting down API');
   server.close();
+  (await import('./services/ai-subscriptions.js')).shutdownSubscriptionLogins();
   const force = setTimeout(() => process.exit(1), 15_000);
   await Promise.allSettled([closeQueues(), closeRedis(), disconnectDb()]);
   clearTimeout(force);

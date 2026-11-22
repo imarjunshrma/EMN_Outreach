@@ -402,6 +402,13 @@ model User {
   platformRole      PlatformRole?
   locale            String?
   orgMemberships    OrganizationMember[]
+
+  // Personal AI subscriptions (owner-only feature)
+  aiSubscriptionConnections AiSubscriptionConnection[]
+  aiWorkflows               AiWorkflow[]
+  aiStageTemplates          AiStageTemplate[]
+  aiPlaybookVersions        AiPlaybookVersion[]
+  aiWorkflowRuns            AiWorkflowRun[]
 }
 
 model Session {
@@ -440,94 +447,95 @@ model Workspace {
   createdAt       DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
 
-  members                  WorkspaceMember[]
-  invitations              WorkspaceInvitation[]
-  apiKeys                  ApiKey[]
-  domains                  Domain[]
-  domainChecks             DomainHealthCheck[]
-  emailAccounts            EmailAccount[]
-  credentials              ProviderCredential[]
-  aiProviders              AiProvider[]
-  aiRoutes                 AiModelRoute[]
-  prompts                  PromptTemplate[]
-  aiExecutions             AiExecution[]
-  integrations             Integration[]
-  usageRecords             UsageRecord[]
-  companies                Company[]
-  leadSources              LeadSource[]
-  leads                    Lead[]
-  statusChanges            LeadStatusChange[]
-  verifications            EmailVerification[]
-  verificationBatches      EmailVerificationBatch[]
+  members                     WorkspaceMember[]
+  invitations                 WorkspaceInvitation[]
+  apiKeys                     ApiKey[]
+  domains                     Domain[]
+  domainChecks                DomainHealthCheck[]
+  emailAccounts               EmailAccount[]
+  credentials                 ProviderCredential[]
+  aiProviders                 AiProvider[]
+  aiRoutes                    AiModelRoute[]
+  prompts                     PromptTemplate[]
+  aiExecutions                AiExecution[]
+  integrations                Integration[]
+  usageRecords                UsageRecord[]
+  companies                   Company[]
+  leadSources                 LeadSource[]
+  leads                       Lead[]
+  statusChanges               LeadStatusChange[]
+  verifications               EmailVerification[]
+  verificationBatches         EmailVerificationBatch[]
   verificationDomainOverrides EmailVerificationDomainOverride[]
-  verificationRolePatterns EmailVerificationRolePattern[]
-  icps                     IdealCustomerProfile[]
-  researchReports          ResearchReport[]
-  researchEvidence         ResearchEvidence[]
-  researchClaims           ResearchClaim[]
-  leadScores               LeadScore[]
-  leadLists                LeadList[]
-  leadListMembers          LeadListMember[]
-  importJobs               ImportJob[]
-  prospectSearches         ProspectSearch[]
-  templates                Template[]
-  campaigns                Campaign[]
-  sequences                Sequence[]
-  sequenceSteps            SequenceStep[]
-  stepVariants             SequenceStepVariant[]
-  campaignLists            CampaignList[]
-  campaignAccounts         CampaignEmailAccount[]
-  enrollments              SequenceEnrollment[]
-  outboundEmails           OutboundEmail[]
-  trackedLinks             TrackedLink[]
-  conversations            Conversation[]
-  messages                 EmailMessage[]
-  attachments              EmailAttachment[]
-  events                   EmailEvent[]
-  suppressions             SuppressionEntry[]
-  complianceRules          ComplianceRule[]
-  privacyRequests          PrivacyRequest[]
-  opportunities            Opportunity[]
-  notes                    Note[]
-  tasks                    Task[]
-  automations              AutomationRule[]
-  automationRuns           AutomationRun[]
-  webhooks                 Webhook[]
-  webhookDeliveries        WebhookDelivery[]
-  notifications            Notification[]
-  auditLogs                AuditLog[]
-  jobRuns                  JobRun[]
-  errorLogs                ErrorLog[]
-  aiConfigVersions         AiConfigVersion[]
-  knowledgeDocuments       KnowledgeDocument[]
-  promptProfiles           PromptProfile[]
-  promptProfileVersions    PromptProfileVersion[]
-  personalizations         LeadPersonalization[]
-  personalizationRevisions PersonalizationRevision[]
-  personalizationBatches   PersonalizationBatch[]
-  sequenceVersions         SequenceVersion[]
-  passwordResets           PasswordResetToken[]
-  replyTemplates           ReplyTemplate[]
-  replySuggestions         ReplySuggestion[]
-  copilotThreads           CopilotThread[]
-  copilotMessages          CopilotMessage[]
-  copilotActions           CopilotAction[]
-  copilotMemories          CopilotMemory[]
-  workflows                Workflow[]
-  workflowVersions         WorkflowVersion[]
-  workflowRuns             WorkflowRun[]
-  subscription             Subscription?
-  invoices                 Invoice[]
-  savedFilters             SavedFilter[]
-  scheduledReports         ScheduledReport[]
-  notificationChannels     NotificationChannel[]
-  usageEvents              UsageEvent[]
-  outreachRules            OutreachRule[]
-  outreachExamples         OutreachExample[]
-  outreachFeedback         OutreachFeedback[]
-  aiLearningSuggestions    AiLearningSuggestion[]
+  verificationRolePatterns    EmailVerificationRolePattern[]
+  icps                        IdealCustomerProfile[]
+  researchReports             ResearchReport[]
+  researchEvidence            ResearchEvidence[]
+  researchClaims              ResearchClaim[]
+  leadScores                  LeadScore[]
+  leadLists                   LeadList[]
+  leadListMembers             LeadListMember[]
+  importJobs                  ImportJob[]
+  prospectSearches            ProspectSearch[]
+  templates                   Template[]
+  campaigns                   Campaign[]
+  sequences                   Sequence[]
+  sequenceSteps               SequenceStep[]
+  stepVariants                SequenceStepVariant[]
+  campaignLists               CampaignList[]
+  campaignAccounts            CampaignEmailAccount[]
+  enrollments                 SequenceEnrollment[]
+  outboundEmails              OutboundEmail[]
+  trackedLinks                TrackedLink[]
+  conversations               Conversation[]
+  messages                    EmailMessage[]
+  attachments                 EmailAttachment[]
+  events                      EmailEvent[]
+  suppressions                SuppressionEntry[]
+  complianceRules             ComplianceRule[]
+  privacyRequests             PrivacyRequest[]
+  opportunities               Opportunity[]
+  notes                       Note[]
+  tasks                       Task[]
+  automations                 AutomationRule[]
+  automationRuns              AutomationRun[]
+  webhooks                    Webhook[]
+  webhookDeliveries           WebhookDelivery[]
+  notifications               Notification[]
+  auditLogs                   AuditLog[]
+  jobRuns                     JobRun[]
+  errorLogs                   ErrorLog[]
+  aiConfigVersions            AiConfigVersion[]
+  knowledgeDocuments          KnowledgeDocument[]
+  promptProfiles              PromptProfile[]
+  promptProfileVersions       PromptProfileVersion[]
+  personalizations            LeadPersonalization[]
+  personalizationRevisions    PersonalizationRevision[]
+  personalizationBatches      PersonalizationBatch[]
+  sequenceVersions            SequenceVersion[]
+  passwordResets              PasswordResetToken[]
+  replyTemplates              ReplyTemplate[]
+  replySuggestions            ReplySuggestion[]
+  copilotThreads              CopilotThread[]
+  copilotMessages             CopilotMessage[]
+  copilotActions              CopilotAction[]
+  copilotMemories             CopilotMemory[]
+  workflows                   Workflow[]
+  workflowVersions            WorkflowVersion[]
+  workflowRuns                WorkflowRun[]
+  subscription                Subscription?
+  invoices                    Invoice[]
+  savedFilters                SavedFilter[]
+  scheduledReports            ScheduledReport[]
+  notificationChannels        NotificationChannel[]
+  usageEvents                 UsageEvent[]
+  outreachRules               OutreachRule[]
+  outreachExamples            OutreachExample[]
+  outreachFeedback            OutreachFeedback[]
+  aiLearningSuggestions       AiLearningSuggestion[]
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  aiWorkflowRuns AiWorkflowRun[]
 
   @@index([organizationId])
 }
@@ -939,6 +947,7 @@ model Lead {
 
   aiInstructions   String?
   personalizations LeadPersonalization[]
+  aiWorkflowRuns   AiWorkflowRun[]
 
   @@unique([workspaceId, emailNormalized])
   @@index([workspaceId, status])
@@ -986,29 +995,29 @@ model EmailVerification {
   costCredits Float?
   confidence  Float?
 
+  @@unique([batchId, email])
   @@index([leadId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, email, createdAt])
   @@index([batchId])
-  @@unique([batchId, email])
 }
 
 model EmailVerificationBatch {
-  id          String    @id @default(uuid()) @db.Uuid
-  workspaceId String    @db.Uuid
-  createdBy   String?   @db.Uuid
-  status      String    @default("QUEUED")
-  total       Int       @default(0)
-  processed   Int       @default(0)
-  fileName    String?
-  storageKey  String?   @unique
+  id            String    @id @default(uuid()) @db.Uuid
+  workspaceId   String    @db.Uuid
+  createdBy     String?   @db.Uuid
+  status        String    @default("QUEUED")
+  total         Int       @default(0)
+  processed     Int       @default(0)
+  fileName      String?
+  storageKey    String?   @unique
   fileSizeBytes BigInt?
-  emailColumn String?
-  hasHeader   Boolean   @default(true)
-  csvHeaders  Json?
-  error       String?
-  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
-  completedAt DateTime? @db.Timestamptz(3)
+  emailColumn   String?
+  hasHeader     Boolean   @default(true)
+  csvHeaders    Json?
+  error         String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt   DateTime? @db.Timestamptz(3)
 
   workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   verifications EmailVerification[]
@@ -1018,10 +1027,10 @@ model EmailVerificationBatch {
 }
 
 model DisposableEmailDomain {
-  domain     String   @id
-  source     String
-  sourceUrl  String
-  fetchedAt  DateTime @db.Timestamptz(3)
+  domain    String   @id
+  source    String
+  sourceUrl String
+  fetchedAt DateTime @db.Timestamptz(3)
 
   @@index([source, fetchedAt])
 }
@@ -1056,13 +1065,13 @@ model EmailVerificationRolePattern {
 }
 
 model EmailVerificationDataset {
-  key          String   @id
-  sourceUrl    String
-  lastUpdated  DateTime? @db.Timestamptz(3)
-  domainCount  Int      @default(0)
-  checksum     String?
-  lastStatus   String   @default("NEVER_UPDATED")
-  lastError    String?
+  key         String    @id
+  sourceUrl   String
+  lastUpdated DateTime? @db.Timestamptz(3)
+  domainCount Int       @default(0)
+  checksum    String?
+  lastStatus  String    @default("NEVER_UPDATED")
+  lastError   String?
 }
 
 model IdealCustomerProfile {
@@ -1318,8 +1327,9 @@ model Campaign {
   personalizationBatches PersonalizationBatch[]
   sequenceVersions       SequenceVersion[]
 
-  folder String?
-  tags   String[]
+  folder         String?
+  tags           String[]
+  aiWorkflowRuns AiWorkflowRun[]
 
   @@index([workspaceId, status])
 }
@@ -2070,8 +2080,8 @@ model OutreachExample {
   tags             String[] @default([])
   isActive         Boolean  @default(true)
   createdById      String?  @db.Uuid
-  createdAt         DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -2085,14 +2095,14 @@ model OutreachFeedback {
   personalizationId String   @db.Uuid
   feedbackType      String
   originalContent   Json
-  finalContent     Json
-  changedFields    String[] @default([])
-  explanation      String?
-  scope            String   @default("CAMPAIGN")
-  createdById      String?  @db.Uuid
-  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  finalContent      Json
+  changedFields     String[] @default([])
+  explanation       String?
+  scope             String   @default("CAMPAIGN")
+  createdById       String?  @db.Uuid
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
 
-  workspace       Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace       Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, feedbackType, createdAt])
@@ -2398,21 +2408,21 @@ model Subscription {
 }
 
 model Invoice {
-  id                String    @id @default(uuid()) @db.Uuid
-  organizationId    String    @db.Uuid
-  workspaceId       String?   @db.Uuid
-  provider          String
-  providerInvoiceId String?   @unique
+  id                  String    @id @default(uuid()) @db.Uuid
+  organizationId      String    @db.Uuid
+  workspaceId         String?   @db.Uuid
+  provider            String
+  providerInvoiceId   String?   @unique
   /// Stripe charge / payment_intent or Razorpay payment id — needed to refund.
-  providerPaymentId String?
-  amountCents       Int
-  amountRefundedCents Int     @default(0)
-  currency          String
-  status            String
-  hostedUrl         String?
-  periodStart       DateTime? @db.Timestamptz(3)
-  periodEnd         DateTime? @db.Timestamptz(3)
-  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  providerPaymentId   String?
+  amountCents         Int
+  amountRefundedCents Int       @default(0)
+  currency            String
+  status              String
+  hostedUrl           String?
+  periodStart         DateTime? @db.Timestamptz(3)
+  periodEnd           DateTime? @db.Timestamptz(3)
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3)
 
   workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -2640,20 +2650,20 @@ model PlatformAuditEvent {
 /// A refund requested by platform staff or reported by the payment provider. Never executed against
 /// a live provider from development; provider confirmation arrives by verified webhook.
 model Refund {
-  id               String    @id @default(uuid()) @db.Uuid
-  organizationId   String    @db.Uuid
-  invoiceId        String?   @db.Uuid
-  provider         String
-  providerRefundId String?   @unique
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @db.Uuid
+  invoiceId         String?  @db.Uuid
+  provider          String
+  providerRefundId  String?  @unique
   providerPaymentId String?
-  amountCents      Int
-  currency         String
-  status           String    @default("pending") // pending | succeeded | failed | canceled
-  reason           String?
-  requestedById    String?   @db.Uuid
-  idempotencyKey   String    @unique
-  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+  amountCents       Int
+  currency          String
+  status            String   @default("pending") // pending | succeeded | failed | canceled
+  reason            String?
+  requestedById     String?  @db.Uuid
+  idempotencyKey    String   @unique
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -2669,7 +2679,7 @@ model BillingDispute {
   providerPaymentId String?
   amountCents       Int
   currency          String
-  status            String   // open | won | lost | closed
+  status            String // open | won | lost | closed
   reason            String?
   createdAt         DateTime @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime @updatedAt @db.Timestamptz(3)
@@ -2692,16 +2702,186 @@ model TrialGrant {
 
 /// Every object the application stores for a customer, with its real size, for storage accounting.
 model StoredObject {
-  id             String    @id @default(uuid()) @db.Uuid
-  organizationId String    @db.Uuid
-  workspaceId    String    @db.Uuid
-  key            String    @unique
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  workspaceId    String   @db.Uuid
+  key            String   @unique
   kind           String
   bytes          BigInt
-  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
   @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- personal AI subscriptions (owner-only)
+// Claude (Agent SDK + CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) and Codex (ChatGPT sign-in via
+// `codex login --device-auth`). Visible only to the accounts listed in AI_SUBSCRIPTION_OWNER_EMAILS.
+
+enum AiSubscriptionProvider {
+  CLAUDE_SUBSCRIPTION
+  CODEX_SUBSCRIPTION
+}
+
+enum AiSubscriptionStatus {
+  DISCONNECTED
+  CONNECTING
+  CONNECTED
+  EXPIRED
+  USAGE_LIMITED
+  ERROR
+}
+
+model AiSubscriptionConnection {
+  id                  String                 @id @default(uuid()) @db.Uuid
+  ownerUserId         String                 @db.Uuid
+  provider            AiSubscriptionProvider
+  status              AiSubscriptionStatus   @default(DISCONNECTED)
+  /// Claude only: CLAUDE_CODE_OAUTH_TOKEN encrypted with AI_SUBSCRIPTION_ENCRYPTION_KEY. Codex keeps its own auth.json under CODEX_HOME.
+  encryptedCredential String?
+  credentialHint      String?
+  accountLabel        String?
+  model               String?
+  concurrency         Int                    @default(1)
+  delayMs             Int                    @default(3000)
+  paused              Boolean                @default(false)
+  connectedAt         DateTime?              @db.Timestamptz(3)
+  expiresAt           DateTime?              @db.Timestamptz(3)
+  lastTestedAt        DateTime?              @db.Timestamptz(3)
+  lastTestOk          Boolean?
+  lastError           String?
+  limitResetsAt       DateTime?              @db.Timestamptz(3)
+  limitType           String?
+  utilization         Float?
+  lastUsedAt          DateTime?              @db.Timestamptz(3)
+  createdAt           DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime               @updatedAt @db.Timestamptz(3)
+
+  owner User @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerUserId, provider])
+}
+
+model AiWorkflow {
+  id          String   @id @default(uuid()) @db.Uuid
+  ownerUserId String   @db.Uuid
+  name        String
+  description String?
+  presetKey   String?
+  isDefault   Boolean  @default(false)
+  stages      Json     @default("[]")
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  owner User            @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  runs  AiWorkflowRun[]
+
+  @@unique([ownerUserId, presetKey])
+  @@index([ownerUserId])
+}
+
+model AiStageTemplate {
+  id          String   @id @default(uuid()) @db.Uuid
+  ownerUserId String   @db.Uuid
+  name        String
+  stage       Json
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  owner User @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@index([ownerUserId])
+}
+
+model AiPlaybookVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  ownerUserId String   @db.Uuid
+  version     Int
+  content     String
+  note        String?
+  isCurrent   Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  owner User            @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  runs  AiWorkflowRun[]
+
+  @@unique([ownerUserId, version])
+}
+
+enum AiWorkflowRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  PAUSED
+  PAUSED_LIMIT
+  CANCELLED
+}
+
+model AiWorkflowRun {
+  id                String              @id @default(uuid()) @db.Uuid
+  ownerUserId       String              @db.Uuid
+  workspaceId       String              @db.Uuid
+  leadId            String              @db.Uuid
+  campaignId        String?             @db.Uuid
+  workflowId        String?             @db.Uuid
+  workflowName      String
+  workflowSnapshot  Json
+  playbookVersionId String?             @db.Uuid
+  status            AiWorkflowRunStatus @default(QUEUED)
+  currentStage      Int                 @default(0)
+  stageOutputs      Json                @default("{}")
+  research          Json?
+  variants          Json                @default("[]")
+  selectedVariant   Int?
+  draft             Json?
+  draftSavedAt      DateTime?           @db.Timestamptz(3)
+  pausedReason      String?
+  pausedProvider    String?
+  autoResume        Boolean             @default(false)
+  /// One-time token of the stage job that may run next; claimed atomically so a stage never runs twice.
+  jobToken          String?
+  error             String?
+  startedAt         DateTime?           @db.Timestamptz(3)
+  finishedAt        DateTime?           @db.Timestamptz(3)
+  createdAt         DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @db.Timestamptz(3)
+
+  owner      User                       @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  workspace  Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead       Lead                       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaign   Campaign?                  @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  workflow   AiWorkflow?                @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+  playbook   AiPlaybookVersion?         @relation(fields: [playbookVersionId], references: [id], onDelete: SetNull)
+  executions AiWorkflowStageExecution[]
+
+  @@index([workspaceId, leadId])
+  @@index([ownerUserId, status])
+}
+
+model AiWorkflowStageExecution {
+  id           String    @id @default(uuid()) @db.Uuid
+  runId        String    @db.Uuid
+  workspaceId  String    @db.Uuid
+  stageIndex   Int
+  stageId      String
+  stageName    String
+  taskType     String
+  provider     String
+  model        String?
+  status       String
+  attempt      Int       @default(1)
+  durationMs   Int?
+  errorMessage String?
+  inputTokens  Int?
+  outputTokens Int?
+  startedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+
+  run AiWorkflowRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([workspaceId, startedAt])
 }

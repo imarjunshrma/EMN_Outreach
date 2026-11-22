@@ -73,10 +73,16 @@ async function getCampaignOr404(workspaceId: string, id: string) {
 }
 
 export async function createCampaign(workspaceId: string, input: z.infer<typeof CampaignSettingsSchema>, actor: Actor) {
+  const defaultSteps: Array<{ order: number; delayDays: number; threadMode: 'NEW_THREAD' | 'REPLY_IN_THREAD'; subject: string; body: string }> = [
+    { order: 1, delayDays: 0, threadMode: 'NEW_THREAD', subject: 'Quick question, {{firstName|there}}', body: 'Hi {{firstName|there}},\n\n…\n\nBest,\n{{sender.name}}' },
+    { order: 2, delayDays: 3, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nJust following up on my note. Would it be useful if I shared a short example of our work, or should I close the loop?\n\nBest,\n{{sender.name}}' },
+    { order: 3, delayDays: 5, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nOne more thought: if improving short-form content or paid social is on your roadmap, I can share a relevant example. Would that be useful?\n\nBest,\n{{sender.name}}' },
+    { order: 4, delayDays: 7, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nI will leave it here for now. If this becomes relevant later, happy to reconnect. Should I close this out?\n\nBest,\n{{sender.name}}' },
+  ];
   const c = await db().campaign.create({
     data: {
       workspaceId, ...input, sendingWindow: input.sendingWindow as Prisma.InputJsonValue,
-      sequence: { create: { workspaceId, steps: { create: { workspaceId, order: 1, delayDays: 0, threadMode: 'NEW_THREAD', variants: { create: { workspaceId, label: 'A', subject: 'Quick question, {{firstName|there}}', body: 'Hi {{firstName|there}},\n\n…\n\nBest,\n{{sender.name}}' } } } } } },
+      sequence: { create: { workspaceId, steps: { create: defaultSteps.map((step) => ({ workspaceId, order: step.order, delayDays: step.delayDays, threadMode: step.threadMode, variants: { create: { workspaceId, label: 'A', subject: step.subject, body: step.body } } })) } } },
     },
   });
   await audit(workspaceId, actor, 'campaign.created', { type: 'campaign', id: c.id });
@@ -448,6 +454,9 @@ export async function tick(now = new Date(), onlyCampaignId?: string) {
   for (const c of campaigns) {
     try {
       if (await checkThresholds(c)) continue;
+      const rawWs = await db().workspace.findUnique({ where: { id: c.workspaceId }, select: { settings: true } });
+      const automation = readSettings(rawWs?.settings);
+      if (automation.emergencyPause || !automation.automaticCampaignSending) continue;
       const bill = await import('./billing.js');
       const tstate = await bill.billingState(c.workspaceId);
       if (!tstate.active) {
@@ -491,12 +500,33 @@ async function enrollNew(c: FullCampaign, now: Date): Promise<number> {
   const load = new Map<string, number>(accounts.map((a) => [a, 0]));
   for (const g of await db().sequenceEnrollment.groupBy({ by: ['emailAccountId'], where: { campaignId: c.id, status: 'ACTIVE' }, _count: { _all: true } })) if (load.has(g.emailAccountId)) load.set(g.emailAccountId, g._count._all);
   let created = 0;
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId }, select: { settings: true } });
+  const automation = readSettings(ws.settings);
+  let externalVerifierAvailable = false;
+  if (automation.emailVerificationMode === 'external') {
+    const { getSecret } = await import('./integrations.js');
+    const providers = [...new Set([...automation.verifierOrder, ...(automation.verifierProvider === 'none' ? [] : [automation.verifierProvider])])];
+    for (const provider of providers) if (await getSecret(c.workspaceId, provider)) { externalVerifierAvailable = true; break; }
+  }
   for (const m of candidates) {
     if (capacity <= 0) break;
     const lead = m.lead;
     if (c.minLeadScore !== null && (lead.currentScore ?? -1) < c.minLeadScore) continue;
     const ok = await canContact(c.workspaceId, lead, { requireVerified: c.requireVerifiedEmail });
-    if (!ok.allowed) continue;
+    if (!ok.allowed) {
+      // Queue verification only for potentially eligible addresses. The mail is held from
+      // enrollment until the result is known; UNKNOWN and risky outcomes remain held.
+      const needsCheck = lead.emailVerificationStatus !== 'INVALID'
+        && (!lead.emailVerifiedAt || now.getTime() - lead.emailVerifiedAt.getTime() > automation.verificationFreshnessDays * 86_400_000);
+      if (needsCheck && automation.emailVerificationMode === 'custom') {
+        const fp = await import('./first-party-verification.js');
+        const v = await fp.createVerification(c.workspaceId, lead.emailNormalized, { leadId: lead.id });
+        if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+      } else if (needsCheck && automation.emailVerificationMode === 'external' && externalVerifierAvailable) {
+        await enqueue(QUEUES.verify, 'verify.lead', { workspaceId: c.workspaceId, leadId: lead.id, freshDays: automation.verificationFreshnessDays }, { jobId: `campaign-verify-${lead.id}-${Math.floor(now.getTime() / (automation.verificationFreshnessDays * 86_400_000))}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });
+      }
+      continue;
+    }
     // Fixed sender per prospect: least-loaded connected mailbox at enrollment time, never changed afterwards.
     const accountId = [...load.entries()].sort((a, b) => a[1] - b[1])[0][0];
     try {
@@ -512,11 +542,18 @@ async function enrollNew(c: FullCampaign, now: Date): Promise<number> {
 
 async function advanceDue(c: FullCampaign, now: Date) {
   const steps = c.sequence?.steps ?? [];
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId }, select: { settings: true } });
+  const automation = readSettings(ws.settings);
   const due = await db().sequenceEnrollment.findMany({ where: { campaignId: c.id, status: 'ACTIVE', nextActionAt: { lte: now } }, include: { lead: true }, take: 500 });
   let created = 0;
   let completed = 0;
   for (const e of due) {
     let order = e.currentStepOrder + 1;
+    if (order > 1 && !automation.automaticFollowups) {
+      // Keep the enrollment and its step position intact while pausing follow-up scheduling.
+      await db().sequenceEnrollment.update({ where: { id: e.id }, data: { nextActionAt: new Date(now.getTime() + 60 * 60_000) } });
+      continue;
+    }
     let step = steps.find((s) => s.order === order);
     // Evaluate follow-up conditions (open-based conditions only work when tracking is on).
     while (step && step.condition !== 'ALWAYS' && c.trackOpens) {
@@ -588,7 +625,8 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
   let usedClaimIds: string[] = [];
   let aiGenerated = false;
   let preApproved = false;
-  if (o.step.personalizationMode !== 'TEMPLATE_ONLY' && o.campaign.usePregeneratedAi) {
+  const allowAiForStep = o.step.order === 1 || settings.aiFollowupGeneration;
+  if (allowAiForStep && o.step.personalizationMode !== 'TEMPLATE_ONLY' && o.campaign.usePregeneratedAi) {
     // Pre-generated, individually approved personalization. The engine never calls AI here, so an AI
     // failure can only delay this email — never produce an unreviewed or duplicate send.
     const p = await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId: o.campaignId, leadId: lead.id, stepId: o.stepId } } });
@@ -605,7 +643,8 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
     usedClaimIds = p.usedClaimIds; aiGenerated = true; preApproved = true;
   }
   try {
-    if (preApproved) { /* content already generated, checked and approved */ } else if (o.step.personalizationMode === 'AI_FIRST_LINE') {
+    if (!allowAiForStep) { /* administrator disabled AI generation for follow-up steps; use the approved template */ }
+    else if (preApproved) { /* content already generated, checked and approved */ } else if (o.step.personalizationMode === 'AI_FIRST_LINE') {
       const g = await generateEmail(workspaceId, { leadId: lead.id, mode: 'first_line', templateSubject: subject, templateBody: body, previousEmails: '', instructions: '' });
       aiFirstLine = g.firstLine ?? '';
       usedClaimIds = g.usedClaimIds; aiGenerated = true;
@@ -759,6 +798,10 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   }
 
   // ---- Gates (re-evaluated at send time)
+  const workspaceState = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true, timezone: true } });
+  const globalAutomation = readSettings(workspaceState.settings);
+  if (globalAutomation.emergencyPause) return defer(new Date(now.getTime() + 15 * 60_000), 'workspace emergency pause is active');
+  if (!globalAutomation.automaticCampaignSending) return defer(new Date(now.getTime() + 60 * 60_000), 'automatic campaign sending is disabled');
   if (o.campaign.status !== 'RUNNING') return { outcome: 'deferred', detail: `campaign ${o.campaign.status}` };
   const full = await getCampaign(workspaceId, o.campaignId);
   if (!full.approvedContentHash || contentHash(full) !== full.approvedContentHash) return { outcome: 'deferred', detail: 'campaign not approved in current form' };
@@ -790,7 +833,10 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   if (!releaseQuotaLock) return defer(new Date(now.getTime() + 2_000), 'workspace send quota is being checked');
   try {
     const accountToday = await reservedSendCountSince({ workspaceId, emailAccountId: o.emailAccountId }, startOfDayIn(accWin.timezone ?? ws.timezone, now));
-    if (accountToday >= o.emailAccount.dailySendLimit) return defer(nextWindowStart(startOfNextDayIn(accWin.timezone ?? ws.timezone, now), window, zone), 'mailbox daily limit reached');
+    const readiness = (o.emailAccount.connectionConfig as { readiness?: { enabled?: boolean; currentDailyCap?: number } } | null)?.readiness;
+    const useReadiness = globalAutomation.mailboxReadinessManagement && readiness?.enabled === true;
+    const effectiveMailboxLimit = useReadiness ? Math.min(o.emailAccount.dailySendLimit, readiness.currentDailyCap ?? 5) : o.emailAccount.dailySendLimit;
+    if (accountToday >= effectiveMailboxLimit) return defer(nextWindowStart(startOfNextDayIn(accWin.timezone ?? ws.timezone, now), window, zone), useReadiness ? 'mailbox readiness daily cap reached' : 'mailbox daily limit reached');
     const campaignToday = await reservedSendCountSince({ workspaceId, campaignId: o.campaignId }, startOfDayIn(o.campaign.timezone, now));
     if (campaignToday >= o.campaign.dailySendLimit) return defer(nextWindowStart(startOfNextDayIn(o.campaign.timezone, now), window, zone), 'campaign daily limit reached');
     const workspaceLimit = readSettings(ws.settings).dailyEmailSendLimit;
@@ -798,6 +844,19 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
       const workspaceToday = await reservedSendCountSince({ workspaceId }, startOfDayIn(ws.timezone, now));
       if (workspaceToday >= workspaceLimit) return defer(nextWindowStart(startOfNextDayIn(ws.timezone, now), window, zone), 'workspace daily send limit reached');
     }
+    const domainLimit = readSettings(ws.settings).dailyDomainSendLimit;
+    if (domainLimit !== null) {
+      const domain = o.emailAccount.emailAddress.split('@').at(-1)?.toLowerCase();
+      if (domain) {
+        const domainAccounts = await db().emailAccount.findMany({ where: { workspaceId, emailAddress: { endsWith: `@${domain}` } }, select: { id: true } });
+        const domainToday = await reservedSendCountSince({ workspaceId, emailAccountId: { in: domainAccounts.map((a) => a.id) } }, startOfDayIn(ws.timezone, now));
+        if (domainToday >= domainLimit) return defer(nextWindowStart(startOfNextDayIn(ws.timezone, now), window, zone), 'domain daily send limit reached');
+      }
+    }
+    const latestWorkspaceSettings = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+    const latestAutomation = readSettings(latestWorkspaceSettings.settings);
+    if (latestAutomation.emergencyPause) return defer(new Date(now.getTime() + 15 * 60_000), 'workspace emergency pause is active');
+    if (!latestAutomation.automaticCampaignSending) return defer(new Date(now.getTime() + 60 * 60_000), 'automatic campaign sending is disabled');
     // The reservation is visible to the next lock holder before this lock is released.
     const claim = await db().outboundEmail.updateMany({ where: { id: o.id, status: 'QUEUED' }, data: { status: 'SENDING', sendStartedAt: now, attempts: { increment: 1 } } });
     if (claim.count === 0) return { outcome: 'skipped', detail: 'claimed by another worker' };

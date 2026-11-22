@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Resolver } from 'node:dns/promises';
 import { calculateEmailRisk, inspectEmail, validateEmailSyntax } from '../../integrations/src/email-verification.js';
-import { classifySmtpReply, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
+import { classifySmtpReply, diagnoseSmtpConnectivity, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
 import { chooseEmailColumn, csvSafe } from '../../backend/src/services/verification-csv.js';
 
 const resolver = (overrides: Record<string, unknown> = {}) => ({
@@ -16,6 +16,9 @@ describe('first-party email verification primitives', () => {
     expect(validateEmailSyntax('person@bücher.de').domain).toBe('xn--bcher-kva.de');
     expect(validateEmailSyntax('a..b@example.com')).toMatchObject({ valid: false, reason: expect.any(String) });
     expect(validateEmailSyntax('a@@example.com').valid).toBe(false);
+    expect(validateEmailSyntax(`${'é'.repeat(33)}@example.com`)).toMatchObject({ valid: false, reason: expect.stringContaining('64-octet') });
+    const unicodeDomain = Array.from({ length: 8 }, () => 'ä'.repeat(20)).join('.');
+    expect(validateEmailSyntax(`${'a'.repeat(50)}@${unicodeDomain}`)).toMatchObject({ valid: false, reason: expect.stringContaining('254-octet') });
   });
 
   it('keeps DNS-backed addresses unknown and identifies independent free/role attributes', async () => {
@@ -57,9 +60,20 @@ describe('first-party email verification primitives', () => {
     expect(isPublicMxAddress('127.0.0.1')).toBe(false);
     expect(isPublicMxAddress('10.2.3.4')).toBe(false);
     expect(isPublicMxAddress('192.0.2.10')).toBe(false);
+    expect(isPublicMxAddress('198.51.100.9')).toBe(false);
+    expect(isPublicMxAddress('203.0.113.5')).toBe(false);
     expect(isPublicMxAddress('8.8.8.8')).toBe(true);
     expect(isPublicMxAddress('2001:4860:4860::8888')).toBe(true);
+    expect(isPublicMxAddress('2001:db8::1')).toBe(false);
+    expect(isPublicMxAddress('2001:20::1')).toBe(false);
+    expect(isPublicMxAddress('2002:0808::1')).toBe(false);
     expect(isPublicMxAddress('::1')).toBe(false);
+  });
+
+  it('bounds the administrator SMTP diagnostic DNS lookup', async () => {
+    const never = new Promise<never>(() => undefined);
+    const result = await diagnoseSmtpConnectivity('audit@example.com', { enabled: true, timeoutMs: 5, resolver: { resolveMx: () => never, resolve4: () => never, resolve6: () => never } as unknown as Resolver });
+    expect(result).toMatchObject({ status: 'DNS_ERROR', message: expect.stringMatching(/timed out/) });
   });
 
   it('uses workspace domain and role dictionaries without removing built-in role tokens', async () => {
@@ -83,6 +97,14 @@ describe('first-party email verification primitives', () => {
     const result = await probeRecipientSmtp({ email: 'person@example.com', domain: 'example.com', mx: [] }, { enabled: false });
     expect(result.classification).toBe('SMTP_UNAVAILABLE');
     expect(result.reason).toMatch(/disabled/);
+    const utf8 = await probeRecipientSmtp({ email: 'δοκιμή@example.com', domain: 'example.com', mx: [] }, { enabled: true, mailFrom: 'verify@example.net' });
+    expect(utf8.classification).toBe('INCONCLUSIVE');
+    expect(utf8.reason).toMatch(/SMTPUTF8/);
+    const injected = await probeRecipientSmtp({ email: 'valid@example.com\r\nRCPT TO:<victim@example.net>', domain: 'example.com', mx: [{ exchange: 'mx.example.com', priority: 10, addresses: ['8.8.8.8'] }] }, { enabled: true, mailFrom: 'verify@example.net' });
+    expect(injected.classification).toBe('INCONCLUSIVE');
+    expect(injected.reason).toMatch(/failed validation/);
+    const wrongMxDomain = await probeRecipientSmtp({ email: 'valid@example.com', domain: 'attacker.example', mx: [{ exchange: 'mx.example.com', priority: 10, addresses: ['8.8.8.8'] }] }, { enabled: true, mailFrom: 'verify@example.net' });
+    expect(wrongMxDomain.classification).toBe('INCONCLUSIVE');
   });
 
   it('maps CSV email headers and neutralizes spreadsheet formulas on export', () => {

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — Personal AI subscriptions (Claude + Codex) and customizable AI workflows
+
+- **Claude — My Subscription** through the official Agent SDK with a `claude setup-token` token (encrypted with a dedicated key); **Codex — My ChatGPT Subscription** through the official Codex SDK/CLI with ChatGPT device-code sign-in. Connect, test, reconnect, disconnect, expiry and usage-limit detection, audit trail.
+- Strictly owner-only: `AI_SUBSCRIPTION_OWNER_EMAILS` + SUPER_ADMIN + 2FA, enforced on the server (404 for everyone else; never API keys or support access).
+- **AI Workflow Builder:** six editable presets (Claude only, Codex only, Claude → Codex, Codex → Claude, existing API provider only, four-stage example) and custom workflows. Stages can be added, removed, reordered, enabled, disabled, duplicated, edited and saved as templates. Per stage: provider, task (12 types), instructions, inputs, output format, variants, temperature or reasoning effort, retries, timeout, continue-on-error, conditions.
+- **Writing playbook** (`ai/playbook/cold-email.md` as the starting point) with editor, preview, version history and restore.
+- **Generate emails** on a prospect and in campaigns: research with verified-versus-assumed observations, three variants, original and revised versions, edit, select, regenerate one, copy, save draft. Never sends.
+- Provider-aware BullMQ queues (Claude, Codex, API), per-provider concurrency and spacing, exponential back-off, pause/resume, "usage limit reached — workflow paused", optional auto-resume, restart recovery without double execution, queue dashboard with execution log.
+- `generateEmail(prospect, options, provider)` works the same way for every provider. Existing API-key providers are unchanged and are never used as a silent fallback.
+- Migration `20261121210000_ai_subscriptions_workflows` (additive). Docs: `docs/ai-subscriptions/`.
+
 ## 1.4.0 — 2026-11-21 — Production hardening
 
 ### Security and access
