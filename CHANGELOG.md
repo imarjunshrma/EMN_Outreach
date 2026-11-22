@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — Super admin console: log in as, data explorer, account pages, more global settings
+
+- **Log in as** any customer user (tenant owner, a member, or one workspace) with full access: reason and length required (capped in settings), a red "Return to console" bar, signing out returns to the admin account (even after expiry). The person's password, two-factor and sessions stay locked; staff and disabled accounts cannot be opened. Every change is audited (`impersonation.write`), the customer's audit log shows staff sign-ins and `impersonatedBy`, demoting the admin ends the session at once, and open sessions are listed and can be ended.
+- **Data explorer:** all 111 tables with counts, per tenant or workspace; search, column filter, sort, paging; record view with parent and child links; edit and delete with a reason, before/after values audited. Secrets are never returned or editable.
+- **Account pages:** memberships, sessions, API keys, activity and staff actions; edit name/email/language/verified, reset two-factor, end one or all sessions.
+- **Tenant edits:** rename and time zone; rename, archive and restore workspaces. **All data** tab per tenant.
+- **Global settings:** branding, default plan, organizations per person, minimum password length, idle sign-out days, two-factor for everyone, longest "log in as", maintenance mode. These are enforced by the API, and old/new values are audited.
+- New staff permissions `users:manage`, `impersonate`, `data:read`, `data:write` (super admin). Public `GET /public/config`.
+- Migration `20261123090000_super_admin_impersonation` (additive: two nullable columns on `Session`).
+
 ## Unreleased — Personal AI subscriptions (Claude + Codex) and customizable AI workflows
 
 - **Claude — My Subscription** through the official Agent SDK with a `claude setup-token` token (encrypted with a dedicated key); **Codex — My ChatGPT Subscription** through the official Codex SDK/CLI with ChatGPT device-code sign-in. Connect, test, reconnect, disconnect, expiry and usage-limit detection, audit trail.

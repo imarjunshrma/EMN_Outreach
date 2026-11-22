@@ -81,7 +81,7 @@ function UserMenu({ me, base, current }: { me: Me; base: string; current?: Me['w
           <Link role="menuitem" href={`${base}/settings/account`} onClick={() => setOpen(false)} className="flex items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"><UserCircle className="h-4 w-4" aria-hidden />My account & 2FA</Link>
           {current && <Link role="menuitem" href={`/org/${current.organizationId}`} onClick={() => setOpen(false)} className="flex items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"><Building2 className="h-4 w-4" aria-hidden />Organization settings</Link>}
           {me.user.platformRole && <Link role="menuitem" href="/platform" className="flex items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"><ShieldCheck className="h-4 w-4" aria-hidden />Platform admin</Link>}
-          <button role="menuitem" onClick={async () => { await api('/auth/logout', { method: 'POST' }); router.replace('/login'); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-red-700 hover:bg-red-50"><LogOut className="h-4 w-4" aria-hidden />Sign out</button>
+          <button role="menuitem" onClick={async () => { const r = await api<{ restored?: boolean; redirectTo?: string }>('/auth/logout', { method: 'POST' }); if (r.redirectTo && r.restored !== undefined) window.location.href = r.redirectTo; else router.replace('/login'); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-red-700 hover:bg-red-50"><LogOut className="h-4 w-4" aria-hidden />Sign out</button>
         </div>
       )}
     </div>
@@ -143,7 +143,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
           <button onClick={() => setPalette(true)} className="mt-2 flex w-full items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-500 hover:border-slate-300 hover:text-ink">
             <Search className="h-4 w-4" aria-hidden /><span className="flex-1">Go to…</span><kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 text-[11px] text-slate-500">⌘K</kbd>
           </button>
-          {me.data?.user.platformRole && <Link href="/platform" data-testid="open-platform-console" className="mt-2 flex w-full items-center gap-2 rounded-lg bg-ink px-3 py-2 text-sm font-semibold text-white hover:opacity-90"><ShieldCheck className="h-4 w-4" aria-hidden /><span className="flex-1">Platform console</span><span className="text-[11px] font-normal text-white/60">super admin</span></Link>}
+          {me.data?.user.platformRole && <Link href="/platform" data-testid="open-platform-console" className="mt-2 flex w-full items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-ink hover:border-slate-300 hover:bg-slate-100 dark:border-white/10 dark:hover:bg-white/5"><ShieldCheck className="h-4 w-4 text-brand-600 dark:text-brand-400" aria-hidden /><span className="flex-1">Platform console</span><span className="text-[11px] font-normal text-slate-500">super admin</span></Link>}
         </div>
         <nav className="flex-1 overflow-y-auto px-2.5 pb-6" aria-label="Main">
           {groups.map((g) => {

@@ -14,7 +14,7 @@ const RoleEnum = z.enum(ROLES as ['OWNER', 'ADMIN', 'MANAGER', 'MEMBER', 'VIEWER
 route({ method: 'get', path: '/auth/bootstrap', tag: 'Auth', summary: 'Whether the first admin account still needs to be created', auth: 'public',
   handler: async () => { const { db } = await import('../core/db.js'); const { registrationOpen } = await import('../services/tenancy.js'); return { needsSetup: (await db().user.count()) === 0, publicRegistration: await registrationOpen() }; } });
 route({ method: 'post', path: '/auth/register', tag: 'Auth', summary: 'Create the first admin account (or register when public registration is enabled)', auth: 'public', rateLimit: { limit: 5, windowSec: 3600 },
-  body: z.object({ email: z.string().email(), name: z.string().min(1).max(100), password: z.string().min(12).max(200), workspaceName: z.string().min(2).max(80) }),
+  body: z.object({ email: z.string().email(), name: z.string().min(1).max(100), password: z.string().min(8).max(200), workspaceName: z.string().min(2).max(80) }),
   handler: (c) => auth.register(c.res, c.body, meta(c)) });
 route({ method: 'post', path: '/auth/login', tag: 'Auth', summary: 'Log in with email + password (sets session cookie)', auth: 'public', rateLimit: { limit: 10, windowSec: 300 },
   body: z.object({ email: z.string().email(), password: z.string().min(1).max(200) }), status: 200,
@@ -24,17 +24,21 @@ route({ method: 'post', path: '/auth/mfa/verify', tag: 'Auth', summary: 'Second 
 route({ method: 'post', path: '/auth/password/forgot', tag: 'Auth', summary: 'Email a single-use password reset link (same answer whether or not the account exists)', auth: 'public', status: 200, rateLimit: { limit: 5, windowSec: 900 },
   body: z.object({ email: z.string().email() }), handler: (c) => security.requestPasswordReset(c.body.email, c.req.ip) });
 route({ method: 'post', path: '/auth/password/reset', tag: 'Auth', summary: 'Set a new password with a reset token (signs out all sessions)', auth: 'public', status: 200, rateLimit: { limit: 10, windowSec: 900 },
-  body: z.object({ token: z.string().min(20).max(200), password: z.string().min(12).max(200) }), handler: (c) => security.resetPassword(c.body.token, c.body.password, c.req.ip) });
+  body: z.object({ token: z.string().min(20).max(200), password: z.string().min(8).max(200) }), handler: (c) => security.resetPassword(c.body.token, c.body.password, c.req.ip) });
 route({ method: 'get', path: '/auth/mfa', tag: 'Auth', summary: 'My two-factor status', auth: 'user', handler: (c) => security.mfaStatus(c.userId) });
 route({ method: 'post', path: '/auth/mfa/setup', tag: 'Auth', summary: 'Start TOTP setup (secret + QR, not active until confirmed)', auth: 'user', status: 200, rateLimit: { limit: 10, windowSec: 900, key: 'user' }, handler: (c) => security.beginMfaSetup(c.userId) });
 route({ method: 'post', path: '/auth/mfa/enable', tag: 'Auth', summary: 'Confirm TOTP setup with a code; returns recovery codes once', auth: 'user', status: 200, rateLimit: { limit: 10, windowSec: 900, key: 'user' },
   body: z.object({ code: z.string().length(6) }), handler: (c) => security.enableMfa(c.userId, c.body.code, c.actor) });
 route({ method: 'post', path: '/auth/mfa/disable', tag: 'Auth', summary: 'Turn off two-factor (password + current code or recovery code)', auth: 'user', status: 200, rateLimit: { limit: 5, windowSec: 900, key: 'user' },
   body: z.object({ password: z.string().min(1), code: z.string().min(6).max(20) }), handler: (c) => security.disableMfa(c.userId, c.body.password, c.body.code, c.actor) });
-route({ method: 'post', path: '/auth/logout', tag: 'Auth', summary: 'Log out (revokes session)', auth: 'user', status: 200, handler: async (c) => { await auth.logout(c.res, c.sessionId); return { ok: true }; } });
+route({ method: 'post', path: '/auth/logout', tag: 'Auth', summary: 'Log out (revokes session). In a "log in as" session this returns the super admin to their own account.', auth: 'user', status: 200, handler: async (c) => {
+  const back = await (await import('../services/impersonation.js')).stopImpersonation(c.req, c.res);
+  if (back) return { ok: true, ...back };
+  await auth.logout(c.res, c.sessionId); return { ok: true };
+} });
 route({ method: 'get', path: '/auth/me', tag: 'Auth', summary: 'Current user, CSRF token and workspaces', auth: 'user', handler: (c) => auth.me(c.userId, c.sessionId) });
 route({ method: 'post', path: '/auth/password', tag: 'Auth', summary: 'Change password (revokes other sessions)', auth: 'user', status: 200, rateLimit: { limit: 5, windowSec: 900, key: 'user' },
-  body: z.object({ currentPassword: z.string(), newPassword: z.string().min(12).max(200) }),
+  body: z.object({ currentPassword: z.string(), newPassword: z.string().min(8).max(200) }),
   handler: async (c) => { await auth.changePassword(c.userId, c.sessionId, c.body, c.actor); return { ok: true }; } });
 route({ method: 'get', path: '/auth/sessions', tag: 'Auth', summary: 'List my active sessions', auth: 'user', handler: (c) => auth.listSessions(c.userId) });
 route({ method: 'delete', path: '/auth/sessions/:id', tag: 'Auth', summary: 'Revoke one of my sessions', auth: 'user', handler: async (c) => { await auth.revokeSession(c.userId, c.params.id); return { ok: true }; } });

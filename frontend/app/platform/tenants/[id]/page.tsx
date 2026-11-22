@@ -12,6 +12,9 @@ import { TenantModules } from '@/components/platform/tenant-modules';
 import { useToast } from '@/components/toast';
 import { usePlatform } from '@/components/platform/shell';
 import { statusColor } from '@/components/platform/status';
+import { LINK_BTN_SM, LoginAsButton } from '@/components/platform/login-as';
+import { TenantData } from '@/components/platform/tenant-data';
+import { Database, Pencil } from 'lucide-react';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const ACTIONS: Record<string, Array<{ id: string; label: string; danger?: boolean }>> = {
@@ -35,6 +38,20 @@ export default function TenantDetail() {
   const [override, setOverride] = useState(false);
   const [tab, setTab] = useState('overview');
   const [ov, setOv] = useState({ planCode: '', status: '', trialEndsAt: '', graceUntil: '', reason: '' });
+  const [profile, setProfile] = useState<{ name: string; timezone: string; reason: string } | null>(null);
+  const [wsEdit, setWsEdit] = useState<{ w: any; name: string; archived: boolean; reason: string } | null>(null);
+  async function saveProfile() {
+    if (!profile) return;
+    setBusy(true);
+    try { await api(`/platform/tenants/${id}/profile`, { method: 'PUT', body: profile }); toast.success('Organization updated'); setProfile(null); refresh(); }
+    catch (e) { toast.error(describeError(e)); } finally { setBusy(false); }
+  }
+  async function saveWorkspace() {
+    if (!wsEdit) return;
+    setBusy(true);
+    try { await api(`/platform/tenants/${id}/workspaces/${wsEdit.w.id}`, { method: 'PUT', body: { name: wsEdit.name, archived: wsEdit.archived, reason: wsEdit.reason } }); toast.success('Workspace updated'); setWsEdit(null); refresh(); }
+    catch (e) { toast.error(describeError(e)); } finally { setBusy(false); }
+  }
   const canLifecycle = me.permissions.includes('tenants:lifecycle');
   const canRefund = me.permissions.includes('billing:refund');
   const [refund, setRefund] = useState<{ invoice: any; amount: string; reason: string; cancel: boolean; key: string } | null>(null);
@@ -71,9 +88,14 @@ export default function TenantDetail() {
     <>
       <Link href="/platform/tenants" className="mb-3 inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-ink"><ArrowLeft className="h-4 w-4" aria-hidden />All tenants</Link>
       <PageHeader title={o.name} subtitle={<span className="flex flex-wrap items-center gap-2"><Badge color={statusColor(o.status)}>{o.status.toLowerCase().replace(/_/g, ' ')}</Badge><code>{o.id}</code><span>created {fmtDate(o.createdAt)}</span></span>}
-        actions={canLifecycle ? <>{(ACTIONS[o.status] ?? []).map((a) => <Button key={a.id} variant={a.danger ? 'danger' : 'secondary'} onClick={() => setAction(a)}>{a.label}</Button>)}<Button variant="ghost" onClick={() => setOverride(true)}>Override subscription</Button></> : undefined} />
+        actions={<>
+          {o.status !== 'DELETED' && <LoginAsButton orgId={id} who={`${o.name} (owner)`} label="Log in as owner" size="md" variant="primary" />}
+          {canLifecycle && o.status !== 'DELETED' && <Button variant="secondary" icon={Pencil} onClick={() => setProfile({ name: o.name, timezone: o.timezone ?? 'UTC', reason: '' })}>Edit</Button>}
+          {canLifecycle && <>{(ACTIONS[o.status] ?? []).map((a) => <Button key={a.id} variant={a.danger ? 'danger' : 'secondary'} onClick={() => setAction(a)}>{a.label}</Button>)}<Button variant="ghost" onClick={() => setOverride(true)}>Override subscription</Button></>}
+        </>} />
       {d.state.reason && <div className="mb-4"><Notice kind={d.state.operational ? 'warning' : 'danger'}>{d.state.reason}</Notice></div>}
-      <Tabs tabs={[{ id: 'overview', label: 'Overview' }, { id: 'members', label: 'Members', count: d.members.length }, { id: 'modules', label: 'Modules & limits' }]} active={tab} onChange={setTab} />
+      <Tabs tabs={[{ id: 'overview', label: 'Overview' }, { id: 'members', label: 'Members', count: d.members.length }, { id: 'modules', label: 'Modules & limits' }, ...(me.permissions.includes('data:read') ? [{ id: 'data', label: 'All data' }] : [])]} active={tab} onChange={setTab} />
+      {tab === 'data' && <TenantData orgId={id} />}
       {tab === 'members' && <TenantMembers orgId={id} canChange={canLifecycle && o.status !== 'DELETED'} />}
       {tab === 'modules' && <TenantModules orgId={id} canChange={canLifecycle && o.status !== 'DELETED'} />}
       <div className={`grid gap-4 lg:grid-cols-3 ${tab === 'overview' ? '' : 'hidden'}`}>
@@ -94,7 +116,12 @@ export default function TenantDetail() {
         </Card>
         <Card title="Workspaces" className="lg:col-span-2">
           <Table head={['Name', 'Leads', 'Campaigns', 'Mailboxes', 'Members', '']}>
-            {d.workspaces.map((w: any) => <tr key={w.id}><td className="td font-semibold">{w.name}</td><td className="td tnum">{w.counts.leads}</td><td className="td tnum">{w.counts.campaigns}</td><td className="td tnum">{w.counts.emailAccounts}</td><td className="td tnum">{w.counts.members}</td><td className="td text-xs">{w.archivedAt ? 'archived' : ''}</td></tr>)}
+            {d.workspaces.map((w: any) => <tr key={w.id}><td className="td font-semibold">{w.name}{w.archivedAt && <span className="ml-1 text-xs font-normal text-slate-500">(archived)</span>}</td><td className="td tnum">{w.counts.leads}</td><td className="td tnum">{w.counts.campaigns}</td><td className="td tnum">{w.counts.emailAccounts}</td><td className="td tnum">{w.counts.members}</td>
+              <td className="td whitespace-nowrap text-right">
+                {!w.archivedAt && o.status !== 'DELETED' && <LoginAsButton orgId={id} workspaceId={w.id} who={`${w.name} (owner)`} label="Open" variant="ghost" />}
+                {me.permissions.includes('data:read') && <Link className={`${LINK_BTN_SM} !border-0 !shadow-none`} href={`/platform/data/Workspace/${w.id}`}><Database className="h-3.5 w-3.5" aria-hidden />Data</Link>}
+                {canLifecycle && o.status !== 'DELETED' && <Button size="sm" variant="ghost" onClick={() => setWsEdit({ w, name: w.name, archived: !!w.archivedAt, reason: '' })}>Edit</Button>}
+              </td></tr>)}
           </Table>
         </Card>
         <Card title="Members" actions={<button className="text-xs font-semibold text-brand-700 hover:underline" onClick={() => setTab('members')}>Manage</button>}>
@@ -127,6 +154,21 @@ export default function TenantDetail() {
           <Field label={`Amount (${refund.invoice.currency.toUpperCase()})`} hint="Up to what has not been refunded yet."><Input type="number" min={0.01} step="0.01" value={refund.amount} onChange={(e) => setRefund({ ...refund, amount: e.target.value })} /></Field>
           <Field label="Reason" hint="Required; recorded in the audit trail."><Textarea rows={2} value={refund.reason} onChange={(e) => setRefund({ ...refund, reason: e.target.value })} /></Field>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={refund.cancel} onChange={(e) => setRefund({ ...refund, cancel: e.target.checked })} />Also end the subscription now</label>
+        </>}
+      </Modal>
+      <Modal open={!!profile} title={`Edit ${o.name}`} onClose={() => setProfile(null)} footer={<><Button variant="ghost" onClick={() => setProfile(null)}>Back</Button><Button loading={busy} disabled={!profile || profile.reason.trim().length < 5 || profile.name.trim().length < 2} onClick={saveProfile}>Save</Button></>}>
+        {profile && <>
+          <Field label="Organization name"><Input value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} /></Field>
+          <Field label="Time zone" hint="IANA name, for example Asia/Kolkata or America/New_York."><Input value={profile.timezone} onChange={(e) => setProfile({ ...profile, timezone: e.target.value })} /></Field>
+          <Field label="Reason" hint="Required; recorded in the audit trail."><Textarea rows={2} value={profile.reason} onChange={(e) => setProfile({ ...profile, reason: e.target.value })} /></Field>
+          <p className="text-xs text-slate-500">Anything else about this organization can be changed in the <Link className="underline" href={`/platform/data/Organization/${id}`}>data explorer</Link>.</p>
+        </>}
+      </Modal>
+      <Modal open={!!wsEdit} title={`Edit workspace ${wsEdit?.w.name ?? ''}`} onClose={() => setWsEdit(null)} footer={<><Button variant="ghost" onClick={() => setWsEdit(null)}>Back</Button><Button loading={busy} disabled={!wsEdit || wsEdit.reason.trim().length < 5} onClick={saveWorkspace}>Save</Button></>}>
+        {wsEdit && <>
+          <Field label="Name"><Input value={wsEdit.name} onChange={(e) => setWsEdit({ ...wsEdit, name: e.target.value })} /></Field>
+          <label className="mb-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={wsEdit.archived} onChange={(e) => setWsEdit({ ...wsEdit, archived: e.target.checked })} />Archived (hidden from members; data kept)</label>
+          <Field label="Reason" hint="Required; recorded in the audit trail."><Textarea rows={2} value={wsEdit.reason} onChange={(e) => setWsEdit({ ...wsEdit, reason: e.target.value })} /></Field>
         </>}
       </Modal>
       <Modal open={override} title="Override subscription" onClose={() => setOverride(false)} footer={<><Button variant="ghost" onClick={() => setOverride(false)}>Back</Button><Button loading={busy} disabled={ov.reason.trim().length < 5} onClick={saveOverride}>Apply</Button></>}>

@@ -174,7 +174,7 @@
                   },
                   "password": {
                     "type": "string",
-                    "minLength": 12,
+                    "minLength": 8,
                     "maxLength": 200
                   },
                   "workspaceName": {
@@ -463,7 +463,7 @@
                   },
                   "password": {
                     "type": "string",
-                    "minLength": 12,
+                    "minLength": 8,
                     "maxLength": 200
                   }
                 },
@@ -767,7 +767,7 @@
         "tags": [
           "Auth"
         ],
-        "summary": "Log out (revokes session)",
+        "summary": "Log out (revokes session). In a \"log in as\" session this returns the super admin to their own account.",
         "description": "Authentication: signed-in user (session cookie)\n\nRate limit: global Nginx limit",
         "parameters": [],
         "security": [
@@ -878,7 +878,7 @@
                   },
                   "newPassword": {
                     "type": "string",
-                    "minLength": 12,
+                    "minLength": 8,
                     "maxLength": 200
                   }
                 },
@@ -1417,6 +1417,20 @@
                       "verificationSmtpProbeEnabled": {
                         "default": false,
                         "type": "boolean"
+                      },
+                      "verificationSmtpMailFrom": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 254,
+                            "format": "email",
+                            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       },
                       "emergencyPause": {
                         "default": false,
@@ -25871,7 +25885,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Admin-only outbound SMTP port 25 diagnostic to the configured MAIL FROM domain MX; sends no recipient commands or email",
+        "summary": "Admin-only outbound SMTP port 25 diagnostic to the configured verification sender domain MX; sends no recipient commands or email",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: 1 requests / 3600s per workspace",
         "parameters": [
           {
@@ -28617,7 +28631,7 @@
                   },
                   "password": {
                     "type": "string",
-                    "minLength": 12,
+                    "minLength": 8,
                     "maxLength": 200
                   },
                   "organizationName": {
@@ -36333,6 +36347,103 @@
                       "message"
                     ]
                   },
+                  "maintenance": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "message": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    },
+                    "required": [
+                      "enabled",
+                      "message"
+                    ]
+                  },
+                  "security": {
+                    "type": "object",
+                    "properties": {
+                      "passwordMinLength": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 128
+                      },
+                      "sessionIdleDays": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 90
+                      },
+                      "requireMfaForAllUsers": {
+                        "type": "boolean"
+                      },
+                      "impersonationMaxMinutes": {
+                        "type": "integer",
+                        "minimum": 5,
+                        "maximum": 480
+                      }
+                    },
+                    "required": [
+                      "passwordMinLength",
+                      "sessionIdleDays",
+                      "requireMfaForAllUsers",
+                      "impersonationMaxMinutes"
+                    ]
+                  },
+                  "signups": {
+                    "type": "object",
+                    "properties": {
+                      "defaultPlanCode": {
+                        "type": "string",
+                        "maxLength": 40
+                      },
+                      "maxOrgsPerUser": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "defaultPlanCode",
+                      "maxOrgsPerUser"
+                    ]
+                  },
+                  "branding": {
+                    "type": "object",
+                    "properties": {
+                      "appName": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 60
+                      },
+                      "supportEmail": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "const": ""
+                          },
+                          {
+                            "type": "string",
+                            "format": "email",
+                            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "appName",
+                      "supportEmail"
+                    ]
+                  },
                   "reason": {
                     "type": "string",
                     "minLength": 5,
@@ -36340,8 +36451,6 @@
                   }
                 },
                 "required": [
-                  "signupMode",
-                  "announcement",
                   "reason"
                 ]
               }
@@ -36407,6 +36516,1424 @@
           "role": null,
           "orgPermission": null,
           "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/public/config": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Product name, support email, password rule and maintenance notice (public)",
+        "description": "Authentication: none (public)\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [],
+        "x-emn": {
+          "auth": "public",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users/{id}": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Everything about one account: memberships, sessions, API keys, activity and staff actions",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Edit name, email, language or email-verified flag (reason required)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: users:manage\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                  },
+                  "locale": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 20
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "emailVerified": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "users:manage",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users/{id}/mfa-reset": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Turn off two-factor for a person who lost their device (signs them out)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: users:manage\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "users:manage",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users/{id}/sessions/revoke": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Sign a person out of every browser",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: users:manage\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "users:manage",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/sessions/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "End one session of any user",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: users:manage\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "users:manage",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/profile": {
+      "put": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Rename an organization or change its time zone (reason required)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:lifecycle\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 120
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:lifecycle",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workspaces/{workspaceId}": {
+      "put": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Rename, archive or restore a workspace of a tenant (reason required)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: tenants:lifecycle\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 80
+                  },
+                  "archived": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "tenants:lifecycle",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/users/{id}/impersonate": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Log in as this user: a time-limited session with full access, every change audited (reason required)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: impersonate\n\nRate limit: 60 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 480
+                  },
+                  "workspaceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "impersonate",
+          "rateLimit": {
+            "limit": 60,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/impersonate": {
+      "post": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Log in to a tenant as its owner (or the member given in userId)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: impersonate\n\nRate limit: 60 requests / 3600s per user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 480
+                  },
+                  "workspaceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "userId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "impersonate",
+          "rateLimit": {
+            "limit": 60,
+            "windowSec": 3600,
+            "key": "user"
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/impersonations": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Open \"log in as\" sessions",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: impersonate\n\nRate limit: global Nginx limit",
+        "parameters": [],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "impersonate",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/impersonations/{id}": {
+      "delete": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "End a \"log in as\" session",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: impersonate\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "impersonate",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/impersonation/stop": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Leave a \"log in as\" session and return to your own account",
+        "description": "Authentication: none (public)\n\nRate limit: 60 requests / 300s per ip",
+        "parameters": [],
+        "security": [],
+        "x-emn": {
+          "auth": "public",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": {
+            "limit": 60,
+            "windowSec": 300
+          },
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/data": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Every table with record counts, optionally for one tenant or workspace",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: data:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "organizationId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "counts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "true",
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "data:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/data/{model}": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Records of one table: search, filter by column, sort, page (secrets hidden)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: data:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "field",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          {
+            "name": "value",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "data:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/platform/data/{model}/{recordId}": {
+      "get": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "One record with links to related records (viewing is audited)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: data:read\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recordId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "data:read",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Change fields of a record (reason required; before/after audited)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: data:write\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recordId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "changes": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "changes",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "data:write",
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Platform"
+        ],
+        "summary": "Delete a record (reason required; the record is kept in the audit trail)",
+        "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nPlatform permission: data:write\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recordId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 5,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          }
+        ],
+        "x-emn": {
+          "auth": "platform",
+          "role": null,
+          "orgPermission": null,
+          "platformPermission": "data:write",
           "rateLimit": null,
           "status": 200,
           "allowWhenInactive": false

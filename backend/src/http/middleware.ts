@@ -6,10 +6,13 @@ import { AppError } from '../core/errors.js';
 import { logger } from '../core/logger.js';
 import { logError } from '../core/audit.js';
 import type { Role } from '../../../shared/src/permissions.js';
+import { cfg, ensureConfigFresh } from '../core/platform-config.js';
 
 export const SESSION_COOKIE = 'emn_session';
 export const CSRF_COOKIE = 'emn_csrf';
-const SESSION_IDLE_MS = 7 * 24 * 3600 * 1000;
+/** While a super admin is signed in as someone else, their own session token waits here to be restored. */
+export const ADMIN_RETURN_COOKIE = 'emn_admin_return';
+const sessionIdleMs = () => cfg().security.sessionIdleDays * 24 * 3600 * 1000;
 
 export function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -46,6 +49,7 @@ export function authenticate(appUrl: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
       res.locals.auth = { userId: null, sessionId: null, apiKeyWorkspaceId: null, apiKeyRole: null };
+      await ensureConfigFresh();
       const authz = req.headers.authorization;
       if (authz?.startsWith('Bearer emn_')) {
         const token = authz.slice(7);
@@ -70,7 +74,13 @@ export function authenticate(appUrl: string) {
       if (raw) {
         const session = await db().session.findUnique({ where: { tokenHash: sha256(raw) }, include: { user: true } });
         const now = new Date();
-        if (session && !session.revokedAt && session.expiresAt > now && session.user.status === 'ACTIVE') {
+        // A "log in as" session is only valid while the super admin who opened it still is one.
+        let impersonatorId: string | null = null;
+        if (session?.impersonatorId) {
+          const imp = await db().user.findUnique({ where: { id: session.impersonatorId }, select: { status: true, platformRole: true } });
+          if (imp?.status === 'ACTIVE' && imp.platformRole === 'SUPER_ADMIN') impersonatorId = session.impersonatorId;
+        }
+        if (session && !session.revokedAt && session.expiresAt > now && session.user.status === 'ACTIVE' && (!session.impersonatorId || impersonatorId)) {
           // CSRF: double-submit header must match the session's token for unsafe methods.
           if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
             const header = String(req.headers['x-csrf-token'] ?? '');
@@ -78,7 +88,10 @@ export function authenticate(appUrl: string) {
             const origin = req.headers.origin;
             if (origin && origin !== allowedOrigin && process.env.NODE_ENV === 'production') throw new AppError('CSRF_FAILED', 'Cross-origin request blocked', 403);
           }
-          res.locals.auth = { userId: session.userId, sessionId: session.id, apiKeyWorkspaceId: null, apiKeyRole: null };
+          res.locals.auth = { userId: session.userId, sessionId: session.id, apiKeyWorkspaceId: null, apiKeyRole: null, impersonatorId };
+          res.locals.impersonatorId = impersonatorId;
+          // Two-factor policies (a workspace's own rule, or the platform-wide one) do not apply to staff signed in as the user.
+          const mfaPolicyMissing = (workspaceRequires: boolean) => !impersonatorId && !session.user.mfaEnabled && (workspaceRequires || cfg().security.requireMfaForAllUsers);
           // Access to a workspace comes ONLY from (1) a workspace membership, (2) being owner/admin of the
           // workspace's own organization, or (3) an active, audited support grant for that organization.
           // A workspace id in the URL is never proof of access by itself.
@@ -86,7 +99,7 @@ export function authenticate(appUrl: string) {
             if (!/^[0-9a-f-]{36}$/i.test(wsId)) return null;
             const ws = await db().workspace.findUnique({ where: { id: wsId }, select: { settings: true, organizationId: true, archivedAt: true, organization: { select: { status: true } } } });
             if (!ws) return null;
-            const base = { organizationId: ws.organizationId, orgStatus: ws.organization.status, mfaMissing: !!(ws.settings as { requireMfa?: boolean } | null)?.requireMfa && !session.user.mfaEnabled };
+            const base = { organizationId: ws.organizationId, orgStatus: ws.organization.status, mfaMissing: mfaPolicyMissing(!!(ws.settings as { requireMfa?: boolean } | null)?.requireMfa) };
             const m = await db().workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: wsId, userId: session.userId } } });
             const om = await db().organizationMember.findUnique({ where: { organizationId_userId: { organizationId: ws.organizationId, userId: session.userId } } });
             if (ws.archivedAt && !(om && (om.role === 'OWNER' || om.role === 'ADMIN'))) return null;
@@ -101,9 +114,9 @@ export function authenticate(appUrl: string) {
           };
           res.locals.platformRole = session.user.platformRole ?? null;
           res.locals.mfaEnabled = !!session.user.mfaEnabled;
-          // Rolling expiry, at most once per hour
+          // Rolling expiry, at most once per hour. "Log in as" sessions keep their fixed end time.
           if (now.getTime() - session.lastSeenAt.getTime() > 3600_000) {
-            void db().session.update({ where: { id: session.id }, data: { lastSeenAt: now, expiresAt: new Date(now.getTime() + SESSION_IDLE_MS) } }).catch(() => undefined);
+            void db().session.update({ where: { id: session.id }, data: impersonatorId ? { lastSeenAt: now } : { lastSeenAt: now, expiresAt: new Date(now.getTime() + sessionIdleMs()) } }).catch(() => undefined);
           }
         }
       }

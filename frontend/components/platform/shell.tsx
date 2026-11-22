@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { createContext, useContext, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, ArrowLeft, BarChart3, Building, FileClock, KeyRound, Layers, LifeBuoy, Settings, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
+import { Activity, ArrowLeft, BarChart3, Building, Database, FileClock, KeyRound, Layers, LifeBuoy, Settings, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Loading } from '@/components/ui';
 
@@ -17,6 +17,7 @@ const NAV = [
   { href: '/platform/plans', label: 'Plans', icon: Layers, perm: 'tenants:read' },
   { href: '/platform/support', label: 'Support access', icon: LifeBuoy, perm: 'support:access' },
   { href: '/platform/users', label: 'User accounts', icon: UserCog, perm: 'tenants:read' },
+  { href: '/platform/data', label: 'Data explorer', icon: Database, perm: 'data:read' },
   { href: '/platform/operations', label: 'Operations', icon: Activity, perm: 'metrics:read' },
   { href: '/platform/audit', label: 'Audit trail', icon: FileClock, perm: 'audit:read' },
   { href: '/platform/staff', label: 'Staff & roles', icon: ShieldCheck, perm: 'staff:manage' },
@@ -34,18 +35,19 @@ export function PlatformShell({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={me.data}>
       <div className="min-h-screen lg:flex">
-        <aside className="border-b border-white/10 bg-ink text-ink-200 lg:sticky lg:top-0 lg:h-screen lg:w-60 lg:shrink-0 lg:border-b-0">
+        {/* Same surface as the workspace sidebar, so the console follows light and dark mode the same way. */}
+        <aside className="flex flex-col border-b border-slate-200 bg-white text-slate-600 dark:border-white/5 dark:text-slate-300 lg:sticky lg:top-0 lg:h-screen lg:w-60 lg:shrink-0 lg:border-b-0 lg:border-r" data-testid="platform-sidebar">
           <div className="px-5 py-5">
-            <p className="font-display text-[17px] font-bold text-white">EMN Platform</p>
-            <p className="text-[12px] text-ink-400">Staff console · {me.data.role.replace('_', ' ').toLowerCase()}</p>
+            <p className="font-display text-[17px] font-bold text-ink">EMN Platform</p>
+            <p className="text-[12px] text-slate-500">Staff console · {me.data.role.replace('_', ' ').toLowerCase()}</p>
           </div>
-          <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:block lg:space-y-0.5" aria-label="Platform">
+          <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:block lg:flex-1 lg:space-y-0.5 lg:overflow-y-auto" aria-label="Platform">
             {nav.map((n) => {
               const active = n.href === '/platform' ? path === n.href : path.startsWith(n.href);
-              return <Link key={n.href} href={n.href} aria-current={active ? 'page' : undefined} className={`flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-semibold ${active ? 'bg-white/10 text-white' : 'hover:bg-white/5 hover:text-white'}`}><n.icon className="h-4 w-4" aria-hidden />{n.label}</Link>;
+              return <Link key={n.href} href={n.href} aria-current={active ? 'page' : undefined} className={`flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-semibold transition-colors ${active ? 'bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-white' : 'hover:bg-slate-100 hover:text-ink dark:hover:bg-white/5 dark:hover:text-white'}`}><n.icon className={`h-4 w-4 ${active ? 'text-brand-600 dark:text-brand-400' : 'opacity-60'}`} aria-hidden />{n.label}</Link>;
             })}
           </nav>
-          <Link href="/app?to=workspace" className="mx-3 mb-4 hidden items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-ink-400 hover:text-white lg:flex"><ArrowLeft className="h-4 w-4" aria-hidden />Back to my workspace</Link>
+          <Link href="/app?to=workspace" className="mx-3 mb-4 hidden items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-slate-500 hover:bg-slate-100 hover:text-ink dark:hover:bg-white/5 dark:hover:text-white lg:flex"><ArrowLeft className="h-4 w-4" aria-hidden />Back to my workspace</Link>
         </aside>
         <main className="min-w-0 flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
       </div>

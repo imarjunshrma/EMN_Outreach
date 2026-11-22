@@ -7,6 +7,8 @@ import { fmtDate } from '@/lib/format';
 import { Badge, Button, Card, ErrorState, Field, Input, Loading, Modal, Notice, Select, Table, Textarea } from '@/components/ui';
 import { useToast } from '@/components/toast';
 import { SetupLinkNotice, type SetupResult } from '@/components/platform/setup-link';
+import { LoginAsButton } from '@/components/platform/login-as';
+import Link from 'next/link';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Member = { id: string; role: string; user: { id: string; name: string; email: string; mfaEnabled: boolean; emailVerifiedAt: string | null; lastLoginAt: string | null; status?: string; platformRole?: string | null }; workspaces: Array<{ id: string; name: string; role: string }> };
@@ -63,14 +65,14 @@ export function TenantMembers({ orgId, canChange }: { orgId: string; canChange: 
         <Table head={['Person', 'Organization role', 'Workspaces', 'Security', 'Last sign-in', '']}>
           {d.members.map((m) => (
             <tr key={m.id} data-testid={`member-${m.user.email}`}>
-              <td className="td"><b>{m.user.name}</b><p className="text-xs text-slate-500">{m.user.email}{m.user.status && m.user.status !== 'ACTIVE' ? ' · disabled' : ''}</p></td>
+              <td className="td"><Link href={`/platform/users/${m.user.id}`} className="font-bold hover:underline">{m.user.name}</Link><p className="text-xs text-slate-500">{m.user.email}{m.user.status && m.user.status !== 'ACTIVE' ? ' · disabled' : ''}</p></td>
               <td className="td">{canChange
                 ? <Select className="!w-36 !py-1.5 text-sm" aria-label={`Role of ${m.user.email}`} value={m.role} onChange={(e) => setPending({ kind: 'role', m, role: e.target.value })} options={d.orgRoles.map((r) => ({ value: r, label: label(r) }))} />
                 : <Badge>{label(m.role)}</Badge>}</td>
               <td className="td text-xs">{m.workspaces.length ? m.workspaces.map((w) => `${w.name} (${w.role.toLowerCase()})`).join(', ') : m.role === 'OWNER' || m.role === 'ADMIN' ? 'All, through organization role' : 'None'}</td>
               <td className="td text-xs">{m.user.mfaEnabled ? <Badge color="green">2FA</Badge> : <Badge>no 2FA</Badge>} {!m.user.emailVerifiedAt && <Badge color="yellow">unverified</Badge>}</td>
               <td className="td text-xs">{m.user.lastLoginAt ? fmtDate(m.user.lastLoginAt) : 'never'}</td>
-              <td className="td whitespace-nowrap text-right">{canChange && <>
+              <td className="td whitespace-nowrap text-right">{!m.user.platformRole && m.user.status !== 'DISABLED' && <LoginAsButton orgId={orgId} userId={m.user.id} who={m.user.email} variant="ghost" />}{canChange && <>
                 <Button size="sm" variant="ghost" onClick={() => setPending({ kind: 'reset', m })}>Reset password</Button>
                 <Button size="sm" variant="ghost" disabled={m.role === 'OWNER' && owners <= 1} title={m.role === 'OWNER' && owners <= 1 ? 'Make someone else owner first' : undefined} onClick={() => setPending({ kind: 'remove', m })}>Remove</Button>
               </>}</td>

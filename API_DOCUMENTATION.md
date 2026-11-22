@@ -1,6 +1,6 @@
 # EMN Outreach OS — API documentation
 
-Generated from the route registry by `npm run api-docs` (410 operations). The machine-readable
+Generated from the route registry by `npm run api-docs` (428 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -84,6 +84,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
 | GET | `/announcement` | session | — | — | — | Platform-wide announcement to show to signed-in users, if any |
+| GET | `/public/config` | public | — | — | — | Product name, support email, password rule and maintenance notice (public) |
 
 ## AI
 
@@ -212,7 +213,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/auth/mfa/setup` | session | 10/900s per user | — | — | Start TOTP setup (secret + QR, not active until confirmed) |
 | POST | `/auth/mfa/enable` | session | 10/900s per user | `code`: string | — | Confirm TOTP setup with a code; returns recovery codes once |
 | POST | `/auth/mfa/disable` | session | 5/900s per user | `password`: string, `code`: string | — | Turn off two-factor (password + current code or recovery code) |
-| POST | `/auth/logout` | session | — | — | — | Log out (revokes session) |
+| POST | `/auth/logout` | session | — | — | — | Log out (revokes session). In a "log in as" session this returns the super admin to their own account. |
 | GET | `/auth/me` | session | — | — | — | Current user, CSRF token and workspaces |
 | POST | `/auth/password` | session | 5/900s per user | `currentPassword`: string, `newPassword`: string | — | Change password (revokes other sessions) |
 | GET | `/auth/sessions` | session | — | — | — | List my active sessions |
@@ -221,6 +222,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/auth/signup` | public | 10/3600s per ip | `name`: string, `email`: string, `password`: string, `organizationName`: string, `planCode?`: string, `acceptTerms`: boolean, `termsVersion?`: string, `timezone?`: string, `idempotencyKey?`: string | — | Create an account and a new organization (tenant) with its first workspace and trial |
 | POST | `/auth/verify-email` | public | 20/900s per ip | `token`: string | — | Confirm an email address with the token from the verification email |
 | POST | `/auth/verify-email/resend` | session | 3/900s per user | — | — | Send the verification email again |
+| POST | `/auth/impersonation/stop` | public | 60/300s per ip | — | — | Leave a "log in as" session and return to your own account |
 
 ## Automation
 
@@ -367,7 +369,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/w/:workspaceId/email-verification/role-patterns` | session/API key · ADMIN+ | — | `localPart`: string, `enabled?`: boolean | — | Add or disable a workspace role-based local-part pattern |
 | GET | `/w/:workspaceId/email-verification/history` | session/API key · VIEWER+ | — | — | `email?`: string, `status?`: UNVERIFIED\|VALID\|INVALID\|RISKY\|CATCH_ALL\|UNKNOWN, `page?`: integer, `pageSize?`: integer | Search tenant-scoped first-party verification history |
 | GET | `/w/:workspaceId/email-verification/:id` | session/API key · VIEWER+ | — | — | — | Get tenant-scoped first-party verification result |
-| POST | `/w/:workspaceId/email-verification/diagnostics` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Admin-only outbound SMTP port 25 diagnostic to the configured MAIL FROM domain MX; sends no recipient commands or email |
+| POST | `/w/:workspaceId/email-verification/diagnostics` | session/API key · ADMIN+ | 1/3600s per workspace | — | — | Admin-only outbound SMTP port 25 diagnostic to the configured verification sender domain MX; sends no recipient commands or email |
 
 ## ICP
 
@@ -556,7 +558,23 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/platform/users/:id/password-reset` | session/API key · VIEWER+ | 30/3600s per user | `reason`: string | — | Issue a password reset link for a user (mailed, or returned once when system mail is off) |
 | GET | `/platform/permissions` | session/API key · VIEWER+ | — | — | — | Permission matrix: workspace roles per module (from the route rules), organization roles, staff roles |
 | GET | `/platform/settings` | session/API key · VIEWER+ | — | — | — | Global settings: sign-up mode and announcement banner |
-| PUT | `/platform/settings` | session/API key · VIEWER+ | — | `signupMode`: env\|open\|closed, `announcement`: object, `reason`: string | — | Save global settings (reason required) |
+| PUT | `/platform/settings` | session/API key · VIEWER+ | — | `signupMode?`: env\|open\|closed, `announcement?`: object, `maintenance?`: object, `security?`: object, `signups?`: object, `branding?`: object, `reason`: string | — | Save global settings (reason required) |
+| GET | `/platform/users/:id` | session/API key · VIEWER+ | — | — | — | Everything about one account: memberships, sessions, API keys, activity and staff actions |
+| PUT | `/platform/users/:id` | session/API key · VIEWER+ | — | `name?`: string, `email?`: string, `locale?`: object, `emailVerified?`: boolean, `reason`: string | — | Edit name, email, language or email-verified flag (reason required) |
+| POST | `/platform/users/:id/mfa-reset` | session/API key · VIEWER+ | — | `reason`: string | — | Turn off two-factor for a person who lost their device (signs them out) |
+| POST | `/platform/users/:id/sessions/revoke` | session/API key · VIEWER+ | — | `reason`: string | — | Sign a person out of every browser |
+| POST | `/platform/sessions/:id/revoke` | session/API key · VIEWER+ | — | `reason`: string | — | End one session of any user |
+| PUT | `/platform/tenants/:id/profile` | session/API key · VIEWER+ | — | `name?`: string, `timezone?`: string, `reason`: string | — | Rename an organization or change its time zone (reason required) |
+| PUT | `/platform/tenants/:id/workspaces/:workspaceId` | session/API key · VIEWER+ | — | `name?`: string, `archived?`: boolean, `reason`: string | — | Rename, archive or restore a workspace of a tenant (reason required) |
+| POST | `/platform/users/:id/impersonate` | session/API key · VIEWER+ | 60/3600s per user | `reason`: string, `minutes?`: integer, `workspaceId?`: string | — | Log in as this user: a time-limited session with full access, every change audited (reason required) |
+| POST | `/platform/tenants/:id/impersonate` | session/API key · VIEWER+ | 60/3600s per user | `reason`: string, `minutes?`: integer, `workspaceId?`: string, `userId?`: string | — | Log in to a tenant as its owner (or the member given in userId) |
+| GET | `/platform/impersonations` | session/API key · VIEWER+ | — | — | — | Open "log in as" sessions |
+| DELETE | `/platform/impersonations/:id` | session/API key · VIEWER+ | — | — | — | End a "log in as" session |
+| GET | `/platform/data` | session/API key · VIEWER+ | — | — | `organizationId?`: string, `workspaceId?`: string, `counts?`: true\|false | Every table with record counts, optionally for one tenant or workspace |
+| GET | `/platform/data/:model` | session/API key · VIEWER+ | — | — | `organizationId?`: string, `workspaceId?`: string, `q?`: string, `field?`: string, `value?`: string, `sort?`: string, `dir?`: asc\|desc, `page?`: integer, `pageSize?`: integer | Records of one table: search, filter by column, sort, page (secrets hidden) |
+| GET | `/platform/data/:model/:recordId` | session/API key · VIEWER+ | — | — | — | One record with links to related records (viewing is audited) |
+| PATCH | `/platform/data/:model/:recordId` | session/API key · VIEWER+ | — | `changes`: object, `reason`: string | — | Change fields of a record (reason required; before/after audited) |
+| DELETE | `/platform/data/:model/:recordId` | session/API key · VIEWER+ | — | `reason`: string | — | Delete a record (reason required; the record is kept in the audit trail) |
 
 ## Privacy
 

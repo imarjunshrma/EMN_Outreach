@@ -6,6 +6,7 @@ import { rateLimit } from '../core/redis.js';
 import type { Actor } from '../core/audit.js';
 import { db } from '../core/db.js';
 import { platformAudit, platformMfaRequired } from '../core/tenant.js';
+import { cfg } from '../core/platform-config.js';
 import { ORG_ACCESS, PLATFORM_PERMISSIONS, orgCan, type OrgRole, type OrgStatus, type PlatformPermission, type PlatformRole } from '../../../shared/src/tenancy.js';
 
 // Declarative route registry: one definition drives Express wiring, validation, RBAC,
@@ -62,6 +63,11 @@ export interface RouteDef<B = unknown, Q = unknown> {
 
 export const routes: RouteDef<any, any>[] = [];
 
+/** Personal security settings stay with the person: a super admin signed in as them cannot change these. */
+const IMPERSONATION_BLOCKED = new Set(['post /auth/password', 'post /auth/mfa/setup', 'post /auth/mfa/enable', 'post /auth/mfa/disable', 'delete /auth/sessions/:id']);
+/** Still allowed in maintenance mode: signing in and out, and leaving a "log in as" session. */
+const MAINTENANCE_ALLOWED = new Set(['/auth/login', '/auth/logout', '/auth/mfa/verify', '/auth/impersonation/stop', '/auth/password/forgot', '/auth/password/reset']);
+
 export function route<B = unknown, Q = unknown>(def: RouteDef<B, Q>) {
   routes.push(def as RouteDef<any, any>);
   return def;
@@ -94,13 +100,14 @@ export function mountRoutes(app: Express) {
     const full = `/api/v1${def.path}`;
     app[def.method](full, async (req: Request, res: Response, next) => {
       try {
-        const auth = res.locals.auth as { userId: string | null; sessionId: string | null; apiKeyWorkspaceId: string | null; apiKeyRole: Role | null } | undefined;
+        const auth = res.locals.auth as { userId: string | null; sessionId: string | null; apiKeyWorkspaceId: string | null; apiKeyRole: Role | null; impersonatorId?: string | null } | undefined;
+        const impersonatorId = auth?.impersonatorId ?? null;
         const requestId = String(res.locals.requestId ?? '');
         const ctx = {
           req, res, params: req.params as Record<string, string>, requestId,
           userId: auth?.userId ?? '', workspaceId: '', role: 'VIEWER' as Role, sessionId: auth?.sessionId ?? null,
           organizationId: '', orgRole: null as OrgRole | null, platformRole: (res.locals.platformRole ?? null) as PlatformRole | null,
-          actor: { type: auth?.apiKeyWorkspaceId ? 'API' : 'USER', userId: auth?.userId ?? null, ip: req.ip, requestId } as Actor,
+          actor: { type: auth?.apiKeyWorkspaceId ? 'API' : 'USER', userId: auth?.userId ?? null, ip: req.ip, requestId, impersonatorUserId: impersonatorId } as Actor,
           body: undefined as unknown, query: undefined as unknown,
         };
 
@@ -116,6 +123,16 @@ export function mountRoutes(app: Express) {
 
         if (def.auth !== 'public') {
           if (!auth?.userId && !auth?.apiKeyWorkspaceId) throw Unauthorized();
+        }
+        if (impersonatorId && IMPERSONATION_BLOCKED.has(`${def.method} ${def.path}`)) {
+          throw new AppError('FORBIDDEN', "You are signed in as this person. Their password, two-factor and sessions can't be changed from here — use User accounts in the platform console.", 403);
+        }
+        // Maintenance mode: customers can look but not change anything. Staff, and staff signed in as a user, are not blocked.
+        // Background work (sending, syncing, webhooks) is unaffected.
+        const maintenance = cfg().maintenance;
+        if (maintenance.enabled && def.method !== 'get' && !MAINTENANCE_ALLOWED.has(def.path) && !impersonatorId && !res.locals.platformRole
+          && (def.auth !== 'public' || def.path.startsWith('/auth/'))) {
+          throw new AppError('MAINTENANCE', maintenance.message || 'We are doing maintenance. You can look around, but changes are paused for a short while.', 503);
         }
         // API keys represent a workspace principal, even though authentication
         // stores their creator's user id for audit attribution. Never let that
@@ -173,6 +190,11 @@ export function mountRoutes(app: Express) {
           if (!auth?.userId || auth.apiKeyWorkspaceId || viaSupport) throw new AppError('NOT_FOUND', 'Not found', 404);
           const { isAiSubscriptionOwner } = await import('../services/ai-subscriptions.js');
           if (!(await isAiSubscriptionOwner(auth.userId))) throw new AppError('NOT_FOUND', 'Not found', 404);
+        }
+
+        // Every change made while signed in as someone else is recorded against the super admin.
+        if (impersonatorId && def.method !== 'get') {
+          await platformAudit({ actorUserId: impersonatorId, action: 'impersonation.write', organizationId: ctx.organizationId || null, targetType: 'route', targetId: `${def.method.toUpperCase()} ${req.path}`.slice(0, 300), metadata: { asUserId: auth?.userId ?? null }, ip: req.ip });
         }
 
         if (def.prepare) await def.prepare(ctx as Ctx<any, any>);

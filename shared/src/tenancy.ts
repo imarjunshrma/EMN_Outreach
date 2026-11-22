@@ -40,9 +40,9 @@ export const orgCan = {
 
 export const PLATFORM_ROLES = ['SUPER_ADMIN', 'SUPPORT', 'FINANCE'] as const;
 export type PlatformRole = (typeof PLATFORM_ROLES)[number];
-export type PlatformPermission = 'tenants:read' | 'tenants:lifecycle' | 'plans:write' | 'billing:read' | 'billing:refund' | 'support:access' | 'audit:read' | 'metrics:read' | 'staff:manage' | 'settings:write';
+export type PlatformPermission = 'tenants:read' | 'tenants:lifecycle' | 'plans:write' | 'billing:read' | 'billing:refund' | 'support:access' | 'audit:read' | 'metrics:read' | 'staff:manage' | 'settings:write' | 'users:manage' | 'impersonate' | 'data:read' | 'data:write';
 export const PLATFORM_PERMISSIONS: Record<PlatformRole, PlatformPermission[]> = {
-  SUPER_ADMIN: ['tenants:read', 'tenants:lifecycle', 'plans:write', 'billing:read', 'billing:refund', 'support:access', 'audit:read', 'metrics:read', 'staff:manage', 'settings:write'],
+  SUPER_ADMIN: ['tenants:read', 'tenants:lifecycle', 'plans:write', 'billing:read', 'billing:refund', 'support:access', 'audit:read', 'metrics:read', 'staff:manage', 'settings:write', 'users:manage', 'impersonate', 'data:read', 'data:write'],
   SUPPORT: ['tenants:read', 'support:access', 'audit:read'],
   FINANCE: ['tenants:read', 'billing:read', 'billing:refund', 'metrics:read'],
 };

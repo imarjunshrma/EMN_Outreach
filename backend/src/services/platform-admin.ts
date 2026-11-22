@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
 import { AppError, NotFound } from '../core/errors.js';
 import { platformAudit } from '../core/tenant.js';
+import { SETTING_DEFAULTS, SETTING_KEYS as CONFIG_KEYS, SETTING_SCHEMAS, loadSettings, saveSettings, type SettingKey, type Settings } from '../core/platform-config.js';
 import { randomToken, sha256 } from '../core/crypto.js';
 import { systemMailer, trySendSystemMail } from '../core/mailer.js';
 import { routes } from '../http/router.js';
@@ -241,39 +242,191 @@ export function permissionMatrix() {
 
 // ------------------------------------------------------------------ global settings
 
-export const SETTING_KEYS = ['signupMode', 'announcement'] as const;
+export const SETTING_KEYS = CONFIG_KEYS;
+/** Send only the groups you change; every group is optional. A reason is always required. */
 export const SettingsSchema = z.object({
-  /** 'env' keeps REGISTRATION_OPEN / billing default; 'open' / 'closed' override it. */
-  signupMode: z.enum(['env', 'open', 'closed']),
-  announcement: z.object({ enabled: z.boolean(), level: z.enum(['info', 'warning', 'danger']), message: z.string().trim().max(500) }),
+  signupMode: SETTING_SCHEMAS.signupMode.optional(),
+  announcement: SETTING_SCHEMAS.announcement.optional(),
+  maintenance: SETTING_SCHEMAS.maintenance.optional(),
+  security: SETTING_SCHEMAS.security.optional(),
+  signups: SETTING_SCHEMAS.signups.optional(),
+  branding: SETTING_SCHEMAS.branding.optional(),
   reason: Reason,
 });
-const DEFAULTS = { signupMode: 'env', announcement: { enabled: false, level: 'info', message: '' } } as const;
 
-export async function getSetting<K extends typeof SETTING_KEYS[number]>(key: K): Promise<(typeof DEFAULTS)[K] | Record<string, unknown> | string> {
-  const row = await db().platformSetting.findUnique({ where: { key } });
-  return (row?.value as never) ?? DEFAULTS[key];
+export async function getSetting<K extends SettingKey>(key: K): Promise<Settings[K]> {
+  return (await loadSettings())[key];
 }
 
 export async function platformSettings() {
-  const rows = await db().platformSetting.findMany({ where: { key: { in: [...SETTING_KEYS] } } });
-  const value = (k: typeof SETTING_KEYS[number]) => rows.find((r) => r.key === k)?.value ?? DEFAULTS[k];
+  const values = await loadSettings();
   const { registrationOpen } = await import('./tenancy.js');
-  return { signupMode: value('signupMode'), announcement: value('announcement'), effective: { registrationOpen: await registrationOpen(), envRegistration: process.env.REGISTRATION_OPEN ?? process.env.PUBLIC_REGISTRATION ?? null } };
+  const { billingEnabled } = await import('./entitlements.js');
+  const plans = await db().plan.findMany({ where: { archivedAt: null, isActive: true }, select: { code: true, name: true }, orderBy: { sortOrder: 'asc' } });
+  return {
+    ...values,
+    defaults: SETTING_DEFAULTS,
+    plans,
+    effective: {
+      registrationOpen: await registrationOpen(),
+      envRegistration: process.env.REGISTRATION_OPEN ?? process.env.PUBLIC_REGISTRATION ?? null,
+      envMaxOrgsPerUser: Number(process.env.MAX_ORGS_PER_USER ?? 5),
+      billingEnabled: billingEnabled(),
+      platformMfaRequired: (await import('../core/tenant.js')).platformMfaRequired(),
+    },
+  };
 }
 
 export async function savePlatformSettings(input: z.infer<typeof SettingsSchema>, admin: Admin) {
-  if (input.announcement.enabled && !input.announcement.message) throw new AppError('VALIDATION_FAILED', 'Write the announcement message before turning it on', 400);
-  await db().$transaction([
-    db().platformSetting.upsert({ where: { key: 'signupMode' }, update: { value: input.signupMode, updatedById: admin.userId }, create: { key: 'signupMode', value: input.signupMode, updatedById: admin.userId } }),
-    db().platformSetting.upsert({ where: { key: 'announcement' }, update: { value: input.announcement, updatedById: admin.userId }, create: { key: 'announcement', value: input.announcement, updatedById: admin.userId } }),
-  ]);
-  await platformAudit({ actorUserId: admin.userId, action: 'platform.settings_saved', targetType: 'platform_settings', reason: input.reason, ip: admin.ip, metadata: { signupMode: input.signupMode, announcement: input.announcement.enabled } });
+  const { reason, ...values } = input;
+  const changed = Object.keys(values).filter((k) => values[k as SettingKey] !== undefined);
+  if (!changed.length) throw new AppError('VALIDATION_FAILED', 'Nothing to save', 400);
+  if (values.announcement?.enabled && !values.announcement.message) throw new AppError('VALIDATION_FAILED', 'Write the announcement message before turning it on', 400);
+  if (values.signups?.defaultPlanCode && !(await db().plan.findFirst({ where: { code: values.signups.defaultPlanCode, archivedAt: null } }))) throw new AppError('VALIDATION_FAILED', 'No active plan has that code', 400);
+  const before = await loadSettings();
+  await saveSettings(values, admin.userId);
+  await platformAudit({ actorUserId: admin.userId, action: 'platform.settings_saved', targetType: 'platform_settings', reason, ip: admin.ip, metadata: {
+    changed, signupMode: values.signupMode ?? before.signupMode, announcement: (values.announcement ?? before.announcement).enabled,
+    before: Object.fromEntries(changed.map((k) => [k, before[k as SettingKey]])), after: Object.fromEntries(changed.map((k) => [k, values[k as SettingKey]])),
+  } });
   return platformSettings();
 }
 
 /** For every signed-in user: the active announcement, if any. */
 export async function activeAnnouncement() {
-  const a = await getSetting('announcement') as { enabled?: boolean; level?: string; message?: string };
+  const a = await getSetting('announcement');
   return a?.enabled && a.message ? { level: a.level ?? 'info', message: a.message } : null;
+}
+
+/** Public: product name, support address, password rule and whether maintenance mode is on (for banners and sign-up forms). */
+export async function publicConfig() {
+  const v = await loadSettings();
+  return {
+    appName: v.branding.appName, supportEmail: v.branding.supportEmail || null, passwordMinLength: v.security.passwordMinLength,
+    maintenance: v.maintenance.enabled ? { message: v.maintenance.message || 'We are doing maintenance. You can look around, but changes are paused for a short while.' } : null,
+  };
+}
+
+// ------------------------------------------------------------------ user accounts (360° view and controls)
+
+export async function userDetail(userId: string) {
+  const u = await db().user.findUnique({ where: { id: userId }, select: {
+    id: true, email: true, name: true, status: true, platformRole: true, isPlatformAdmin: true, locale: true, mfaEnabled: true, mfaEnabledAt: true,
+    emailVerifiedAt: true, termsAcceptedAt: true, termsVersion: true, lastLoginAt: true, createdAt: true, updatedAt: true,
+    orgMemberships: { select: { role: true, createdAt: true, organization: { select: { id: true, name: true, status: true, ownerId: true } } } },
+    memberships: { select: { role: true, createdAt: true, workspace: { select: { id: true, name: true, organizationId: true, archivedAt: true } } } },
+  } });
+  if (!u) throw NotFound('User');
+  const now = new Date();
+  const [sessions, activity, staffActions, apiKeys, counts] = await Promise.all([
+    db().session.findMany({ where: { userId, revokedAt: null, expiresAt: { gt: now } }, orderBy: { lastSeenAt: 'desc' }, select: { id: true, ipAddress: true, userAgent: true, createdAt: true, lastSeenAt: true, expiresAt: true, impersonatorId: true, impersonationReason: true } }),
+    db().auditLog.findMany({ where: { actorUserId: userId }, orderBy: { createdAt: 'desc' }, take: 50, select: { id: true, action: true, entityType: true, entityId: true, workspaceId: true, ipAddress: true, createdAt: true, metadata: true } }),
+    db().platformAuditEvent.findMany({ where: { OR: [{ targetType: 'user', targetId: userId }, { actorUserId: userId }] }, orderBy: { createdAt: 'desc' }, take: 50 }),
+    db().apiKey.findMany({ where: { createdById: userId, revokedAt: null }, select: { id: true, name: true, prefix: true, role: true, workspaceId: true, lastUsedAt: true, expiresAt: true, createdAt: true } }),
+    Promise.all([db().lead.count({ where: { ownerId: userId } }), db().task.count({ where: { assigneeId: userId } }), db().note.count({ where: { authorId: userId } })]).catch(() => [null, null, null]),
+  ]);
+  const staffIds = [...new Set(staffActions.map((a) => a.actorUserId).filter((x): x is string => !!x))];
+  const staff = await db().user.findMany({ where: { id: { in: staffIds } }, select: { id: true, email: true, name: true } });
+  return {
+    user: u, sessions, activity, apiKeys,
+    counts: { leadsOwned: counts[0], tasksAssigned: counts[1], notes: counts[2] },
+    platformAudit: staffActions.map((a) => ({ ...a, actor: staff.find((x) => x.id === a.actorUserId) ?? null })),
+  };
+}
+
+export const UserEditSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  email: z.string().trim().toLowerCase().email().optional(),
+  locale: z.string().trim().max(20).nullable().optional(),
+  emailVerified: z.boolean().optional(),
+  reason: Reason,
+});
+export async function editUser(userId: string, input: z.infer<typeof UserEditSchema>, admin: Admin) {
+  const u = await db().user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, locale: true, emailVerifiedAt: true } });
+  if (!u) throw NotFound('User');
+  const data: Prisma.UserUpdateInput = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.locale !== undefined) data.locale = input.locale;
+  if (input.email !== undefined && input.email !== u.email) {
+    if (await db().user.findUnique({ where: { email: input.email }, select: { id: true } })) throw new AppError('CONFLICT', 'Another account already uses that email', 409);
+    data.email = input.email;
+  }
+  if (input.emailVerified !== undefined) data.emailVerifiedAt = input.emailVerified ? (u.emailVerifiedAt ?? new Date()) : null;
+  if (!Object.keys(data).length) throw new AppError('VALIDATION_FAILED', 'Nothing to change', 400);
+  await db().user.update({ where: { id: userId }, data });
+  await platformAudit({ actorUserId: admin.userId, action: 'user.edited_by_admin', targetType: 'user', targetId: userId, reason: input.reason, ip: admin.ip, metadata: { before: { email: u.email, name: u.name, locale: u.locale, emailVerified: !!u.emailVerifiedAt }, changes: { ...input, reason: undefined } } });
+  return userDetail(userId);
+}
+
+export const ReasonSchema = z.object({ reason: Reason });
+
+/** Turns off two-factor for someone who lost their device. They can sign in with their password and set it up again. */
+export async function resetUserMfa(userId: string, input: { reason: string }, admin: Admin) {
+  if (userId === admin.userId) throw new AppError('FORBIDDEN', 'Turn off your own two-factor from My account → Security', 403);
+  const u = await db().user.findUnique({ where: { id: userId }, select: { id: true, mfaEnabled: true } });
+  if (!u) throw NotFound('User');
+  if (!u.mfaEnabled) throw new AppError('CONFLICT', 'Two-factor is already off for this account', 409);
+  await db().$transaction([
+    db().user.update({ where: { id: userId }, data: { mfaEnabled: false, mfaSecretEnc: null, mfaRecoveryHashes: [], mfaEnabledAt: null } }),
+    db().session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }),
+  ]);
+  await platformAudit({ actorUserId: admin.userId, action: 'user.mfa_reset', targetType: 'user', targetId: userId, reason: input.reason, ip: admin.ip });
+  return { ok: true };
+}
+
+/** Signs a person out of every browser (and ends any "log in as" sessions for them). */
+export async function revokeUserSessions(userId: string, input: { reason: string }, admin: Admin) {
+  if (userId === admin.userId) throw new AppError('FORBIDDEN', 'Use My account → Sessions to sign yourself out elsewhere', 403);
+  if (!(await db().user.findUnique({ where: { id: userId }, select: { id: true } }))) throw NotFound('User');
+  const r = await db().session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+  await platformAudit({ actorUserId: admin.userId, action: 'user.sessions_revoked', targetType: 'user', targetId: userId, reason: input.reason, ip: admin.ip, metadata: { count: r.count } });
+  return { revoked: r.count };
+}
+
+export async function revokeOneSession(sessionId: string, input: { reason: string }, admin: Admin & { sessionId?: string | null }) {
+  const s = await db().session.findUnique({ where: { id: sessionId }, select: { id: true, userId: true, revokedAt: true } });
+  if (!s) throw NotFound('Session');
+  if (s.id === admin.sessionId) throw new AppError('FORBIDDEN', 'That is the session you are using now', 403);
+  if (!s.revokedAt) await db().session.update({ where: { id: s.id }, data: { revokedAt: new Date() } });
+  await platformAudit({ actorUserId: admin.userId, action: 'user.session_revoked', targetType: 'user', targetId: s.userId, reason: input.reason, ip: admin.ip, metadata: { sessionId } });
+  return { ok: true };
+}
+
+// ------------------------------------------------------------------ tenant profile and workspaces
+
+export const TenantProfileSchema = z.object({
+  name: z.string().trim().min(2).max(120).optional(),
+  timezone: z.string().trim().min(1).max(60).optional(),
+  reason: Reason,
+});
+export async function editTenantProfile(organizationId: string, input: z.infer<typeof TenantProfileSchema>, admin: Admin) {
+  const o = await db().organization.findUnique({ where: { id: organizationId }, select: { id: true, name: true, timezone: true, status: true } });
+  if (!o || o.status === 'DELETED') throw NotFound('Organization');
+  const data: Prisma.OrganizationUpdateInput = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.timezone !== undefined) data.timezone = input.timezone;
+  if (!Object.keys(data).length) throw new AppError('VALIDATION_FAILED', 'Nothing to change', 400);
+  await db().organization.update({ where: { id: organizationId }, data });
+  await platformAudit({ actorUserId: admin.userId, action: 'tenant.profile_edited', organizationId, reason: input.reason, ip: admin.ip, metadata: { before: { name: o.name, timezone: o.timezone }, after: { name: input.name, timezone: input.timezone } } });
+  return { ok: true };
+}
+
+export const WorkspaceEditSchema = z.object({
+  name: z.string().trim().min(2).max(80).optional(),
+  archived: z.boolean().optional(),
+  reason: Reason,
+});
+export async function editTenantWorkspace(organizationId: string, workspaceId: string, input: z.infer<typeof WorkspaceEditSchema>, admin: Admin) {
+  const w = await db().workspace.findFirst({ where: { id: workspaceId, organizationId }, select: { id: true, name: true, archivedAt: true } });
+  if (!w) throw NotFound('Workspace');
+  const data: Prisma.WorkspaceUpdateInput = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.archived !== undefined) {
+    if (input.archived && !w.archivedAt && (await db().workspace.count({ where: { organizationId, archivedAt: null } })) <= 1) throw new AppError('CONFLICT', 'An organization needs at least one open workspace', 409);
+    data.archivedAt = input.archived ? (w.archivedAt ?? new Date()) : null;
+  }
+  if (!Object.keys(data).length) throw new AppError('VALIDATION_FAILED', 'Nothing to change', 400);
+  await db().workspace.update({ where: { id: workspaceId }, data });
+  await platformAudit({ actorUserId: admin.userId, action: 'tenant.workspace_edited', organizationId, targetType: 'workspace', targetId: workspaceId, reason: input.reason, ip: admin.ip, metadata: { before: { name: w.name, archived: !!w.archivedAt }, after: { name: input.name, archived: input.archived } } });
+  return { ok: true };
 }

@@ -188,6 +188,19 @@ test('platform console: staff need 2FA, then metrics, tenant search, audited sus
   await expect(page.getByText(CUSTOMER.email)).toBeVisible();
 
   // ERP console: staff & roles, permission matrix, global settings (announcement), new tenant, members, modules.
+  // The console follows the chosen theme like the rest of the app: fully light, or fully dark, never mixed.
+  const lum = (sel: string) => page.locator(sel).first().evaluate((el) => { const m = getComputedStyle(el).backgroundColor.match(/\d+/g)!.map(Number); return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255; });
+  await page.goto('/platform'); await expect(page.getByTestId('platform-tiles')).toBeVisible();
+  for (const [theme, light] of [['light', true], ['dark', false]] as const) {
+    await page.evaluate((t) => localStorage.setItem('emn-theme', t), theme);
+    await page.reload(); await page.waitForLoadState('networkidle');
+    for (const sel of ['body', '[data-testid="platform-sidebar"]', '.card']) {
+      const v = await lum(sel);
+      if (light) expect(v, `${sel} should be light`).toBeGreaterThan(0.85); else expect(v, `${sel} should be dark`).toBeLessThan(0.2);
+    }
+    await shot(page, `platform-${theme}`);
+  }
+  await page.evaluate(() => localStorage.setItem('emn-theme', 'light'));
   await page.getByRole('link', { name: 'Back to my workspace' }).click();
   await expect(page.getByTestId('open-platform-console')).toBeVisible(); // and the workspace sidebar links back
   await page.getByTestId('open-platform-console').click();

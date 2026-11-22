@@ -18,6 +18,8 @@ const PERM_LABEL: Record<string, string> = {
   'plans:write': 'Create and edit plans', 'billing:read': 'See invoices and payments', 'billing:refund': 'Issue refunds',
   'support:access': 'Open a customer workspace (read-only, time-limited)', 'audit:read': 'Read the platform audit trail',
   'metrics:read': 'See platform metrics and operations', 'staff:manage': 'Manage staff and their roles', 'settings:write': 'Change global settings',
+  'users:manage': 'Edit accounts, reset two-factor, sign people out', 'impersonate': 'Log in as any customer user (full access, audited)',
+  'data:read': 'Browse every table in the data explorer', 'data:write': 'Edit and delete records in the data explorer',
 };
 
 export default function StaffPage() {

@@ -38,7 +38,8 @@ export async function processVerificationCsvBatch(workspaceId: string, batchId: 
   if (!batch || !batch.storageKey) throw new Error('CSV verification batch or stored file was not found');
   if (batch.status === 'CANCELLED') return { skipped: 'batch cancelled' };
   const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
-  const dictionaries = await verificationDictionaries(workspaceId, readSettings(workspace?.settings).verificationSmtpProbeEnabled);
+  const verificationSettings = readSettings(workspace?.settings);
+  const dictionaries = await verificationDictionaries(workspaceId, verificationSettings.verificationSmtpProbeEnabled, verificationSettings.verificationSmtpMailFrom);
   assertKeyBelongsTo(batch.storageKey, workspaceId);
   const parser = parse({ bom: true, skip_empty_lines: true, relax_column_count: true, max_record_size: 256 * 1024 });
   const stream = store().stream(batch.storageKey).pipe(parser);

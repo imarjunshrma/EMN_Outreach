@@ -8,6 +8,8 @@ import { Badge, Button, Field, Input, Loading, Modal, PageHeader, Table, Textare
 import { useToast } from '@/components/toast';
 import { usePlatform } from '@/components/platform/shell';
 import { SetupLinkNotice, type SetupResult } from '@/components/platform/setup-link';
+import { LoginAsButton } from '@/components/platform/login-as';
+import Link from 'next/link';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export default function Users() {
@@ -31,17 +33,18 @@ export default function Users() {
   return (
     <>
       <PageHeader title="User accounts" subtitle="Find a person across all organizations. Disabling an account signs it out everywhere and blocks sign-in; their organizations and data are untouched." />
+      <OpenSessions />
       <div className="mb-4 max-w-md"><Input icon={Search} placeholder="Email or name (at least 2 characters)" value={term} onChange={(e) => setTerm(e.target.value)} aria-label="Search users" /></div>
       {term.trim().length < 2 ? <p className="text-sm text-slate-500">Type to search.</p> : q.isLoading ? <Loading /> : (
         <Table head={['Person', 'Organizations', 'Security', 'Last sign-in', 'Status', '']}>
           {(q.data?.data ?? []).map((u) => (
             <tr key={u.id}>
-              <td className="td"><b>{u.name}</b><p className="text-xs text-slate-500">{u.email}{u.platformRole ? ` · staff: ${u.platformRole.toLowerCase()}` : ''}</p></td>
+              <td className="td"><Link href={`/platform/users/${u.id}`} className="font-bold text-brand-700 hover:underline">{u.name}</Link><p className="text-xs text-slate-500">{u.email}{u.platformRole ? ` · staff: ${u.platformRole.toLowerCase()}` : ''}</p></td>
               <td className="td text-xs">{u.orgMemberships.map((m: any) => `${m.organization.name} (${m.role.toLowerCase()})`).join(', ') || '—'}</td>
               <td className="td text-xs">{u.mfaEnabled ? <Badge color="green">2FA</Badge> : <Badge>no 2FA</Badge>} {!u.emailVerifiedAt && <Badge color="yellow">unverified</Badge>}</td>
               <td className="td text-xs">{u.lastLoginAt ? fmtDate(u.lastLoginAt) : 'never'}</td>
               <td className="td">{u.status === 'ACTIVE' ? <Badge color="green">active</Badge> : <Badge color="red">disabled</Badge>}</td>
-              <td className="td whitespace-nowrap text-right">{canChange && u.status === 'ACTIVE' && <Button size="sm" variant="ghost" onClick={() => setReset({ user: u, reason: '', result: null })}>Reset password</Button>}{canChange && <Button size="sm" variant={u.status === 'ACTIVE' ? 'danger' : 'secondary'} onClick={() => setTarget(u)}>{u.status === 'ACTIVE' ? 'Disable' : 'Enable'}</Button>}</td>
+              <td className="td whitespace-nowrap text-right">{!u.platformRole && u.status === 'ACTIVE' && <LoginAsButton userId={u.id} who={u.email} variant="ghost" />}{canChange && u.status === 'ACTIVE' && <Button size="sm" variant="ghost" onClick={() => setReset({ user: u, reason: '', result: null })}>Reset password</Button>}{canChange && <Button size="sm" variant={u.status === 'ACTIVE' ? 'danger' : 'secondary'} onClick={() => setTarget(u)}>{u.status === 'ACTIVE' ? 'Disable' : 'Enable'}</Button>}</td>
             </tr>
           ))}
         </Table>
@@ -57,5 +60,21 @@ export default function Users() {
         </>)}
       </Modal>
     </>
+  );
+}
+
+/** "Log in as" sessions that are open right now, by any super admin. */
+function OpenSessions() {
+  const me = usePlatform(); const toast = useToast(); const qc = useQueryClient();
+  const q = useQuery({ queryKey: ['platform-impersonations'], queryFn: () => api<any[]>('/platform/impersonations'), enabled: me.permissions.includes('impersonate'), refetchInterval: 60_000 });
+  if (!q.data?.length) return null;
+  return (
+    <div className="card mb-4 border-red-200 p-4" data-testid="open-impersonations">
+      <p className="mb-2 text-sm font-bold text-red-800">Open “log in as” sessions ({q.data.length})</p>
+      <Table head={['Signed in as', 'By', 'Reason', 'Ends', '']}>
+        {q.data.map((s) => <tr key={s.id}><td className="td text-xs"><Link className="font-semibold hover:underline" href={`/platform/users/${s.user.id}`}>{s.user.email}</Link></td><td className="td text-xs">{s.impersonator?.email ?? '—'}</td><td className="td max-w-[280px] truncate text-xs">{s.impersonationReason}</td><td className="td text-xs">{fmtDate(s.expiresAt)}</td>
+          <td className="td text-right"><Button size="sm" variant="ghost" onClick={async () => { try { await api(`/platform/impersonations/${s.id}`, { method: 'DELETE' }); toast.success('Session ended'); void qc.invalidateQueries({ queryKey: ['platform-impersonations'] }); } catch (e) { toast.error(describeError(e)); } }}>End</Button></td></tr>)}
+      </Table>
+    </div>
   );
 }

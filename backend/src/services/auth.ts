@@ -5,19 +5,21 @@ import { randomToken, sha256 } from '../core/crypto.js';
 import { AppError, BadRequest, Unauthorized } from '../core/errors.js';
 import { audit, type Actor } from '../core/audit.js';
 import { CSRF_COOKIE, SESSION_COOKIE } from '../http/middleware.js';
+import { cfg } from '../core/platform-config.js';
 
-const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
+const sessionTtlMs = () => cfg().security.sessionIdleDays * 24 * 3600 * 1000;
 const ARGON_OPTS = { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 } as const;
 
 export function hashPassword(pw: string) { return argon2.hash(pw, ARGON_OPTS); }
 let dummyHash: Promise<string> | null = null;
 
 export function validatePasswordStrength(pw: string) {
-  if (pw.length < 12) throw BadRequest('WEAK_PASSWORD', 'Password must be at least 12 characters');
+  const min = cfg().security.passwordMinLength; // Platform → Global settings → Security (default 12)
+  if (pw.length < min) throw BadRequest('WEAK_PASSWORD', `Password must be at least ${min} characters`);
   if (!/[a-zA-Z]/.test(pw) || !/[0-9]/.test(pw)) throw BadRequest('WEAK_PASSWORD', 'Password must contain letters and numbers');
 }
 
-function cookieOpts(maxAgeMs: number, httpOnly: boolean) {
+export function cookieOpts(maxAgeMs: number, httpOnly: boolean) {
   const secure = (process.env.APP_URL ?? '').startsWith('https://');
   return { httpOnly, secure, sameSite: 'lax' as const, path: '/', maxAge: maxAgeMs };
 }
@@ -26,7 +28,7 @@ export async function createSession(res: Response, userId: string, meta: { ip?: 
   const token = randomToken(32);
   const csrfToken = randomToken(24);
   const session = await db().session.create({
-    data: { tokenHash: sha256(token), csrfToken, userId, activeWorkspaceId, ipAddress: meta.ip, userAgent: meta.userAgent?.slice(0, 300), expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+    data: { tokenHash: sha256(token), csrfToken, userId, activeWorkspaceId, ipAddress: meta.ip, userAgent: meta.userAgent?.slice(0, 300), expiresAt: new Date(Date.now() + sessionTtlMs()) },
   });
   res.cookie(SESSION_COOKIE, token, cookieOpts(30 * 24 * 3600 * 1000, true));
   res.cookie(CSRF_COOKIE, csrfToken, cookieOpts(30 * 24 * 3600 * 1000, false));
@@ -101,9 +103,12 @@ export async function me(userId: string, sessionId: string | null) {
   const organizations = await tenancy.myOrganizations(userId);
   for (const o of organizations) if (o.status === 'PENDING_SETUP') await tenancy.ensureProvisioned(o.id, userId); // recover interrupted provisioning
   const session = sessionId ? await db().session.findUnique({ where: { id: sessionId } }) : null;
+  const by = session?.impersonatorId ? await db().user.findUnique({ where: { id: session.impersonatorId }, select: { id: true, name: true, email: true } }) : null;
   return {
     user: publicUser(user),
     csrfToken: session?.csrfToken ?? null,
+    /** Set while a super admin is signed in as this user ("log in as"). */
+    impersonation: session?.impersonatorId ? { by, reason: session.impersonationReason, expiresAt: session.expiresAt } : null,
     organizations: organizations.map(({ workspaces, ...o }) => ({ ...o, workspaceIds: workspaces.map((w) => w.id) })),
     workspaces: organizations.flatMap((o) => o.workspaces.map((w) => ({ ...w, organizationId: o.id, organizationName: o.name, organizationStatus: o.status }))),
   };

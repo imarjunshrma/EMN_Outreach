@@ -423,11 +423,15 @@ model Session {
   revokedAt         DateTime? @db.Timestamptz(3)
   createdAt         DateTime  @default(now()) @db.Timestamptz(3)
   lastSeenAt        DateTime  @default(now()) @db.Timestamptz(3)
+  // "Log in as": set when a super admin opened this session on the user's behalf (time-limited, audited, never extended).
+  impersonatorId      String?   @db.Uuid
+  impersonationReason String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
+  @@index([impersonatorId])
 }
 
 model Workspace {

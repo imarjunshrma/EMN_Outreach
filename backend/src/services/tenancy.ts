@@ -10,6 +10,7 @@ import { store } from '../core/storage.js';
 import { canTransition, ONBOARDING_STEPS, orgCan, type OnboardingStepId, type OrgRole, type OrgStatus } from '../../../shared/src/tenancy.js';
 import { billingEnabled, assertQuota, tenantState } from './entitlements.js';
 import { currentUsage } from './usage.js';
+import { cfg } from '../core/platform-config.js';
 
 // Tenants (organizations): provisioning, lifecycle, membership, workspaces, onboarding and deletion.
 
@@ -58,7 +59,8 @@ export function trialIdentity(email: string) {
   if (domain === 'gmail.com') local = local.replace(/\./g, '');
   return sha256(`trial:${local}@${domain}`);
 }
-const MAX_ORGS_PER_USER = () => Number(process.env.MAX_ORGS_PER_USER ?? 5);
+/** Platform → Global settings → Sign-ups wins over the MAX_ORGS_PER_USER server setting (default 5). */
+const MAX_ORGS_PER_USER = () => cfg().signups.maxOrgsPerUser ?? Number(process.env.MAX_ORGS_PER_USER ?? 5);
 
 export async function provisionTenant(input: ProvisionInput) {
   if (input.registrationKey) {
@@ -67,7 +69,7 @@ export async function provisionTenant(input: ProvisionInput) {
   }
   const plans = billingEnabled() ? await (await import('./billing.js')).ensurePlans() : null;
   void plans;
-  const plan = billingEnabled() ? await db().plan.findFirst({ where: { code: input.planCode ?? 'starter', isActive: true, archivedAt: null } }) ?? await db().plan.findFirstOrThrow({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } }) : null;
+  const plan = billingEnabled() ? await db().plan.findFirst({ where: { code: input.planCode ?? (cfg().signups.defaultPlanCode || 'starter'), isActive: true, archivedAt: null } }) ?? await db().plan.findFirstOrThrow({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } }) : null;
   const owner = await db().user.findUniqueOrThrow({ where: { id: input.userId }, select: { email: true, platformRole: true } });
   let result;
   let trialGranted = false;
@@ -127,7 +129,7 @@ export async function ensureProvisioned(organizationId: string, actorUserId?: st
 export const SignupSchema = z.object({
   name: z.string().trim().min(1).max(100),
   email: z.string().email().max(254),
-  password: z.string().min(12).max(200),
+  password: z.string().min(8).max(200),
   organizationName: z.string().trim().min(2).max(80),
   planCode: z.string().max(40).optional(),
   acceptTerms: z.literal(true, { message: 'You must accept the Terms of Service and Privacy Policy' }),

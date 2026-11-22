@@ -7,6 +7,8 @@ export interface Actor {
   userId?: string | null;
   ip?: string | null;
   requestId?: string | null;
+  /** Set when a super admin is signed in as this user ("log in as"); recorded with every audit entry. */
+  impersonatorUserId?: string | null;
 }
 
 export const SYSTEM_ACTOR: Actor = { type: 'SYSTEM' };
@@ -28,7 +30,7 @@ export async function audit(
         action,
         entityType: entity?.type,
         entityId: entity?.id,
-        metadata: metadata as Prisma.InputJsonValue,
+        metadata: (actor.impersonatorUserId ? { ...metadata, impersonatedBy: actor.impersonatorUserId } : metadata) as Prisma.InputJsonValue,
         ipAddress: actor.ip ?? null,
         requestId: actor.requestId ?? null,
       },
