@@ -93,7 +93,7 @@ export function authenticate(appUrl: string) {
             if (m) return { ...base, role: m.role as Role, via: 'member' };
             if (om?.role === 'OWNER') return { ...base, role: 'OWNER' as Role, via: 'org_owner' };
             if (om?.role === 'ADMIN') return { ...base, role: 'ADMIN' as Role, via: 'org_admin' };
-            if ((session.user.platformRole === 'SUPPORT' || session.user.platformRole === 'SUPER_ADMIN') && session.user.mfaEnabled) {
+            if ((session.user.platformRole === 'SUPPORT' || session.user.platformRole === 'SUPER_ADMIN') && (session.user.mfaEnabled || !(await import('../core/tenant.js')).platformMfaRequired())) {
               const grant = await db().supportAccessGrant.findFirst({ where: { organizationId: ws.organizationId, adminUserId: session.userId, revokedAt: null, expiresAt: { gt: new Date() } } });
               if (grant) return { ...base, role: 'VIEWER' as Role, via: 'support', supportGrantId: grant.id, mfaMissing: false };
             }

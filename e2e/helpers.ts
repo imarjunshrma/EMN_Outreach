@@ -47,6 +47,9 @@ export async function login(page: Page, email = ADMIN.email, password = ADMIN.pa
 }
 
 export async function workspaceBase(page: Page) {
+  // Platform staff land in the console after sign-in; step into their workspace like the "Back to my workspace" link.
+  await expect(page).toHaveURL(/\/w\/[0-9a-f-]{36}|\/platform/);
+  if (/\/platform/.test(new URL(page.url()).pathname)) await page.goto('/app?to=workspace');
   await expect(page).toHaveURL(/\/w\/[0-9a-f-]{36}/);
   return new URL(page.url()).pathname.match(/^\/w\/[0-9a-f-]{36}/)![0];
 }

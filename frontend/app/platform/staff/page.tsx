@@ -6,6 +6,7 @@ import { api, describeError } from '@/lib/api';
 import { fmtDate } from '@/lib/format';
 import { Badge, Button, Card, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Textarea } from '@/components/ui';
 import { useToast } from '@/components/toast';
+import { usePlatform } from '@/components/platform/shell';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Staff = { id: string; email: string; name: string; platformRole: string; mfaEnabled: boolean; status: string; lastLoginAt: string | null };
@@ -21,6 +22,7 @@ const PERM_LABEL: Record<string, string> = {
 
 export default function StaffPage() {
   const toast = useToast(); const qc = useQueryClient();
+  const mfaRequired = usePlatform().mfaRequired !== false;
   const q = useQuery({ queryKey: ['platform-staff'], queryFn: () => api<Data>('/platform/staff') });
   const [edit, setEdit] = useState<{ user?: Staff; email: string; role: string; reason: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +48,7 @@ export default function StaffPage() {
             <tr key={s.id} data-testid={`staff-${s.email}`}>
               <td className="td"><b>{s.name}</b><p className="text-xs text-slate-500">{s.email}{s.status !== 'ACTIVE' ? ' · disabled' : ''}</p></td>
               <td className="td"><Badge color={s.platformRole === 'SUPER_ADMIN' ? 'red' : 'blue'}>{label(s.platformRole)}</Badge></td>
-              <td className="td">{s.mfaEnabled ? <Badge color="green">on</Badge> : <Badge color="yellow">off — console blocked</Badge>}</td>
+              <td className="td">{s.mfaEnabled ? <Badge color="green">on</Badge> : <Badge color="yellow">{mfaRequired ? 'off — console blocked' : 'off'}</Badge>}</td>
               <td className="td text-xs">{s.lastLoginAt ? fmtDate(s.lastLoginAt) : 'never'}</td>
               <td className="td text-right"><Button size="sm" variant="secondary" onClick={() => setEdit({ user: s, email: s.email, role: s.platformRole, reason: '' })}>Change role</Button></td>
             </tr>
@@ -68,7 +70,7 @@ export default function StaffPage() {
           {!edit.user && <Field label="Email" hint="The person needs an account already (sign up or be added to a tenant first)."><Input type="email" value={edit.email} onChange={(e) => setEdit({ ...edit, email: e.target.value })} /></Field>}
           <Field label="Role"><Select value={edit.role} onChange={(e) => setEdit({ ...edit, role: e.target.value })} options={[...roleOptions, ...(edit.user ? [{ value: '', label: 'No staff access' }] : [])]} /></Field>
           {edit.role && <p className="mb-3 text-xs text-slate-500">{(q.data!.roles.find((r) => r.role === edit.role)?.permissions ?? []).map((p) => PERM_LABEL[p] ?? p).join(' · ')}</p>}
-          {edit.role && <div className="mb-3"><Notice>Staff must turn on two-factor sign-in before the console opens for them.</Notice></div>}
+          {edit.role && mfaRequired && <div className="mb-3"><Notice>Staff must turn on two-factor sign-in before the console opens for them.</Notice></div>}
           <Field label="Reason" hint="Required; recorded in the platform audit trail."><Textarea rows={2} value={edit.reason} onChange={(e) => setEdit({ ...edit, reason: e.target.value })} /></Field>
         </>}
       </Modal>

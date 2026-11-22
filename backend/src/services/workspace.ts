@@ -27,6 +27,7 @@ export const WorkspaceSettingsSchema = z.object({
   verificationDisposablePolicy: z.enum(['block', 'allow']).default('block'),
   verificationRolePolicy: z.enum(['allow', 'review', 'block']).default('review'),
   verificationSmtpProbeEnabled: z.boolean().default(false),
+  verificationSmtpMailFrom: z.string().trim().email().max(254).nullable().default(null),
   emergencyPause: z.boolean().default(false),
   automaticCampaignSending: z.boolean().default(true),
   automaticFollowups: z.boolean().default(true),

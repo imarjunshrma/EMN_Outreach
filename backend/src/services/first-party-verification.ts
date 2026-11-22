@@ -14,7 +14,8 @@ export async function createVerification(workspaceId: string, email: string, opt
   const syntax = validateEmailSyntax(input);
   const normalized = (syntax.valid ? syntax.normalizedEmail : input).toLowerCase();
   const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
-  const dictionaries = await verificationDictionaries(workspaceId, readSettings(ws?.settings).verificationSmtpProbeEnabled);
+  const workspaceSettings = readSettings(ws?.settings);
+  const dictionaries = await verificationDictionaries(workspaceId, workspaceSettings.verificationSmtpProbeEnabled, workspaceSettings.verificationSmtpMailFrom);
   // Serialize identical requests so retries and concurrent clients reuse the same queued row.
   // PostgreSQL transaction-scoped advisory locks do not add schema constraints or alter history.
   const lockKey = opts.batchId
@@ -76,10 +77,11 @@ export async function processFirstPartyVerification(workspaceId: string, verific
     data: { rawResult: 'processing', step: attempt, details: { ...(row.details as Record<string, unknown>), state: 'PROCESSING', attempt, processingAt: new Date().toISOString() } },
   });
   if (!claim.count) return { skipped: 'another worker claimed this verification' };
-  const result = await inspectEmail(row.email, undefined, 2500, await verificationDictionaries(workspaceId, workspaceSettings.verificationSmtpProbeEnabled));
+  const result = await inspectEmail(row.email, undefined, 2500, await verificationDictionaries(workspaceId, workspaceSettings.verificationSmtpProbeEnabled, workspaceSettings.verificationSmtpMailFrom));
   const env = config();
+  const mailFrom = workspaceSettings.verificationSmtpMailFrom || env.EMAIL_VERIFY_MAIL_FROM;
   let controlResult: SmtpResult | undefined;
-  if (result.syntax.valid && result.dns.mx.length && workspaceSettings.verificationSmtpProbeEnabled && env.EMAIL_VERIFY_SMTP_ENABLED && env.EMAIL_VERIFY_MAIL_FROM) {
+  if (result.syntax.valid && result.dns.mx.length && workspaceSettings.verificationSmtpProbeEnabled && env.EMAIL_VERIFY_SMTP_ENABLED && mailFrom) {
     const release = await acquireLock(`email-verify-domain:${result.domain}`, 300_000);
     if (!release) throw new Error('SMTP domain cooldown is active; retry later');
     try {
@@ -89,13 +91,13 @@ export async function processFirstPartyVerification(workspaceId: string, verific
         return domainLimit.allowed && globalLimit.allowed;
       };
       if (!await claimSmtpProbe()) throw new Error('SMTP verification rate limit reached; retry scheduled');
-      result.smtp = await probeRecipientSmtp({ email: result.normalizedEmail, domain: result.domain, mx }, { enabled: true, mailFrom: env.EMAIL_VERIFY_MAIL_FROM, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
+      result.smtp = await probeRecipientSmtp({ email: result.normalizedEmail, domain: result.domain, mx }, { enabled: true, mailFrom, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
       if (env.EMAIL_VERIFY_CATCH_ALL_ENABLED && result.smtp.classification === 'ACCEPTED_BUT_UNCONFIRMED') {
         if (!await claimSmtpProbe()) {
           result.catchAll = { status: 'UNKNOWN', reason: 'Control recipient probe skipped because the SMTP rate limit was reached', controlClassification: 'NOT_PROBED' };
         } else {
           const controlAddress = `emn-control-${randomUUID()}@${result.domain}`;
-          controlResult = await probeRecipientSmtp({ email: controlAddress, domain: result.domain, mx }, { enabled: true, mailFrom: env.EMAIL_VERIFY_MAIL_FROM, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
+          controlResult = await probeRecipientSmtp({ email: controlAddress, domain: result.domain, mx }, { enabled: true, mailFrom, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
           result.catchAll = {
             status: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'SUSPECTED' : controlResult.classification === 'USER_UNKNOWN' ? 'NOT_CATCH_ALL' : 'UNKNOWN',
             reason: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'One randomized control recipient was accepted; catch-all is suspected, not confirmed' : controlResult.classification === 'USER_UNKNOWN' ? 'Random control recipient was rejected' : `Control result was ${controlResult.classification}`,
@@ -116,7 +118,14 @@ export async function processFirstPartyVerification(workspaceId: string, verific
       }
     } finally { await release(); }
   } else {
-    result.smtp = { classification: 'DISABLED', reason: 'SMTP verification is disabled or requires valid MX and EMAIL_VERIFY_MAIL_FROM' };
+    const reason = !workspaceSettings.verificationSmtpProbeEnabled
+      ? 'Enable SMTP probing in this workspace verification settings'
+      : !env.EMAIL_VERIFY_SMTP_ENABLED
+        ? 'SMTP probing is disabled by the server configuration'
+        : !mailFrom
+          ? 'Set a verification sender address in this workspace settings or EMAIL_VERIFY_MAIL_FROM on the server'
+          : 'SMTP recipient probing requires a valid MX record';
+    result.smtp = { classification: 'DISABLED', reason };
   }
   const [suppression, lead] = await Promise.all([
     isSuppressed(workspaceId, row.email),

@@ -7,7 +7,7 @@ import { Activity, ArrowLeft, BarChart3, Building, FileClock, KeyRound, Layers, 
 import { api } from '@/lib/api';
 import { Loading } from '@/components/ui';
 
-type PlatformMe = { role: string; permissions: string[]; mfaEnabled: boolean };
+type PlatformMe = { role: string; permissions: string[]; mfaEnabled: boolean; mfaRequired?: boolean };
 const Ctx = createContext<PlatformMe>({ role: '', permissions: [], mfaEnabled: false });
 export const usePlatform = () => useContext(Ctx);
 
@@ -29,7 +29,7 @@ export function PlatformShell({ children }: { children: ReactNode }) {
   const me = useQuery({ queryKey: ['platform-me'], queryFn: () => api<PlatformMe>('/platform/me'), retry: false });
   if (me.isLoading) return <Loading />;
   if (me.error || !me.data) return <div className="grid min-h-screen place-items-center p-8 text-center"><div><p className="font-display text-2xl font-bold">Page not found</p><Link className="mt-3 inline-block text-sm font-semibold text-brand-700 underline" href="/app">Back to the app</Link></div></div>;
-  if (!me.data.mfaEnabled) return <MfaRequired />;
+  if (!me.data.mfaEnabled && me.data.mfaRequired !== false) return <MfaRequired />;
   const nav = NAV.filter((n) => me.data!.permissions.includes(n.perm));
   return (
     <Ctx.Provider value={me.data}>
@@ -45,7 +45,7 @@ export function PlatformShell({ children }: { children: ReactNode }) {
               return <Link key={n.href} href={n.href} aria-current={active ? 'page' : undefined} className={`flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-semibold ${active ? 'bg-white/10 text-white' : 'hover:bg-white/5 hover:text-white'}`}><n.icon className="h-4 w-4" aria-hidden />{n.label}</Link>;
             })}
           </nav>
-          <Link href="/app" className="mx-3 mb-4 hidden items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-ink-400 hover:text-white lg:flex"><ArrowLeft className="h-4 w-4" aria-hidden />Back to my workspace</Link>
+          <Link href="/app?to=workspace" className="mx-3 mb-4 hidden items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-ink-400 hover:text-white lg:flex"><ArrowLeft className="h-4 w-4" aria-hidden />Back to my workspace</Link>
         </aside>
         <main className="min-w-0 flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
       </div>
@@ -53,7 +53,7 @@ export function PlatformShell({ children }: { children: ReactNode }) {
   );
 }
 
-/** Staff must turn on 2FA before any console screen loads (the API enforces the same rule). */
+/** Staff must turn on 2FA before any console screen loads, unless this install turned the rule off (the API enforces the same rule). */
 function MfaRequired() {
   const me = useQuery({ queryKey: ['me'], queryFn: () => api<{ workspaces: Array<{ id: string }> }>('/auth/me') });
   const ws = me.data?.workspaces[0]?.id;

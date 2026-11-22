@@ -5,7 +5,7 @@ import { AppError, Forbidden, NotFound, Unauthorized } from '../core/errors.js';
 import { rateLimit } from '../core/redis.js';
 import type { Actor } from '../core/audit.js';
 import { db } from '../core/db.js';
-import { platformAudit } from '../core/tenant.js';
+import { platformAudit, platformMfaRequired } from '../core/tenant.js';
 import { ORG_ACCESS, PLATFORM_PERMISSIONS, orgCan, type OrgRole, type OrgStatus, type PlatformPermission, type PlatformRole } from '../../../shared/src/tenancy.js';
 
 // Declarative route registry: one definition drives Express wiring, validation, RBAC,
@@ -164,9 +164,8 @@ export function mountRoutes(app: Express) {
           if (!auth?.userId || auth.apiKeyWorkspaceId) throw Unauthorized();
           const pr = res.locals.platformRole as PlatformRole | null;
           if (!pr || (def.platformPermission && !PLATFORM_PERMISSIONS[pr].includes(def.platformPermission))) throw new AppError('NOT_FOUND', 'Not found', 404); // platform area is invisible to tenants
-          // Privileged staff must use two-factor sign-in. Disable only for local development (never in production).
-          const mfaOptional = process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production';
-          if (!res.locals.mfaEnabled && !def.allowWithoutMfa && !mfaOptional) throw new AppError('MFA_REQUIRED', 'Platform staff must turn on two-factor authentication (My account → Security) before using the platform console.', 403, { platform: true });
+          // Privileged staff must use two-factor sign-in unless PLATFORM_MFA_REQUIRED=false (private install, not production).
+          if (!res.locals.mfaEnabled && !def.allowWithoutMfa && platformMfaRequired()) throw new AppError('MFA_REQUIRED', 'Platform staff must turn on two-factor authentication (My account → Security) before using the platform console.', 403, { platform: true });
           ctx.platformRole = pr;
         }
 

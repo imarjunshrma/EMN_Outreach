@@ -185,4 +185,20 @@ describe('permission matrix & settings', () => {
     expect((await u.agent.get('/api/v1/announcement')).body.announcement).toBeNull();
     expect((await send(root, 'put', '/platform/settings', { signupMode: 'env', announcement: { enabled: true, level: 'info', message: '' }, reason: R })).status).toBe(400);
   });
+
+  it('two-factor for staff is required by default and can be switched off for a private install', async () => {
+    await db().user.create({ data: { email: 'nomfa@emn.test', name: 'No MFA', passwordHash: await hashPassword(PW), platformRole: 'SUPER_ADMIN', isPlatformAdmin: true, emailVerifiedAt: new Date() } });
+    const s = await login('nomfa@emn.test');
+    try {
+      delete process.env.PLATFORM_MFA_REQUIRED;
+      const me = await send(s, 'get', '/platform/me');
+      expect(me.body).toMatchObject({ mfaEnabled: false, mfaRequired: true });
+      expect((await send(s, 'get', '/platform/tenants')).status).toBe(403); // MFA_REQUIRED
+      process.env.PLATFORM_MFA_REQUIRED = 'false';
+      expect((await send(s, 'get', '/platform/me')).body.mfaRequired).toBe(false);
+      expect((await send(s, 'get', '/platform/tenants')).status).toBe(200);
+      process.env.NODE_ENV = 'production'; // never switched off in production
+      expect((await send(s, 'get', '/platform/tenants')).status).toBe(403);
+    } finally { delete process.env.PLATFORM_MFA_REQUIRED; process.env.NODE_ENV = 'test'; }
+  });
 });

@@ -143,6 +143,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
           <button onClick={() => setPalette(true)} className="mt-2 flex w-full items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-500 hover:border-slate-300 hover:text-ink">
             <Search className="h-4 w-4" aria-hidden /><span className="flex-1">Go to…</span><kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 text-[11px] text-slate-500">⌘K</kbd>
           </button>
+          {me.data?.user.platformRole && <Link href="/platform" data-testid="open-platform-console" className="mt-2 flex w-full items-center gap-2 rounded-lg bg-ink px-3 py-2 text-sm font-semibold text-white hover:opacity-90"><ShieldCheck className="h-4 w-4" aria-hidden /><span className="flex-1">Platform console</span><span className="text-[11px] font-normal text-white/60">super admin</span></Link>}
         </div>
         <nav className="flex-1 overflow-y-auto px-2.5 pb-6" aria-label="Main">
           {groups.map((g) => {

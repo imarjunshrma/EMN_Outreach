@@ -188,12 +188,14 @@ route({ method: 'get', path: '/w/:workspaceId/email-verification/:id', tag: 'Enr
   return result;
 } });
 
-route({ method: 'post', path: '/w/:workspaceId/email-verification/diagnostics', tag: 'Enrichment', summary: 'Admin-only outbound SMTP port 25 diagnostic to the configured MAIL FROM domain MX; sends no recipient commands or email', auth: 'workspace', role: 'ADMIN', status: 200, rateLimit: { limit: 1, windowSec: 3600, key: 'workspace' }, handler: async () => {
+route({ method: 'post', path: '/w/:workspaceId/email-verification/diagnostics', tag: 'Enrichment', summary: 'Admin-only outbound SMTP port 25 diagnostic to the configured verification sender domain MX; sends no recipient commands or email', auth: 'workspace', role: 'ADMIN', status: 200, rateLimit: { limit: 1, windowSec: 3600, key: 'workspace' }, handler: async (c) => {
   const env = config();
+  const workspace = await db().workspace.findFirst({ where: { id: c.workspaceId }, select: { settings: true } });
+  const mailFrom = readSettings(workspace?.settings).verificationSmtpMailFrom || env.EMAIL_VERIFY_MAIL_FROM;
   const [smtp, redisStatus, verificationQueue] = await Promise.all([
-    diagnoseSmtpConnectivity(env.EMAIL_VERIFY_MAIL_FROM, { enabled: env.EMAIL_VERIFY_SMTP_ENABLED, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS }),
+    diagnoseSmtpConnectivity(mailFrom, { enabled: env.EMAIL_VERIFY_SMTP_ENABLED, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS }),
     redis().ping().then(() => 'CONNECTED').catch(() => 'UNAVAILABLE'),
     queue(QUEUES.verify).getJobCounts('waiting','active','delayed','failed','completed').catch(() => null),
   ]);
-  return { smtpEnabled: env.EMAIL_VERIFY_SMTP_ENABLED, catchAllProbeEnabled: env.EMAIL_VERIFY_CATCH_ALL_ENABLED, mailFromConfigured: !!env.EMAIL_VERIFY_MAIL_FROM, smtp, redis: redisStatus, verificationQueue };
+  return { smtpEnabled: env.EMAIL_VERIFY_SMTP_ENABLED, catchAllProbeEnabled: env.EMAIL_VERIFY_CATCH_ALL_ENABLED, mailFromConfigured: !!mailFrom, smtp, redis: redisStatus, verificationQueue };
 } });

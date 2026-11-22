@@ -132,8 +132,7 @@ test('platform console: staff need 2FA, then metrics, tenant search, audited sus
   expect(reg.ok()).toBeTruthy();
   await sql(`UPDATE "User" SET "platformRole" = 'SUPER_ADMIN' WHERE email = $1`, [STAFF.email]);
   await login(page, STAFF.email, STAFF.password);
-  await workspaceBase(page);
-  await page.goto('/platform');
+  await expect(page).toHaveURL(/\/platform/); // staff land in the console after sign-in
   await expect(page.getByTestId('platform-mfa-required')).toBeVisible(); // console refuses staff without 2FA
   const secret = await page.evaluate(async () => {
     const csrf = decodeURIComponent(document.cookie.match(/emn_csrf=([^;]+)/)?.[1] ?? '');
@@ -189,6 +188,9 @@ test('platform console: staff need 2FA, then metrics, tenant search, audited sus
   await expect(page.getByText(CUSTOMER.email)).toBeVisible();
 
   // ERP console: staff & roles, permission matrix, global settings (announcement), new tenant, members, modules.
+  await page.getByRole('link', { name: 'Back to my workspace' }).click();
+  await expect(page.getByTestId('open-platform-console')).toBeVisible(); // and the workspace sidebar links back
+  await page.getByTestId('open-platform-console').click();
   await page.getByRole('link', { name: 'Staff & roles' }).click();
   await expect(page.getByTestId(`staff-${STAFF.email}`)).toContainText(/super admin/i);
   await expect(page.getByTestId('role-matrix')).toContainText('Issue refunds');

@@ -77,8 +77,8 @@ route({ method: 'delete', path: '/orgs/:organizationId/deletion', tag: 'Organiza
   handler: async (c) => { await tenancy.cancelDeletion(c.organizationId, c.actor); return { ok: true }; } });
 
 // ---------------------------------------------------------------- platform administration (EMN staff; invisible to tenants)
-route({ method: 'get', path: '/platform/me', tag: 'Platform', summary: 'My platform role, permissions and whether 2FA is on (required for every other platform route)', auth: 'platform', allowWithoutMfa: true,
-  handler: async (c) => ({ role: c.platformRole, mfaEnabled: !!c.res.locals.mfaEnabled, permissions: (await import('../../../shared/src/tenancy.js')).PLATFORM_PERMISSIONS[c.platformRole!] }) });
+route({ method: 'get', path: '/platform/me', tag: 'Platform', summary: 'My platform role, permissions, whether 2FA is on and whether this install requires it for staff', auth: 'platform', allowWithoutMfa: true,
+  handler: async (c) => ({ role: c.platformRole, mfaEnabled: !!c.res.locals.mfaEnabled, mfaRequired: (await import('../core/tenant.js')).platformMfaRequired(), permissions: (await import('../../../shared/src/tenancy.js')).PLATFORM_PERMISSIONS[c.platformRole!] }) });
 route({ method: 'get', path: '/platform/users', tag: 'Platform', summary: 'Find user accounts by email or name', auth: 'platform', platformPermission: 'tenants:read', query: platform.UserQuery, handler: (c) => platform.searchUsers(c.query) });
 route({ method: 'post', path: '/platform/users/:id/status', tag: 'Platform', summary: 'Disable (signs out everywhere) or re-enable a user account; reason required', auth: 'platform', platformPermission: 'tenants:lifecycle', status: 200,
   body: platform.UserStatusSchema, handler: (c) => platform.setUserStatus(c.params.id, c.body, { ...admin(c), role: c.platformRole! }) });

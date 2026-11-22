@@ -30310,7 +30310,7 @@
         "tags": [
           "Platform"
         ],
-        "summary": "My platform role, permissions and whether 2FA is on (required for every other platform route)",
+        "summary": "My platform role, permissions, whether 2FA is on and whether this install requires it for staff",
         "description": "Authentication: platform staff only (session cookie); returns 404 to everyone else\n\nRate limit: global Nginx limit",
         "parameters": [],
         "security": [

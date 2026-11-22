@@ -523,7 +523,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
-| GET | `/platform/me` | session/API key · VIEWER+ | — | — | — | My platform role, permissions and whether 2FA is on (required for every other platform route) |
+| GET | `/platform/me` | session/API key · VIEWER+ | — | — | — | My platform role, permissions, whether 2FA is on and whether this install requires it for staff |
 | GET | `/platform/users` | session/API key · VIEWER+ | — | — | `q`: string, `page?`: integer | Find user accounts by email or name |
 | POST | `/platform/users/:id/status` | session/API key · VIEWER+ | — | `status`: ACTIVE\|DISABLED, `reason`: string | — | Disable (signs out everywhere) or re-enable a user account; reason required |
 | GET | `/platform/metrics` | session/API key · VIEWER+ | — | — | — | SaaS metrics: tenants by status, MRR/ARR, churn, plan and usage distribution, operations |

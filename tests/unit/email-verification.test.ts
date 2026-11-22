@@ -4,6 +4,7 @@ import { calculateEmailRisk, inspectEmail, validateEmailSyntax } from '../../int
 import { classifyMailboxEvidence, classifySmtpReply, diagnoseSmtpConnectivity, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
 import { chooseEmailColumn, csvSafe } from '../../backend/src/services/verification-csv.js';
 import { verificationCacheVersion } from '../../backend/src/services/email-verification-datasets.js';
+import { WorkspaceSettingsSchema } from '../../backend/src/services/workspace.js';
 
 const resolver = (overrides: Record<string, unknown> = {}) => ({
   resolveMx: vi.fn().mockResolvedValue([{ exchange: 'mx.example.com', priority: 10 }]),
@@ -74,6 +75,12 @@ describe('first-party email verification primitives', () => {
     expect(verificationCacheVersion('dataset-v1', { ...base, workspaceSmtpEnabled: true })).not.toBe(oldVersion);
     expect(verificationCacheVersion('dataset-v1', { ...base, smtpEnabled: true, mailFrom: 'verify@example.test' })).not.toBe(oldVersion);
     expect(verificationCacheVersion('dataset-v1', { ...base, catchAllEnabled: true })).not.toBe(oldVersion);
+  });
+
+  it('accepts a workspace sender address and rejects malformed sender settings', () => {
+    expect(WorkspaceSettingsSchema.safeParse({ verificationSmtpMailFrom: 'verify@example.com' }).success).toBe(true);
+    expect(WorkspaceSettingsSchema.safeParse({ verificationSmtpMailFrom: 'not-an-email' }).success).toBe(false);
+    expect(WorkspaceSettingsSchema.safeParse({ verificationSmtpMailFrom: null }).success).toBe(true);
   });
 
   it('permits SMTP connections only to public MX addresses', () => {

@@ -33,3 +33,11 @@ export async function assertOperational(workspaceId: string) {
 export async function platformAudit(e: { actorUserId?: string | null; action: string; organizationId?: string | null; targetType?: string; targetId?: string; reason?: string | null; metadata?: Record<string, unknown>; ip?: string | null }) {
   await db().platformAuditEvent.create({ data: { actorUserId: e.actorUserId ?? null, action: e.action, organizationId: e.organizationId ?? null, targetType: e.targetType ?? null, targetId: e.targetId ?? null, reason: e.reason ?? null, metadata: (e.metadata ?? {}) as Prisma.InputJsonValue, ip: e.ip ?? null } });
 }
+
+/**
+ * Whether platform staff must use two-factor sign-in. On by default. PLATFORM_MFA_REQUIRED=false turns it off
+ * for a private install outside production (the console, support access and personal AI subscriptions all follow this).
+ */
+export function platformMfaRequired() {
+  return !(process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production');
+}

@@ -46,8 +46,7 @@ export async function isAiSubscriptionOwner(userId: string | null | undefined): 
   const emails = ownerEmails();
   if (!emails.size || u.platformRole !== 'SUPER_ADMIN') return false;
   if (!emails.has(u.email.toLowerCase())) return false;
-  const mfaOptional = process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production';
-  return u.mfaEnabled || mfaOptional;
+  return u.mfaEnabled || !(await import('../core/tenant.js')).platformMfaRequired();
 }
 
 export async function assertOwner(userId: string | null | undefined) {

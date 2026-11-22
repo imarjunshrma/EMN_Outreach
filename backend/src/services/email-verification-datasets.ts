@@ -28,11 +28,11 @@ function normalizeDomain(input: string) {
   return domain;
 }
 
-export async function verificationDictionaries(workspaceId: string, workspaceSmtpEnabled = false): Promise<VerificationDictionaries> {
+export async function verificationDictionaries(workspaceId: string, workspaceSmtpEnabled = false, workspaceMailFrom?: string | null): Promise<VerificationDictionaries> {
   const cached = cache.get(workspaceId);
-  if (cached && cached.expiresAt > Date.now()) return withVerificationConfig(cached.dictionaries, workspaceSmtpEnabled);
+  if (cached && cached.expiresAt > Date.now()) return withVerificationConfig(cached.dictionaries, workspaceSmtpEnabled, workspaceMailFrom);
   const inFlight = loading.get(workspaceId);
-  if (inFlight) return withVerificationConfig(await inFlight, workspaceSmtpEnabled);
+  if (inFlight) return withVerificationConfig(await inFlight, workspaceSmtpEnabled, workspaceMailFrom);
   const pending = (async () => {
     const [domains, overrides, patterns] = await Promise.all([
       db().disposableEmailDomain.findMany({ where: { source: SOURCE }, select: { domain: true } }),
@@ -57,16 +57,16 @@ export async function verificationDictionaries(workspaceId: string, workspaceSmt
     return dictionaries;
   })();
   loading.set(workspaceId, pending);
-  try { return withVerificationConfig(await pending, workspaceSmtpEnabled); }
+  try { return withVerificationConfig(await pending, workspaceSmtpEnabled, workspaceMailFrom); }
   finally { if (loading.get(workspaceId) === pending) loading.delete(workspaceId); }
 }
 
-function withVerificationConfig(dictionaries: VerificationDictionaries, workspaceSmtpEnabled: boolean): VerificationDictionaries {
+function withVerificationConfig(dictionaries: VerificationDictionaries, workspaceSmtpEnabled: boolean, workspaceMailFrom?: string | null): VerificationDictionaries {
   const env = {
     workspaceSmtpEnabled,
     smtpEnabled: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_SMTP_ENABLED ?? ''),
     catchAllEnabled: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_CATCH_ALL_ENABLED ?? ''),
-    mailFrom: process.env.EMAIL_VERIFY_MAIL_FROM,
+    mailFrom: workspaceMailFrom?.trim() || process.env.EMAIL_VERIFY_MAIL_FROM,
   };
   return { ...dictionaries, datasetVersion: verificationCacheVersion(dictionaries.datasetVersion ?? 'unknown', env) };
 }
