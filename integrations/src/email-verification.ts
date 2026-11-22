@@ -11,7 +11,7 @@ export type EmailCheck = {
   dns: { status: 'NOT_CHECKED' | 'MX' | 'NULL_MX' | 'A_FALLBACK' | 'NO_MAIL_ROUTE' | 'NXDOMAIN' | 'DNS_ERROR'; mx: Array<{ exchange: string; priority: number; addresses: string[] }>; error?: string };
   attributes: { disposable: boolean; freeProvider: boolean; roleBased: boolean };
   smtp?: SmtpResult | { classification: 'DISABLED'; reason: string };
-  catchAll?: { status: 'SUSPECTED' | 'NOT_CATCH_ALL' | 'UNKNOWN'; reason: string; controlClassification: string };
+  catchAll?: { status: 'SUSPECTED' | 'NOT_CATCH_ALL' | 'UNKNOWN'; reason: string; controlClassification: string; controlResponse?: string; controlReason?: string };
   risk?: { score: number; level: 'LOW' | 'MEDIUM' | 'HIGH'; meaning: string; signals: string[] };
   datasetVersion?: string;
   limitations: string[];

@@ -91,19 +91,23 @@ export async function processFirstPartyVerification(workspaceId: string, verific
         return domainLimit.allowed && globalLimit.allowed;
       };
       if (!await claimSmtpProbe()) throw new Error('SMTP verification rate limit reached; retry scheduled');
-      result.smtp = await probeRecipientSmtp({ email: result.normalizedEmail, domain: result.domain, mx }, { enabled: true, mailFrom, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
-      if (env.EMAIL_VERIFY_CATCH_ALL_ENABLED && result.smtp.classification === 'ACCEPTED_BUT_UNCONFIRMED') {
-        if (!await claimSmtpProbe()) {
-          result.catchAll = { status: 'UNKNOWN', reason: 'Control recipient probe skipped because the SMTP rate limit was reached', controlClassification: 'NOT_PROBED' };
-        } else {
-          const controlAddress = `emn-control-${randomUUID()}@${result.domain}`;
-          controlResult = await probeRecipientSmtp({ email: controlAddress, domain: result.domain, mx }, { enabled: true, mailFrom, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
-          result.catchAll = {
-            status: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'SUSPECTED' : controlResult.classification === 'USER_UNKNOWN' ? 'NOT_CATCH_ALL' : 'UNKNOWN',
-            reason: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'One randomized control recipient was accepted; catch-all is suspected, not confirmed' : controlResult.classification === 'USER_UNKNOWN' ? 'Random control recipient was rejected' : `Control result was ${controlResult.classification}`,
-            controlClassification: controlResult.classification,
-          };
-        }
+      // Catch-all check: a random address at the same domain, asked in the SAME SMTP session right after the target.
+      const controlAddress = env.EMAIL_VERIFY_CATCH_ALL_ENABLED ? `emn-control-${randomUUID().replace(/-/g, '').slice(0, 20)}@${result.domain}` : undefined;
+      const probed = await probeRecipientSmtp({ email: result.normalizedEmail, domain: result.domain, mx }, { enabled: true, mailFrom, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS, controlEmail: controlAddress });
+      const { control, ...target } = probed;
+      result.smtp = target;
+      if (controlAddress && target.classification === 'ACCEPTED_BUT_UNCONFIRMED') {
+        controlResult = control ?? { classification: 'INCONCLUSIVE', durationMs: 0, reason: 'The server ended the session before the control recipient was checked' };
+        const c = controlResult.classification;
+        result.catchAll = {
+          status: c === 'ACCEPTED_BUT_UNCONFIRMED' ? 'SUSPECTED' : c === 'USER_UNKNOWN' ? 'NOT_CATCH_ALL' : 'UNKNOWN',
+          reason: c === 'ACCEPTED_BUT_UNCONFIRMED' ? 'A random address at this domain was also accepted, so the server accepts every address (catch-all)'
+            : c === 'USER_UNKNOWN' ? 'A random address at this domain was rejected, so the server checks recipients'
+            : `Control result was ${c}${controlResult.response ? ` (${controlResult.response.slice(0, 160)})` : controlResult.reason ? ` (${controlResult.reason})` : ''}`,
+          controlClassification: c,
+          ...(controlResult.response ? { controlResponse: controlResult.response.slice(0, 300) } : {}),
+          ...(controlResult.reason ? { controlReason: controlResult.reason } : {}),
+        };
       }
       result.primaryStatus = classifyMailboxEvidence(result.smtp, controlResult);
       result.limitations = [
@@ -112,9 +116,12 @@ export async function processFirstPartyVerification(workspaceId: string, verific
         'SMTP status does not prove deliverability or inbox placement',
         'No DATA command or email delivery was performed',
       ];
-      if (['TEMPORARY_FAILURE','GREYLISTED','CONNECTION_TIMEOUT','CONNECTION_RESET'].includes(result.smtp.classification) && attempt < 4) {
+      const transient = ['TEMPORARY_FAILURE','GREYLISTED','CONNECTION_TIMEOUT','CONNECTION_RESET'];
+      // Retry later both when the target got a temporary answer and when the target was accepted but the catch-all
+      // control could not be answered (temporary/greylisted/dropped): otherwise the address is stuck at UNKNOWN.
+      if ((transient.includes(result.smtp.classification) || (controlResult && [...transient, 'SMTP_UNAVAILABLE', 'INCONCLUSIVE'].includes(controlResult.classification))) && attempt < 4) {
         await db().emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: 'processing' }, data: { rawResult: 'queued', step: attempt, details: { ...result, ...sourceColumns(row.details), state: 'RETRYING', attempt } } });
-        throw new Error(`Temporary SMTP result ${result.smtp.classification}; scheduled retry ${attempt + 1}`);
+        throw new Error(`Temporary SMTP result ${controlResult && result.smtp.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? `for the catch-all check (${controlResult.classification})` : result.smtp.classification}; scheduled retry ${attempt + 1}`);
       }
     } finally { await release(); }
   } else {
