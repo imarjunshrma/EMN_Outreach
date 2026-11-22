@@ -9,7 +9,7 @@ import { isSuppressed } from './compliance.js';
 import { verificationDictionaries } from './email-verification-datasets.js';
 import { readSettings } from './workspace.js';
 
-export async function createVerification(workspaceId: string, email: string, opts: { batchId?: string; leadId?: string } = {}) {
+export async function createVerification(workspaceId: string, email: string, opts: { batchId?: string; leadId?: string; force?: boolean } = {}) {
   const input = email.trim().normalize('NFC');
   const syntax = validateEmailSyntax(input);
   const normalized = (syntax.valid ? syntax.normalizedEmail : input).toLowerCase();
@@ -24,7 +24,9 @@ export async function createVerification(workspaceId: string, email: string, opt
     ? `email-verification:batch:${workspaceId}:${opts.batchId}:${normalized}`
     : `email-verification:request:${workspaceId}:${opts.leadId ?? ''}:${normalized}`;
   return db().$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+    // Prisma raw-query APIs must return a decodable value; PostgreSQL advisory locks
+    // return void, so force the lock in a materialized CTE and select an integer.
+    await tx.$queryRaw`WITH verification_lock AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))) SELECT 1 FROM verification_lock`;
     if (opts.batchId) {
       const existing = await tx.emailVerification.findFirst({ where: { workspaceId, batchId: opts.batchId, email: normalized, provider: 'first-party-dns' } });
       if (existing) return { id: existing.id, status: existing.result, cached: existing.rawResult !== 'queued', details: existing.details };
@@ -37,7 +39,7 @@ export async function createVerification(workspaceId: string, email: string, opt
       orderBy: { createdAt: 'desc' },
     });
     const currentCached = cached && (cached.details as { datasetVersion?: string } | null)?.datasetVersion === dictionaries.datasetVersion ? cached : null;
-    if (currentCached && !opts.batchId) return { id: currentCached.id, status: currentCached.result, cached: true, details: currentCached.details };
+    if (currentCached && !opts.batchId && !opts.force) return { id: currentCached.id, status: currentCached.result, cached: true, details: currentCached.details };
     if (currentCached && opts.batchId) {
       const copy = await tx.emailVerification.create({ data: { workspaceId, batchId: opts.batchId, email: normalized, provider: 'first-party-dns', result: currentCached.result, rawResult: currentCached.rawResult, details: currentCached.details as Prisma.InputJsonValue, expiresAt: currentCached.expiresAt } });
       return { id: copy.id, status: copy.result, cached: true, details: copy.details };

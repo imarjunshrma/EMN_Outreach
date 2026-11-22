@@ -143,6 +143,26 @@ describe('owner-only access (server-side)', () => {
     process.env.AI_SUBSCRIPTION_OWNER_EMAILS = OWNER;
   });
 
+  it('instance-wide mode: every account gets its own subscriptions, but never while sign-up is open', async () => {
+    process.env.AI_SUBSCRIPTION_ACCESS = 'all';
+    process.env.REGISTRATION_OPEN = 'false';
+    try {
+      const second = await createUserSession('second-account@other.test'); // no staff role, no 2FA
+      expect((await second.agent.get(api('/ai-subscriptions/access'))).body.allowed).toBe(true);
+      const c = await second.agent.post(api('/ai-subscriptions/claude/connect')).set('x-csrf-token', second.csrf).send({ token: TOKEN });
+      expect(c.body.connection.status).toBe('CONNECTED');
+      // Connections are per account: the first account still has none.
+      const mine = await s.agent.get(api('/ai-subscriptions/connections'));
+      expect(mine.body.connections.find((x: { provider: string }) => x.provider === 'CLAUDE_SUBSCRIPTION').status).toBe('DISCONNECTED');
+      expect((await second.agent.get(api('/ai-workflows'))).body.workflows).toHaveLength(6);
+      process.env.REGISTRATION_OPEN = 'true'; // public sign-up → the feature switches itself off
+      expect((await second.agent.get(api('/ai-subscriptions/connections'))).status).toBe(404);
+    } finally {
+      delete process.env.AI_SUBSCRIPTION_ACCESS;
+      delete process.env.REGISTRATION_OPEN;
+    }
+  });
+
   it('refuses API keys even when created by the owner', async () => {
     const k = await s.agent.post(ws('/api-keys')).set('x-csrf-token', s.csrf).send({ name: 'k', role: 'ADMIN', scopes: [] });
     const key = k.body.key ?? k.body.token ?? k.body.secret;

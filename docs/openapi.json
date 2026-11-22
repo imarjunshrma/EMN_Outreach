@@ -24146,7 +24146,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Verify one lead now through the verifier waterfall",
+        "summary": "Verify one lead using the workspace-selected custom or external mode",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: 300 requests / 3600s per workspace",
         "parameters": [
           {
@@ -24234,7 +24234,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Queue waterfall verification (skips recently verified unless force)",
+        "summary": "Queue lead verification using the workspace-selected custom or external mode",
         "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: MEMBER\n\nRate limit: global Nginx limit",
         "parameters": [
           {

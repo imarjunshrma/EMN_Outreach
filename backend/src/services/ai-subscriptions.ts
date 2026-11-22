@@ -21,13 +21,30 @@ export function ownerEmails(): Set<string> {
   return new Set((process.env.AI_SUBSCRIPTION_OWNER_EMAILS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
 }
 
-/** The owner is a listed, active SUPER_ADMIN with two-factor sign-in (2FA may be relaxed only outside production). */
+/**
+ * Access modes (AI_SUBSCRIPTION_ACCESS):
+ * - "owners" (default): only accounts in AI_SUBSCRIPTION_OWNER_EMAILS that are active SUPER_ADMINs with 2FA.
+ * - "all": every active account on this instance, each with its own connections, workflows and playbook. Meant for
+ *   a private, single-person installation; it is refused while sign-up is open, so customers can never get it.
+ */
+export function accessMode(): 'owners' | 'all' {
+  return (process.env.AI_SUBSCRIPTION_ACCESS ?? '').trim().toLowerCase() === 'all' ? 'all' : 'owners';
+}
+
 export async function isAiSubscriptionOwner(userId: string | null | undefined): Promise<boolean> {
   if (!userId) return false;
-  const emails = ownerEmails();
-  if (!emails.size) return false;
   const u = await db().user.findUnique({ where: { id: userId }, select: { email: true, status: true, platformRole: true, mfaEnabled: true } });
-  if (!u || u.status !== 'ACTIVE' || u.platformRole !== 'SUPER_ADMIN') return false;
+  if (!u || u.status !== 'ACTIVE') return false;
+  if (accessMode() === 'all') {
+    const { registrationOpen } = await import('./tenancy.js');
+    if (await registrationOpen()) {
+      logger.warn('AI_SUBSCRIPTION_ACCESS=all is ignored while public sign-up is open');
+      return false;
+    }
+    return true;
+  }
+  const emails = ownerEmails();
+  if (!emails.size || u.platformRole !== 'SUPER_ADMIN') return false;
   if (!emails.has(u.email.toLowerCase())) return false;
   const mfaOptional = process.env.PLATFORM_MFA_REQUIRED === 'false' && process.env.NODE_ENV !== 'production';
   return u.mfaEnabled || mfaOptional;

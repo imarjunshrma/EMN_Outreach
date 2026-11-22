@@ -24,7 +24,7 @@ function LeadDetailInner() {
   const [note, setNote] = useState('');
   const research = useWsMutation(() => ({ path: `/leads/${id}/research`, body: { thenScore: true } }), { success: 'Research queued (results appear in a minute)' });
   const score = useWsMutation(() => ({ path: `/leads/${id}/score`, body: {} }), { success: (r: any) => `Score ${r.score} (${r.qualified ? 'qualified' : 'not qualified'})` });
-  const verify = useWsMutation(() => ({ path: `/leads/${id}/verify-waterfall`, body: { force: true } }), { success: (r: any) => `Verification: ${r?.result ?? 'done'}${r?.steps?.length ? ` (${r.steps.map((s: any) => s.provider).join(' → ')})` : ''}` });
+  const verify = useWsMutation(() => ({ path: `/leads/${id}/verify-waterfall`, body: { force: true } }), { success: (r: any) => r?.queued ? `Custom verification queued. The lead will refresh after processing.` : `Verification: ${r?.result ?? 'done'}${r?.steps?.length ? ` (${r.steps.map((s: any) => s.provider).join(' → ')})` : ''}`, onSuccess: (r: any) => { if (r?.queued) window.setTimeout(() => { void q.refetch(); }, 7000); } });
   const status = useWsMutation<string>((s) => ({ path: `/leads/${id}`, method: 'PATCH', body: { status: s } }), { success: 'Status updated' });
   const addNote = useWsMutation(() => ({ path: `/leads/${id}/notes`, body: { body: note } }), { success: 'Note added', onSuccess: () => setNote('') });
   const addTask = useWsMutation<{ title: string; dueAt: string }>((b) => ({ path: '/tasks', body: { ...b, leadId: id, dueAt: b.dueAt || null } }), { success: 'Reminder created' });
@@ -51,10 +51,12 @@ function LeadDetailInner() {
             <div className="grid gap-4 lg:grid-cols-3">
               <Card title="Profile">
                 <dl className="space-y-2 text-sm">
-                  {[['Status', <Badge key="s">{l.status}</Badge>], ['Email verification', <Badge key="v">{l.emailVerificationStatus}</Badge>], ['Score', l.currentScore ?? '—'], ['Country', l.country ?? '—'], ['Time zone', l.timezone ?? '—'], ['Lawful basis', `${l.lawfulBasis}${l.lawfulBasisNote ? ` — ${l.lawfulBasisNote}` : ''}`], ['Source', l.source?.name ?? 'manual'], ['Owner', l.owner?.name ?? '—'], ['Tags', l.tags.join(', ') || '—'], ['LinkedIn', l.linkedinUrl ? <a key="li" className="underline" href={l.linkedinUrl} target="_blank" rel="noreferrer">profile</a> : '—'], ['Last contacted', fmtDate(l.lastContactedAt)], ['Last reply', fmtDate(l.lastRepliedAt)]].map(([k, v]) => (
+                  {[['Status', <Badge key="s">{l.status}</Badge>], ['Email verification', <Badge key="v">{l.emailVerificationStatus}</Badge>], ['Verification checked', fmtDate(l.emailVerifiedAt)], ['Verification source', l.verifications?.[0]?.provider ?? '—'], ['Score', l.currentScore ?? '—'], ['Country', l.country ?? '—'], ['Time zone', l.timezone ?? '—'], ['Lawful basis', `${l.lawfulBasis}${l.lawfulBasisNote ? ` — ${l.lawfulBasisNote}` : ''}`], ['Source', l.source?.name ?? 'manual'], ['Owner', l.owner?.name ?? '—'], ['Tags', l.tags.join(', ') || '—'], ['LinkedIn', l.linkedinUrl ? <a key="li" className="underline" href={l.linkedinUrl} target="_blank" rel="noreferrer">profile</a> : '—'], ['Last contacted', fmtDate(l.lastContactedAt)], ['Last reply', fmtDate(l.lastRepliedAt)]].map(([k, v]) => (
                     <div key={String(k)} className="flex justify-between gap-2"><dt className="text-slate-500">{k}</dt><dd className="text-right">{v}</dd></div>
                   ))}
                 </dl>
+                {l.verifications?.[0]?.provider === 'first-party-dns' && ['QUEUED', 'PROCESSING', 'RETRYING'].includes(l.verifications?.[0]?.details?.state) && <div className="mt-3"><Notice>Custom email verification is {String(l.verifications[0].details.state).toLowerCase()}; the displayed status is the previous result until this check completes.</Notice></div>}
+                {l.verifications?.[0]?.provider === 'first-party-dns' && l.verifications?.[0]?.details?.state === 'COMPLETE' && l.emailVerificationStatus === 'UNKNOWN' && <div className="mt-3"><Notice kind="warning">Custom checks completed at {fmtDate(l.emailVerifiedAt)}. UNKNOWN means the address and domain signals did not prove that this individual mailbox exists, so the default campaign policy continues to hold it.</Notice></div>}
                 {Object.keys(l.customFields ?? {}).length > 0 && <div className="mt-3 border-t pt-2 text-xs text-slate-600">{Object.entries(l.customFields).map(([k, v]) => <div key={k}><b>{k}:</b> {String(v)}</div>)}</div>}
               </Card>
               <Card title="Latest ICP score">

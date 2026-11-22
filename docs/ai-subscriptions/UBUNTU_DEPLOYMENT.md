@@ -27,6 +27,7 @@ sudo install -d -o emn -g emn -m 700 /var/lib/emn/ai-subscriptions
 KEY="$(openssl rand -base64 32)"
 sudo tee -a /opt/emn/shared/.env >/dev/null <<EOF
 
+AI_SUBSCRIPTION_ACCESS=all          # every account on this private server; or "owners" + the email list below
 AI_SUBSCRIPTION_OWNER_EMAILS=you@elitemedianetworks.com
 AI_SUBSCRIPTION_ENCRYPTION_KEY=$KEY
 AI_SUBSCRIPTION_HOME=/var/lib/emn/ai-subscriptions
@@ -61,7 +62,12 @@ sudo -u emn node -e "import('@anthropic-ai/claude-agent-sdk').then(()=>console.l
 sudo -u emn ./node_modules/.bin/codex --version
 ```
 
-## 4. Make your account the owner
+## 4. Who can use it
+
+- `AI_SUBSCRIPTION_ACCESS=all`: every account on this server sees the feature in every tenant it can open, and each account connects its own subscriptions and keeps its own workflows and playbook. It is ignored while public sign-up is open (`REGISTRATION_OPEN=true`, or billing on with no flag), so customers can never get it. This is the right setting for a private, one-person instance.
+- `AI_SUBSCRIPTION_ACCESS=owners` (default): only the emails listed, who must be SUPER_ADMIN with 2FA, as described below.
+
+## 4a. Owners mode: make your account the owner
 
 The owner must be a platform SUPER_ADMIN with two-factor sign-in.
 

@@ -112,7 +112,7 @@ Tenant guards cover `AiWorkflowRun → Lead/Campaign` and `AiWorkflowStageExecut
 
 ## 6. Environment variables
 
-`AI_SUBSCRIPTION_OWNER_EMAILS`, `AI_SUBSCRIPTION_ENCRYPTION_KEY`, `AI_SUBSCRIPTION_HOME`. Optional: `CLAUDE_CODE_PATH`, `CODEX_PATH`, `AI_API_STAGE_CONCURRENCY`, `AI_API_STAGE_DELAY_MS`, `AI_PLAYBOOK_PATH`. See `.env.example`.
+`AI_SUBSCRIPTION_ACCESS` (`owners` default, or `all` for every account on a private instance; ignored while public sign-up is open), `AI_SUBSCRIPTION_OWNER_EMAILS`, `AI_SUBSCRIPTION_ENCRYPTION_KEY`, `AI_SUBSCRIPTION_HOME`. Optional: `CLAUDE_CODE_PATH`, `CODEX_PATH`, `AI_API_STAGE_CONCURRENCY`, `AI_API_STAGE_DELAY_MS`, `AI_PLAYBOOK_PATH`. See `.env.example`.
 
 ## 7. API routes
 

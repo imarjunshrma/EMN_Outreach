@@ -15,6 +15,8 @@ import * as verificationCsv from '../services/verification-csv.js';
 import multer from 'multer';
 import { putTracked, deleteTracked } from '../services/storage-accounting.js';
 import { audit } from '../core/audit.js';
+import { readSettings } from '../services/workspace.js';
+import { getSecret } from '../services/integrations.js';
 
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, cb) => cb(null, file.originalname.toLowerCase().endsWith('.csv')) }).single('file');
 const parseCsvUpload = (ctx: import('../http/router.js').Ctx<any, any>) => new Promise<void>((resolve, reject) => csvUpload(ctx.req, ctx.res, (e) => e ? reject(e) : resolve()));
@@ -33,9 +35,30 @@ route({ method: 'delete', path: '/w/:workspaceId/domains/:id/zone-records/:recor
 route({ method: 'patch', path: '/w/:workspaceId/domains/:id/renewal', tag: 'Deliverability', summary: 'Registrar, expiry date and auto-renew (for renewal reminders)', auth: 'workspace', role: 'ADMIN', body: domains.RenewalSchema, handler: (c) => domains.updateRenewal(c.workspaceId, c.params.id, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/mailbox-health', tag: 'Mailboxes', summary: 'Connection, auth, sync, send/receive, errors, bounces, complaints and DNS per mailbox', auth: 'workspace', role: 'VIEWER', handler: (c) => domains.mailboxHealth(c.workspaceId) });
 
-route({ method: 'post', path: '/w/:workspaceId/leads/:id/verify-waterfall', tag: 'Enrichment', summary: 'Verify one lead now through the verifier waterfall', auth: 'workspace', role: 'MEMBER', status: 200, rateLimit: { limit: 300, windowSec: 3600, key: 'workspace' }, body: z.object({ force: z.boolean().default(false) }), handler: (c) => enrichment.verifyWaterfall(c.workspaceId, c.params.id, { force: c.body.force }) });
-route({ method: 'post', path: '/w/:workspaceId/enrichment/verify-bulk', tag: 'Enrichment', summary: 'Queue waterfall verification (skips recently verified unless force)', auth: 'workspace', role: 'MEMBER', status: 202, body: z.object({ leadIds: z.array(z.string().uuid()).min(1).max(5000), force: z.boolean().default(false) }),
-  handler: async (c) => { const leads = await db().lead.findMany({ where: { workspaceId: c.workspaceId, id: { in: c.body.leadIds } }, select: { id: true } }); for (const l of leads) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId: c.workspaceId, leadId: l.id, force: c.body.force }, { jobId: `verify-${l.id}-${Math.floor(Date.now() / 600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } }); return { queued: leads.length }; } });
+route({ method: 'post', path: '/w/:workspaceId/leads/:id/verify-waterfall', tag: 'Enrichment', summary: 'Verify one lead using the workspace-selected custom or external mode', auth: 'workspace', role: 'MEMBER', status: 200, rateLimit: { limit: 300, windowSec: 3600, key: 'workspace' }, body: z.object({ force: z.boolean().default(false) }), handler: (c) => enrichment.verifyConfigured(c.workspaceId, c.params.id, { force: c.body.force }) });
+route({ method: 'post', path: '/w/:workspaceId/enrichment/verify-bulk', tag: 'Enrichment', summary: 'Queue lead verification using the workspace-selected custom or external mode', auth: 'workspace', role: 'MEMBER', status: 202, body: z.object({ leadIds: z.array(z.string().uuid()).min(1).max(5000), force: z.boolean().default(false) }),
+  handler: async (c) => {
+    const [leads, ws] = await Promise.all([
+      db().lead.findMany({ where: { workspaceId: c.workspaceId, id: { in: c.body.leadIds } }, select: { id: true, emailNormalized: true } }),
+      db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId }, select: { settings: true } }),
+    ]);
+    const settings = readSettings(ws.settings);
+    if (settings.emailVerificationMode === 'external') {
+      const providers = [...new Set([...settings.verifierOrder, ...(settings.verifierProvider === 'none' ? [] : [settings.verifierProvider])])];
+      let configured = false;
+      for (const provider of providers) if (await getSecret(c.workspaceId, provider)) { configured = true; break; }
+      if (!configured) throw new AppError('PROVIDER_NOT_CONFIGURED', 'External mode is selected, but no verifier API key is configured. Add one under Settings → Integrations, or switch to Custom Verification.', 400);
+      for (const l of leads) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId: c.workspaceId, leadId: l.id, force: c.body.force, freshDays: settings.verificationFreshnessDays }, { jobId: `verify-${l.id}-${Math.floor(Date.now() / 600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });
+    } else {
+      for (let i = 0; i < leads.length; i += 20) {
+        await Promise.all(leads.slice(i, i + 20).map(async (l) => {
+          const v = await firstParty.createVerification(c.workspaceId, l.emailNormalized, { leadId: l.id, force: c.body.force });
+          if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+        }));
+      }
+    }
+    return { queued: leads.length, mode: settings.emailVerificationMode === 'external' ? 'external' : 'custom' };
+  } });
 route({ method: 'post', path: '/w/:workspaceId/enrichment/find-email', tag: 'Enrichment', summary: 'Email discovery waterfall (name + company domain)', auth: 'workspace', role: 'MEMBER', status: 200, rateLimit: { limit: 300, windowSec: 3600, key: 'workspace' }, body: enrichment.FindSchema, handler: (c) => enrichment.findEmail(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/enrichment/stats', tag: 'Enrichment', summary: 'Provider comparison: checks, definitive rate, credits', auth: 'workspace', role: 'VIEWER', query: z.object({ days: z.coerce.number().int().min(1).max(365).default(90) }), handler: (c) => enrichment.enrichmentStats(c.workspaceId, c.query.days) });
 route({ method: 'get', path: '/w/:workspaceId/leads/:id/verifications', tag: 'Enrichment', summary: 'Verification / enrichment history for a lead', auth: 'workspace', role: 'VIEWER', handler: (c) => enrichment.verificationHistory(c.workspaceId, c.params.id) });

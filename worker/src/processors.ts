@@ -91,7 +91,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'import.csv': async (j) => leads.processImport(s(j.data.workspaceId), s(j.data.importId)),
   },
   [QUEUES.verify]: {
-    'verify.lead': async (j) => enrichment.verifyWaterfall(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force, ...(typeof j.data.freshDays === 'number' ? { freshDays: j.data.freshDays } : {}) }),
+    'verify.lead': async (j) => enrichment.verifyQueued(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force, ...(typeof j.data.freshDays === 'number' ? { freshDays: j.data.freshDays } : {}) }),
     'verify.address': async (j) => {
       const verifier = await import('../../backend/src/services/first-party-verification.js');
       const attempt = Math.max(j.attemptsMade, j.stalledCounter) + 1;

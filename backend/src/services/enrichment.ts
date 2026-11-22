@@ -6,6 +6,8 @@ import { audit, publish, type Actor } from '../core/audit.js';
 import { DISPOSABLE_DOMAINS } from '../../../integrations/src/providers/extra.js';
 import { readSettings } from './workspace.js';
 import { getSecret, recordUsage } from './integrations.js';
+import * as firstPartyVerification from './first-party-verification.js';
+import { enqueue, QUEUES } from '../core/queues.js';
 
 // Verification / enrichment waterfall.
 // Verify: try verifiers in the workspace's order until one gives a definitive answer (VALID, INVALID or
@@ -71,6 +73,31 @@ export async function verifyWaterfall(workspaceId: string, leadId: string, opts:
   const { emitEvent } = await import('./automation.js');
   await emitEvent(workspaceId, 'lead.enriched', `${leadId}:${Date.now()}`, { leadId, verification: final });
   return { result: final, steps };
+}
+
+/** Explicit single-lead check that respects the workspace's selected verification mode. */
+export async function verifyConfigured(workspaceId: string, leadId: string, opts: { force?: boolean } = {}) {
+  const lead = await db().lead.findFirst({ where: { id: leadId, workspaceId } });
+  if (!lead) throw NotFound('Lead');
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  const settings = readSettings(ws.settings);
+  if (settings.emailVerificationMode === 'external') return verifyWaterfall(workspaceId, leadId, { force: opts.force, freshDays: settings.verificationFreshnessDays });
+  const v = await firstPartyVerification.createVerification(workspaceId, lead.emailNormalized, { leadId, force: opts.force });
+  if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+  return { result: v.status, provider: 'first-party-dns', verificationId: v.id, queued: !v.cached, cached: v.cached };
+}
+
+/** Worker entry point for auto-verification producers; disabled mode never starts checks. */
+export async function verifyQueued(workspaceId: string, leadId: string, opts: { force?: boolean; freshDays?: number } = {}) {
+  const lead = await db().lead.findFirst({ where: { id: leadId, workspaceId } });
+  if (!lead) return { skipped: 'lead not found' };
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  const settings = readSettings(ws.settings);
+  if (settings.emailVerificationMode === 'disabled') return { skipped: 'automatic verification is disabled in workspace settings' };
+  if (settings.emailVerificationMode === 'external') return verifyWaterfall(workspaceId, leadId, { force: opts.force, freshDays: opts.freshDays ?? settings.verificationFreshnessDays });
+  const v = await firstPartyVerification.createVerification(workspaceId, lead.emailNormalized, { leadId, force: opts.force });
+  if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+  return { result: v.status, provider: 'first-party-dns', verificationId: v.id, queued: !v.cached, cached: v.cached };
 }
 
 export const FindSchema = z.object({ firstName: z.string().min(1).max(100), lastName: z.string().min(1).max(100), domain: z.string().min(3).max(253) });
