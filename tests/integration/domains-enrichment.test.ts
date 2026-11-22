@@ -84,8 +84,16 @@ describe('verification waterfall', () => {
     expect((await enrichment.verifyWaterfall(s.workspaceId, lead.id)).skipped).toBe('recently verified'); // no wasted credits
     const stats = await enrichment.enrichmentStats(s.workspaceId);
     expect(stats.find((x) => x.provider === 'zerobounce')?.definitiveRatePct).toBe(100);
-    const throwaway = await addLead(s.workspaceId, 'x@mailinator.com');
-    expect((await enrichment.verifyWaterfall(s.workspaceId, throwaway.id)).result).toBe('INVALID');
+    // A disposable domain says nothing about the mailbox itself: it is recorded as UNKNOWN with the disposable
+    // attribute, and sending is refused by the disposable-domain policy — even where UNKNOWN is otherwise allowed.
+    const throwaway = await addLead(s.workspaceId, 'x@mailinator.com', { emailVerificationStatus: 'UNVERIFIED', emailVerifiedAt: null });
+    expect((await enrichment.verifyWaterfall(s.workspaceId, throwaway.id)).result).toBe('UNKNOWN');
+    await setSettings(s.workspaceId, { verificationUnknownPolicy: 'allow', verificationDisposablePolicy: 'block' });
+    const { canContact } = await import('../../backend/src/services/compliance.js');
+    const fresh = await db().lead.findUniqueOrThrow({ where: { id: throwaway.id } });
+    const decision = await canContact(s.workspaceId, fresh, { requireVerified: true });
+    expect(decision.allowed).toBe(false);
+    expect(decision.reasons).toContain('email uses a known disposable domain');
     expect((await db().usageRecord.count({ where: { workspaceId: s.workspaceId, kind: 'verify' } }))).toBe(2); // disposable cost nothing
   });
 

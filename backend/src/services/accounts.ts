@@ -41,11 +41,20 @@ export async function oauthStart(workspaceId: string, provider: OAuthProvider, a
   return { url: client.buildAuthUrl({ state, codeChallenge: challenge, redirectUri: redirectUri(provider), loginHint }) };
 }
 
-export async function oauthCallback(provider: OAuthProvider, code: string, state: string) {
+/**
+ * `currentUserId` is whoever is signed in on the browser that returned from the provider. It must be the person who
+ * started the connection: otherwise someone could start a connection in their own workspace and trick another user
+ * into approving it, attaching that user's mailbox to the wrong workspace (OAuth login CSRF).
+ */
+export async function oauthCallback(provider: OAuthProvider, code: string, state: string, currentUserId: string | null) {
   const raw = await redis().getdel(`oauth:state:${state}`);
   if (!raw) throw new AppError('OAUTH_STATE_INVALID', 'OAuth session expired or invalid. Start the connection again.', 400);
   const st = JSON.parse(raw) as { workspaceId: string; provider: OAuthProvider; verifier: string; userId: string | null };
   if (st.provider !== provider) throw new AppError('OAUTH_STATE_INVALID', 'Provider mismatch', 400);
+  if (!currentUserId || !st.userId || currentUserId !== st.userId) throw new AppError('OAUTH_STATE_INVALID', 'Finish the connection in the same browser and account that started it. Start the connection again.', 400);
+  const member = await db().workspaceMember.findFirst({ where: { workspaceId: st.workspaceId, userId: st.userId }, select: { role: true } });
+  const orgAccess = member ? null : await db().workspace.findFirst({ where: { id: st.workspaceId, organization: { members: { some: { userId: st.userId, role: { in: ['OWNER', 'ADMIN'] } } } } }, select: { id: true } });
+  if (!member && !orgAccess) throw new AppError('OAUTH_STATE_INVALID', 'You no longer have access to that workspace.', 400);
   const client = adapters().oauth[provider]!;
   const t = await client.exchangeCode({ code, codeVerifier: st.verifier, redirectUri: redirectUri(provider) });
   if (!t.refreshToken) throw new AppError('OAUTH_NO_REFRESH', 'The provider did not return a refresh token. Remove the app from your account permissions and connect again.', 400);

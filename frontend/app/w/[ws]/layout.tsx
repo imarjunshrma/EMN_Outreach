@@ -32,6 +32,18 @@ function SetupReminder({ orgId }: { orgId: string }) {
   return <div className="flex items-center gap-3 bg-brand-50 px-4 py-2 text-sm text-brand-900 lg:px-8" data-testid="setup-reminder"><span className="flex-1">{left} required setup step{left === 1 ? '' : 's'} left before your first campaign.</span><Link className="font-semibold underline" href={`/onboarding/${orgId}`}>Open the checklist</Link><button className="text-brand-700 hover:text-ink" onClick={() => { try { localStorage.setItem(`emn-onboarding-${orgId}`, 'later'); } catch { /* ignore */ } setHidden(true); }} aria-label="Hide setup reminder"><X className="h-4 w-4" /></button></div>;
 }
 
+/** Platform-wide announcement set by a super admin (Platform → Global settings). Dismissible until the text changes. */
+function Announcement() {
+  const q = useQuery({ queryKey: ['announcement'], queryFn: () => api<{ announcement: { level: string; message: string } | null }>('/announcement'), staleTime: 300_000 });
+  const a = q.data?.announcement;
+  const key = a ? `emn-announcement-${a.message.length}-${a.message.slice(0, 40)}` : '';
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => { if (key) { try { setHidden(localStorage.getItem(key) === 'hidden'); } catch { /* ignore */ } } }, [key]);
+  if (!a || hidden) return null;
+  const c = a.level === 'danger' ? 'bg-red-700 text-white' : a.level === 'warning' ? 'bg-amber-100 text-amber-950' : 'bg-ink text-white';
+  return <div className={`flex items-center gap-3 px-4 py-2 text-sm lg:px-8 ${c}`} role="status" data-testid="announcement-banner"><span className="flex-1">{a.message}</span><button className="opacity-80 hover:opacity-100" onClick={() => { try { localStorage.setItem(key, 'hidden'); } catch { /* ignore */ } setHidden(true); }} aria-label="Hide announcement"><X className="h-4 w-4" /></button></div>;
+}
+
 /** Shown to EMN staff while they are inside a customer's workspace through a support grant. */
 function SupportBanner({ ws }: { ws: string }) {
   const q = useQuery({ queryKey: ['ws-access', ws], queryFn: () => api<{ via: string; support: { expiresAt: string; reason: string } | null }>(`/w/${ws}/access`), staleTime: 60_000 });
@@ -176,6 +188,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
           <UserMenu me={me.data} base={base} current={current} />
         </header>
         <SupportBanner ws={ws} />
+        <Announcement />
         {(me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'OWNER' || me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'ADMIN') && <SetupReminder orgId={current.organizationId} />}
         {me.data.user.emailVerified === false && bill.data?.mode === 'saas' && <div className="bg-brand-50 px-4 py-2 text-sm text-brand-900 lg:px-8">Confirm your email address to invite teammates and start campaigns. <ResendVerification /></div>}
         {bill.data?.mode === 'saas' && (!bill.data.active || bill.data.reason) && <div data-testid="billing-banner" className={`px-4 py-2 text-sm lg:px-8 ${bill.data.active ? 'bg-amber-50 text-amber-900' : 'bg-red-50 text-red-800'}`}>{bill.data.reason}. <Link className="font-semibold underline" href={`${base}/billing`}>Open plan & billing</Link></div>}

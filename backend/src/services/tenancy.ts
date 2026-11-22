@@ -139,6 +139,10 @@ export const SignupSchema = z.object({
 /** First user always; then REGISTRATION_OPEN (true/false) wins; default open in SaaS mode, closed self-hosted. */
 export const registrationOpen = async () => {
   if ((await db().user.count()) === 0) return true;
+  // Super admins can override the environment from Platform → Settings.
+  const mode = (await db().platformSetting.findUnique({ where: { key: 'signupMode' } }))?.value;
+  if (mode === 'open') return true;
+  if (mode === 'closed') return false;
   const flag = process.env.REGISTRATION_OPEN ?? process.env.PUBLIC_REGISTRATION;
   if (flag === 'true') return true;
   if (flag === 'false') return false;

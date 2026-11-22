@@ -1,6 +1,6 @@
 # EMN Outreach OS — API documentation
 
-Generated from the route registry by `npm run api-docs` (395 operations). The machine-readable
+Generated from the route registry by `npm run api-docs` (410 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -78,6 +78,12 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/api/v1/public/unsubscribe/:token` | signed token | RFC 8058 one-click unsubscribe |
 | GET | `/api/v1/public/t/o/:id.gif`, `/api/v1/public/t/c/:token` | public | Optional open / click tracking (off by default) |
 | GET | `/api/v1/w/:workspaceId/events` | session | SSE realtime stream |
+
+## Account
+
+| Method | Path | Auth · role | Rate limit | Body | Query | Summary |
+|---|---|---|---|---|---|---|
+| GET | `/announcement` | session | — | — | — | Platform-wide announcement to show to signed-in users, if any |
 
 ## AI
 
@@ -339,8 +345,8 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
-| POST | `/w/:workspaceId/leads/:id/verify-waterfall` | session/API key · MEMBER+ | 300/3600s per workspace | `force?`: boolean | — | Verify one lead now through the verifier waterfall |
-| POST | `/w/:workspaceId/enrichment/verify-bulk` | session/API key · MEMBER+ | — | `leadIds`: array, `force?`: boolean | — | Queue waterfall verification (skips recently verified unless force) |
+| POST | `/w/:workspaceId/leads/:id/verify-waterfall` | session/API key · MEMBER+ | 300/3600s per workspace | `force?`: boolean | — | Verify one lead using the workspace-selected custom or external mode |
+| POST | `/w/:workspaceId/enrichment/verify-bulk` | session/API key · MEMBER+ | — | `leadIds`: array, `force?`: boolean | — | Queue lead verification using the workspace-selected custom or external mode |
 | POST | `/w/:workspaceId/enrichment/find-email` | session/API key · MEMBER+ | 300/3600s per workspace | `firstName`: string, `lastName`: string, `domain`: string | — | Email discovery waterfall (name + company domain) |
 | GET | `/w/:workspaceId/enrichment/stats` | session/API key · VIEWER+ | — | — | `days?`: integer | Provider comparison: checks, definitive rate, credits |
 | GET | `/w/:workspaceId/leads/:id/verifications` | session/API key · VIEWER+ | — | — | — | Verification / enrichment history for a lead |
@@ -537,6 +543,20 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/platform/support/grants` | session/API key · VIEWER+ | — | `organizationId`: string, `reason`: string, `minutes?`: integer | — | Open time-limited, read-only, audited access to one tenant (reason required) |
 | DELETE | `/platform/support/grants/:id` | session/API key · VIEWER+ | — | — | — | End a support-access grant |
 | GET | `/platform/audit` | session/API key · VIEWER+ | — | — | `organizationId?`: string, `action?`: string, `page?`: integer, `pageSize?`: integer | Platform audit trail (append-only) |
+| GET | `/platform/staff` | session/API key · VIEWER+ | — | — | — | Platform staff and what each staff role may do |
+| POST | `/platform/staff` | session/API key · VIEWER+ | — | `email`: string, `role`: SUPER_ADMIN\|SUPPORT\|FINANCE, `reason`: string | — | Give an existing account a platform role (reason required) |
+| PUT | `/platform/staff/:userId` | session/API key · VIEWER+ | — | `role`: object, `reason`: string | — | Change or remove a platform role (not your own; the last super admin stays) |
+| POST | `/platform/tenants` | session/API key · VIEWER+ | 60/3600s per user | `organizationName`: string, `ownerEmail`: string, `ownerName?`: string, `planCode?`: string, `reason`: string | — | Create a tenant: organization, first workspace and owner (new owners get a set-password link) |
+| GET | `/platform/tenants/:id/members` | session/API key · VIEWER+ | — | — | — | Members of a tenant with organization and workspace roles |
+| POST | `/platform/tenants/:id/members` | session/API key · VIEWER+ | — | `email`: string, `name?`: string, `role`: OWNER\|ADMIN\|BILLING\|MEMBER, `workspaceId?`: object, `workspaceRole?`: OWNER\|ADMIN\|MANAGER\|MEMBER\|VIEWER, `reason`: string | — | Add a person to a tenant (creates the account if needed) |
+| PUT | `/platform/tenants/:id/members/:userId` | session/API key · VIEWER+ | — | `role`: OWNER\|ADMIN\|BILLING\|MEMBER, `reason`: string | — | Change a member's organization role, including ownership transfer |
+| POST | `/platform/tenants/:id/members/:userId/remove` | session/API key · VIEWER+ | — | `reason`: string | — | Remove a member from a tenant |
+| GET | `/platform/tenants/:id/modules` | session/API key · VIEWER+ | — | — | — | Plan entitlements, overrides and effective modules/limits of a tenant |
+| PUT | `/platform/tenants/:id/modules` | session/API key · VIEWER+ | — | `features`: object, `limits`: object, `integrations`: object, `reason`: string | — | Turn modules on/off and override limits for one tenant (null = inherit plan) |
+| POST | `/platform/users/:id/password-reset` | session/API key · VIEWER+ | 30/3600s per user | `reason`: string | — | Issue a password reset link for a user (mailed, or returned once when system mail is off) |
+| GET | `/platform/permissions` | session/API key · VIEWER+ | — | — | — | Permission matrix: workspace roles per module (from the route rules), organization roles, staff roles |
+| GET | `/platform/settings` | session/API key · VIEWER+ | — | — | — | Global settings: sign-up mode and announcement banner |
+| PUT | `/platform/settings` | session/API key · VIEWER+ | — | `signupMode`: env\|open\|closed, `announcement`: object, `reason`: string | — | Save global settings (reason required) |
 
 ## Privacy
 

@@ -6,7 +6,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { api, describeError } from '@/lib/api';
 import { fmtDate, fmtDay } from '@/lib/format';
-import { Badge, Button, Card, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Card, ErrorState, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Tabs, Textarea } from '@/components/ui';
+import { TenantMembers } from '@/components/platform/tenant-members';
+import { TenantModules } from '@/components/platform/tenant-modules';
 import { useToast } from '@/components/toast';
 import { usePlatform } from '@/components/platform/shell';
 import { statusColor } from '@/components/platform/status';
@@ -31,6 +33,7 @@ export default function TenantDetail() {
   const [action, setAction] = useState<{ id: string; label: string; danger?: boolean } | null>(null);
   const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false);
   const [override, setOverride] = useState(false);
+  const [tab, setTab] = useState('overview');
   const [ov, setOv] = useState({ planCode: '', status: '', trialEndsAt: '', graceUntil: '', reason: '' });
   const canLifecycle = me.permissions.includes('tenants:lifecycle');
   const canRefund = me.permissions.includes('billing:refund');
@@ -70,7 +73,10 @@ export default function TenantDetail() {
       <PageHeader title={o.name} subtitle={<span className="flex flex-wrap items-center gap-2"><Badge color={statusColor(o.status)}>{o.status.toLowerCase().replace(/_/g, ' ')}</Badge><code>{o.id}</code><span>created {fmtDate(o.createdAt)}</span></span>}
         actions={canLifecycle ? <>{(ACTIONS[o.status] ?? []).map((a) => <Button key={a.id} variant={a.danger ? 'danger' : 'secondary'} onClick={() => setAction(a)}>{a.label}</Button>)}<Button variant="ghost" onClick={() => setOverride(true)}>Override subscription</Button></> : undefined} />
       {d.state.reason && <div className="mb-4"><Notice kind={d.state.operational ? 'warning' : 'danger'}>{d.state.reason}</Notice></div>}
-      <div className="grid gap-4 lg:grid-cols-3">
+      <Tabs tabs={[{ id: 'overview', label: 'Overview' }, { id: 'members', label: 'Members', count: d.members.length }, { id: 'modules', label: 'Modules & limits' }]} active={tab} onChange={setTab} />
+      {tab === 'members' && <TenantMembers orgId={id} canChange={canLifecycle && o.status !== 'DELETED'} />}
+      {tab === 'modules' && <TenantModules orgId={id} canChange={canLifecycle && o.status !== 'DELETED'} />}
+      <div className={`grid gap-4 lg:grid-cols-3 ${tab === 'overview' ? '' : 'hidden'}`}>
         <Card title="Subscription">
           {o.subscription ? <dl className="space-y-1 text-sm">
             <div><span className="text-slate-500">Plan</span> <b>{o.subscription.plan.name}</b></div>
@@ -91,7 +97,7 @@ export default function TenantDetail() {
             {d.workspaces.map((w: any) => <tr key={w.id}><td className="td font-semibold">{w.name}</td><td className="td tnum">{w.counts.leads}</td><td className="td tnum">{w.counts.campaigns}</td><td className="td tnum">{w.counts.emailAccounts}</td><td className="td tnum">{w.counts.members}</td><td className="td text-xs">{w.archivedAt ? 'archived' : ''}</td></tr>)}
           </Table>
         </Card>
-        <Card title="Members">
+        <Card title="Members" actions={<button className="text-xs font-semibold text-brand-700 hover:underline" onClick={() => setTab('members')}>Manage</button>}>
           <ul className="space-y-2 text-sm">{d.members.map((m: any) => <li key={m.user.id}><b>{m.user.name}</b> <span className="text-xs text-slate-500">{m.role.toLowerCase()}</span><br /><span className="text-xs text-slate-500">{m.user.email}{m.user.mfaEnabled ? ' · 2FA' : ''}{!m.user.emailVerifiedAt ? ' · unverified' : ''}</span></li>)}</ul>
         </Card>
         <Card title="Integrations (status only)">

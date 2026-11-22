@@ -38,7 +38,7 @@ EMAIL_VERIFY_SMTP_ENABLED=true
 EMAIL_VERIFY_MAIL_FROM=verification@your-controlled-domain.example
 # Optional; defaults shown
 EMAIL_VERIFY_SMTP_TIMEOUT_MS=5000
-EMAIL_VERIFY_CATCH_ALL_ENABLED=false
+EMAIL_VERIFY_CATCH_ALL_ENABLED=true
 EMAIL_VERIFY_WORKER_CONCURRENCY=2
 EMAIL_VERIFY_PER_DOMAIN_PER_MINUTE=5
 EMAIL_VERIFY_GLOBAL_PER_MINUTE=60
@@ -46,6 +46,8 @@ EMAIL_VERIFY_RETRY_DELAYS_MS=300000,1800000,7200000
 ```
 
 `EMAIL_VERIFY_MAIL_FROM` must be an address controlled by the operator. Port 25 outbound access depends on the host. Run the admin diagnostics after deployment. `CONNECTED` proves only that the configured sender-domain MX answered a greeting and EHLO; it does not prove arbitrary destination SMTP access. Production port 25 connectivity has not been tested in this development environment.
+
+Set `EMAIL_VERIFY_CATCH_ALL_ENABLED=true` only if you want the worker to issue one randomized `RCPT TO` control after a target is accepted. This is a second probe per address and is subject to the same limits. If the target is accepted and the random control is rejected as an unknown user, the result becomes `VALID`; if both are accepted, the result becomes `CATCH_ALL` (suspected from one control); other outcomes remain `UNKNOWN`. A target explicitly rejected as an unknown user becomes `INVALID`. These SMTP responses are operational signals, not guarantees of delivery. The probe never issues `DATA` and never sends a message. Both SMTP feature flags must be configured on the worker; restart the worker after changing them. For a verification that already completed, queue a fresh/forced check to apply the new settings.
 
 ## Dataset and caching
 

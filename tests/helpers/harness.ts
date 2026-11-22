@@ -14,7 +14,11 @@ export function getApp() { return (app ??= createApp()); }
 /** Wipes every table (except migrations) and the test Redis DB. */
 export async function resetDb() {
   const tables = await db().$queryRaw<Array<{ tablename: string }>>`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`;
-  await db().$executeRawUnsafe(`TRUNCATE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`);
+  // A background write left over from the previous test can deadlock with TRUNCATE; retry instead of failing the next test.
+  for (let attempt = 1; ; attempt++) {
+    try { await db().$executeRawUnsafe(`TRUNCATE ${tables.map((t) => `"${t.tablename}"`).join(', ')} RESTART IDENTITY CASCADE`); break; }
+    catch (e) { if (attempt >= 5 || !String((e as Error).message).includes('40P01')) throw e; await new Promise((r) => setTimeout(r, 100 * attempt)); }
+  }
   await redis().flushdb();
 }
 
@@ -82,7 +86,7 @@ export async function addAiProvider(workspaceId: string, provider: 'ANTHROPIC' |
 }
 
 export async function addLead(workspaceId: string, email: string, extra: Record<string, unknown> = {}) {
-  return db().lead.create({ data: { workspaceId, email, emailNormalized: email.toLowerCase(), firstName: 'Jane', country: 'US', lawfulBasis: 'LEGITIMATE_INTEREST', emailVerificationStatus: 'VALID', ...extra } });
+  return db().lead.create({ data: { workspaceId, email, emailNormalized: email.toLowerCase(), firstName: 'Jane', country: 'US', lawfulBasis: 'LEGITIMATE_INTEREST', emailVerificationStatus: 'VALID', emailVerifiedAt: new Date(), ...extra } });
 }
 
 /** A Monday 10:00 UTC — inside default windows. */

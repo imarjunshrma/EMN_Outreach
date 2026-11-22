@@ -30,7 +30,7 @@ export default function EmailVerificationSettings() {
       </Card>
       <Card title="Optional SMTP probe">
         <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={s.verificationSmtpProbeEnabled} onChange={(e) => set('verificationSmtpProbeEnabled', e.target.checked)} />Allow SMTP probing for this workspace</label>
-        <p className="mt-3 text-xs text-slate-500">The server must also have EMAIL_VERIFY_SMTP_ENABLED=true and a configured EMAIL_VERIFY_MAIL_FROM. Provider policy, rate limits and timeouts still apply. SMTP acceptance remains UNKNOWN unless corroborated; no test emails are sent.</p>
+        <p className="mt-3 text-xs text-slate-500">The server must also have EMAIL_VERIFY_SMTP_ENABLED=true and a configured EMAIL_VERIFY_MAIL_FROM. To distinguish a recipient-specific acceptance from catch-all behavior, the operator must additionally set EMAIL_VERIFY_CATCH_ALL_ENABLED=true on the API and worker. A recipient is marked VALID only when the MX accepts it and rejects one randomized control; if both are accepted it is marked CATCH_ALL (suspected from one probe). Without that control, acceptance remains UNKNOWN. Provider policy, rate limits and timeouts still apply. No DATA command or test email is sent.</p>
       </Card>
       <Card title="Bulk and individual checks">
         <p className="text-sm text-slate-600">CSV batches, individual checks, progress, retries and exports are available under <Link className="underline" href={`/w/${ws}/enrichment`}>Verification</Link>. Campaign enrollment queues a check when the result is missing or stale and keeps the prospect out of the send queue until eligible.</p>

@@ -5,6 +5,20 @@ import { validateEmailSyntax } from './email-verification.js';
 
 export type SmtpClassification = 'ACCEPTED_BUT_UNCONFIRMED' | 'USER_UNKNOWN' | 'TEMPORARY_FAILURE' | 'GREYLISTED' | 'POLICY_REJECTION' | 'SMTP_UNAVAILABLE' | 'CONNECTION_TIMEOUT' | 'CONNECTION_REFUSED' | 'CONNECTION_RESET' | 'AUTHENTICATION_REQUIRED' | 'INCONCLUSIVE';
 export type SmtpResult = { classification: SmtpClassification; code?: number; enhancedCode?: string; response?: string; mx?: string; durationMs: number; reason?: string };
+export type MailboxEvidenceStatus = 'VALID' | 'INVALID' | 'CATCH_ALL' | 'UNKNOWN';
+
+/**
+ * Only call an address VALID when its MX accepted RCPT TO and explicitly
+ * rejected a randomized control address. A single SMTP acceptance is not
+ * mailbox proof because many providers accept every recipient at the edge.
+ */
+export function classifyMailboxEvidence(target: SmtpResult, control?: SmtpResult): MailboxEvidenceStatus {
+  if (target.classification === 'USER_UNKNOWN') return 'INVALID';
+  if (target.classification !== 'ACCEPTED_BUT_UNCONFIRMED') return 'UNKNOWN';
+  if (control?.classification === 'ACCEPTED_BUT_UNCONFIRMED') return 'CATCH_ALL';
+  if (control?.classification === 'USER_UNKNOWN') return 'VALID';
+  return 'UNKNOWN';
+}
 
 export function classifySmtpReply(reply: string): Pick<SmtpResult, 'classification' | 'code' | 'enhancedCode' | 'response'> {
   const code = Number(reply.match(/^(\d{3})/)?.[1]);
@@ -117,7 +131,7 @@ export async function probeRecipientSmtp(input: { email: string; domain: string;
   const sender = validateEmailSyntax(options.mailFrom);
   const domain = domainToASCII(input.domain.trim().replace(/\.$/, '').toLowerCase());
   if (!recipient.valid || !sender.valid || recipient.domain !== domain) return { classification: 'INCONCLUSIVE', reason: 'SMTP envelope address or recipient domain failed validation', durationMs: 0 };
-  if (!/^[\x00-\x7f]+$/.test(recipient.normalizedEmail.split('@')[0]) || !/^[\x00-\x7f]+$/.test(sender.normalizedEmail.split('@')[0])) return { classification: 'INCONCLUSIVE', reason: 'SMTPUTF8 envelope addresses are not probed by this client', durationMs: 0 };
+  if (!isAsciiLocalPart(recipient.normalizedEmail) || !isAsciiLocalPart(sender.normalizedEmail)) return { classification: 'INCONCLUSIVE', reason: 'SMTPUTF8 envelope addresses are not probed by this client', durationMs: 0 };
   const sorted = [...input.mx].sort((a,b) => a.priority-b.priority).slice(0, 10);
   let attempts = 0;
   for (const record of sorted) for (const address of record.addresses.slice(0, 2)) {
@@ -159,4 +173,10 @@ export async function diagnoseSmtpConnectivity(mailFrom: string | undefined, opt
     const code = (e as NodeJS.ErrnoException).code;
     return { status: 'DNS_ERROR' as const, durationMs: Date.now() - started, message: code === 'ENOTFOUND' ? 'Configured MAIL FROM domain did not resolve' : code === 'ETIMEOUT' ? 'DNS lookup timed out while resolving the configured MAIL FROM domain' : 'Could not resolve the configured MAIL FROM domain MX records' };
   }
+}
+
+/** True when the part before '@' is non-empty plain ASCII (SMTPUTF8 addresses are not probed). */
+function isAsciiLocalPart(email: string) {
+  const local = email.split('@')[0];
+  return local.length > 0 && [...local].every((c) => c.charCodeAt(0) < 0x80);
 }

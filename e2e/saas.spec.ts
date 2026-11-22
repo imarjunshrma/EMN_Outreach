@@ -187,5 +187,65 @@ test('platform console: staff need 2FA, then metrics, tenant search, audited sus
   await page.goto('/platform/users');
   await page.getByLabel('Search users').fill('bina');
   await expect(page.getByText(CUSTOMER.email)).toBeVisible();
+
+  // ERP console: staff & roles, permission matrix, global settings (announcement), new tenant, members, modules.
+  await page.getByRole('link', { name: 'Staff & roles' }).click();
+  await expect(page.getByTestId(`staff-${STAFF.email}`)).toContainText(/super admin/i);
+  await expect(page.getByTestId('role-matrix')).toContainText('Issue refunds');
+  await page.getByRole('link', { name: 'Permission matrix' }).click();
+  await expect(page.getByTestId('permission-matrix')).toContainText('Leads');
+  await shot(page, 'platform-permissions');
+
+  await page.getByRole('link', { name: 'Global settings' }).click();
+  await page.getByLabel('Show a banner to every signed-in user').check();
+  await page.getByLabel('Message').fill('E2E: maintenance tonight at 22:00');
+  await page.getByLabel('Reason for the change').fill('E2E: announce maintenance');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await expect(page.getByText('Settings saved')).toBeVisible();
+  const cctx = await browser.newContext();
+  const cp = await cctx.newPage();
+  await login(cp, CUSTOMER.email, CUSTOMER.password);
+  await workspaceBase(cp);
+  await expect(cp.getByTestId('announcement-banner')).toContainText('maintenance tonight');
+  await cctx.close();
+  await page.getByLabel('Show a banner to every signed-in user').uncheck();
+  await page.getByLabel('Reason for the change').fill('E2E: maintenance done');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await expect(page.getByText('Settings saved').last()).toBeVisible(); // the first save's toast may still be showing
+  await expect(page.getByLabel('Reason for the change')).toHaveValue('');
+
+  await page.getByRole('link', { name: 'Tenants' }).click();
+  await page.getByRole('button', { name: 'New tenant' }).click();
+  const nt = page.getByRole('dialog');
+  await nt.getByLabel('Organization name').fill('Gamma Labs');
+  await nt.getByLabel('Owner email').fill('owner@gamma-e2e.test');
+  await nt.getByLabel('Reason').fill('E2E: onboarding a managed customer');
+  await nt.getByRole('button', { name: 'Create tenant' }).click();
+  await expect(nt.getByTestId('setup-link')).toHaveValue(/\/reset-password\//); // no system mail in e2e: the link is shown once
+  await nt.getByRole('button', { name: 'Open tenant' }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Gamma Labs');
+  await page.getByRole('tab', { name: /Members/ }).click();
+  await expect(page.getByTestId('member-owner@gamma-e2e.test')).toBeVisible();
+  await page.getByRole('button', { name: 'Add member' }).click();
+  const am = page.getByRole('dialog');
+  await am.getByLabel('Email').fill('analyst@gamma-e2e.test');
+  await am.getByLabel('Reason').fill('E2E: add analyst');
+  await am.getByRole('button', { name: 'Add member' }).click();
+  await expect(page.getByTestId('setup-link')).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByTestId('member-analyst@gamma-e2e.test')).toBeVisible();
+  await page.getByLabel('Role of analyst@gamma-e2e.test').selectOption('ADMIN');
+  await page.getByRole('dialog').getByLabel('Reason').fill('E2E: promote analyst');
+  await page.getByRole('dialog').getByRole('button', { name: 'Change role' }).click();
+  await expect(page.getByText('Role changed')).toBeVisible();
+  await shot(page, 'platform-tenant-members');
+  await page.getByRole('tab', { name: 'Modules & limits' }).click();
+  await page.getByLabel('AI Copilot setting').selectOption('off');
+  await page.getByLabel('Leads override').fill('5000');
+  await page.getByLabel('Reason').fill('E2E: pilot without Copilot');
+  await page.getByRole('button', { name: 'Save modules and limits' }).click();
+  await expect(page.getByText('Modules and limits saved')).toBeVisible();
+  await expect(page.getByTestId('module-copilot')).toContainText('Off');
+  await shot(page, 'platform-tenant-modules');
   expect(errors).toEqual([]);
 });

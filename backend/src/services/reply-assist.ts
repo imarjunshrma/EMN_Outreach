@@ -38,7 +38,7 @@ export async function processInbound(workspaceId: string, messageId: string) {
   const mode = settings.replyMode;
 
   const bill = await import('./billing.js');
-  const autoAllowed = !bill.billingEnabled() || (await bill.billingState(workspaceId)).entitlements.features.autoReply;
+  const autoAllowed = (await bill.billingState(workspaceId)).entitlements.features.autoReply; // plan (SaaS) or admin switch (both modes)
   if (mode === 'auto_narrow' && autoAllowed && settings.autoReplyCategories.includes(msg.category) && !NEVER_AUTO.has(msg.category) && lead) {
     const already = await db().replySuggestion.count({ where: { workspaceId, conversationId: msg.conversationId, mode: 'AUTO' } });
     const tpl = await db().replyTemplate.findFirst({ where: { workspaceId, isApproved: true, categories: { has: msg.category } }, orderBy: { approvedAt: 'desc' } });

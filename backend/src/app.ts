@@ -21,6 +21,7 @@ import './routes/workflows-billing.js';
 import './routes/insights.js';
 import './routes/saas.js';
 import './routes/ai-subscriptions.js';
+import './routes/platform-admin.js';
 import * as billing from './services/billing.js';
 import * as workflows from './services/workflows.js';
 
@@ -94,7 +95,7 @@ export function createApp(): Express {
     try {
       if (!provider) throw new AppError('NOT_FOUND', 'Unknown provider', 404);
       if (req.query.error) throw new AppError('OAUTH_DENIED', String(req.query.error_description ?? req.query.error), 400);
-      const r = await accounts.oauthCallback(provider, String(req.query.code ?? ''), String(req.query.state ?? ''));
+      const r = await accounts.oauthCallback(provider, String(req.query.code ?? ''), String(req.query.state ?? ''), (res.locals.auth as { userId: string | null } | undefined)?.userId ?? null);
       res.redirect(`${base}/w/${r.workspaceId}/email-accounts?connected=${encodeURIComponent(r.email)}`);
     } catch (e) {
       logger.warn({ err: e }, 'oauth callback failed');

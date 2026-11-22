@@ -3,7 +3,7 @@ import { db, Prisma } from '../core/db.js';
 import { config } from '../core/config.js';
 import { acquireLock } from '../core/redis.js';
 import { rateLimit } from '../core/redis.js';
-import { probeRecipientSmtp } from '../../../integrations/src/email-verification-smtp.js';
+import { classifyMailboxEvidence, probeRecipientSmtp, type SmtpResult } from '../../../integrations/src/email-verification-smtp.js';
 import { randomUUID } from 'node:crypto';
 import { isSuppressed } from './compliance.js';
 import { verificationDictionaries } from './email-verification-datasets.js';
@@ -13,11 +13,8 @@ export async function createVerification(workspaceId: string, email: string, opt
   const input = email.trim().normalize('NFC');
   const syntax = validateEmailSyntax(input);
   const normalized = (syntax.valid ? syntax.normalizedEmail : input).toLowerCase();
-  const [dictionaries, ws] = await Promise.all([
-    verificationDictionaries(workspaceId),
-    db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } }),
-  ]);
-  const cacheMs = readSettings(ws?.settings).verificationFreshnessDays * 86_400_000;
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const dictionaries = await verificationDictionaries(workspaceId, readSettings(ws?.settings).verificationSmtpProbeEnabled);
   // Serialize identical requests so retries and concurrent clients reuse the same queued row.
   // PostgreSQL transaction-scoped advisory locks do not add schema constraints or alter history.
   const lockKey = opts.batchId
@@ -53,6 +50,12 @@ export async function createVerification(workspaceId: string, email: string, opt
   });
 }
 
+/** The uploaded CSV row kept with each result, so exports can return the customer's own columns. Never dropped. */
+export function sourceColumns(details: unknown): Record<string, unknown> {
+  const d = (details ?? {}) as Record<string, unknown>;
+  return { ...(d.originalRow !== undefined ? { originalRow: d.originalRow } : {}), ...(d.sourceRow !== undefined ? { sourceRow: d.sourceRow } : {}) };
+}
+
 export async function processFirstPartyVerification(workspaceId: string, verificationId: string, attempt = 1) {
   const row = await db().emailVerification.findFirst({ where: { id: verificationId, workspaceId, provider: 'first-party-dns' } });
   if (!row) return { skipped: 'verification record not found' };
@@ -73,8 +76,9 @@ export async function processFirstPartyVerification(workspaceId: string, verific
     data: { rawResult: 'processing', step: attempt, details: { ...(row.details as Record<string, unknown>), state: 'PROCESSING', attempt, processingAt: new Date().toISOString() } },
   });
   if (!claim.count) return { skipped: 'another worker claimed this verification' };
-  const result = await inspectEmail(row.email, undefined, 2500, await verificationDictionaries(workspaceId));
+  const result = await inspectEmail(row.email, undefined, 2500, await verificationDictionaries(workspaceId, workspaceSettings.verificationSmtpProbeEnabled));
   const env = config();
+  let controlResult: SmtpResult | undefined;
   if (result.syntax.valid && result.dns.mx.length && workspaceSettings.verificationSmtpProbeEnabled && env.EMAIL_VERIFY_SMTP_ENABLED && env.EMAIL_VERIFY_MAIL_FROM) {
     const release = await acquireLock(`email-verify-domain:${result.domain}`, 300_000);
     if (!release) throw new Error('SMTP domain cooldown is active; retry later');
@@ -91,18 +95,23 @@ export async function processFirstPartyVerification(workspaceId: string, verific
           result.catchAll = { status: 'UNKNOWN', reason: 'Control recipient probe skipped because the SMTP rate limit was reached', controlClassification: 'NOT_PROBED' };
         } else {
           const controlAddress = `emn-control-${randomUUID()}@${result.domain}`;
-          const control = await probeRecipientSmtp({ email: controlAddress, domain: result.domain, mx }, { enabled: true, mailFrom: env.EMAIL_VERIFY_MAIL_FROM, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
+          controlResult = await probeRecipientSmtp({ email: controlAddress, domain: result.domain, mx }, { enabled: true, mailFrom: env.EMAIL_VERIFY_MAIL_FROM, timeoutMs: env.EMAIL_VERIFY_SMTP_TIMEOUT_MS });
           result.catchAll = {
-            status: control.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'SUSPECTED' : control.classification === 'USER_UNKNOWN' ? 'NOT_CATCH_ALL' : 'UNKNOWN',
-            reason: control.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'One randomized control recipient was accepted; catch-all is suspected, not confirmed' : control.classification === 'USER_UNKNOWN' ? 'Random control recipient was rejected' : `Control result was ${control.classification}`,
-            controlClassification: control.classification,
+            status: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'SUSPECTED' : controlResult.classification === 'USER_UNKNOWN' ? 'NOT_CATCH_ALL' : 'UNKNOWN',
+            reason: controlResult.classification === 'ACCEPTED_BUT_UNCONFIRMED' ? 'One randomized control recipient was accepted; catch-all is suspected, not confirmed' : controlResult.classification === 'USER_UNKNOWN' ? 'Random control recipient was rejected' : `Control result was ${controlResult.classification}`,
+            controlClassification: controlResult.classification,
           };
         }
       }
-      if (result.smtp.classification === 'USER_UNKNOWN') result.primaryStatus = 'INVALID';
-      result.limitations = ['SMTP acceptance is not proof of mailbox existence or inbox placement', 'No DATA command or message delivery was performed'];
+      result.primaryStatus = classifyMailboxEvidence(result.smtp, controlResult);
+      result.limitations = [
+        'SMTP acceptance alone does not prove mailbox existence; VALID requires an accepted recipient plus rejection of a randomized control address',
+        ...(result.primaryStatus === 'CATCH_ALL' ? ['A randomized control address was also accepted; CATCH_ALL is suspected from one probe'] : []),
+        'SMTP status does not prove deliverability or inbox placement',
+        'No DATA command or email delivery was performed',
+      ];
       if (['TEMPORARY_FAILURE','GREYLISTED','CONNECTION_TIMEOUT','CONNECTION_RESET'].includes(result.smtp.classification) && attempt < 4) {
-        await db().emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: 'processing' }, data: { rawResult: 'queued', step: attempt, details: { ...result, state: 'RETRYING', attempt } } });
+        await db().emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: 'processing' }, data: { rawResult: 'queued', step: attempt, details: { ...result, ...sourceColumns(row.details), state: 'RETRYING', attempt } } });
         throw new Error(`Temporary SMTP result ${result.smtp.classification}; scheduled retry ${attempt + 1}`);
       }
     } finally { await release(); }
@@ -118,13 +127,17 @@ export async function processFirstPartyVerification(workspaceId: string, verific
     ...(lead?.status === 'BOUNCED' ? ['This workspace has a prior bounce for the address'] : []),
   ];
   result.risk = calculateEmailRisk(result, internalSignals);
-  const stored = { ...result, state: 'COMPLETE', checkedAt: new Date().toISOString() };
+  const stored = { ...result, ...sourceColumns(row.details), state: 'COMPLETE', checkedAt: new Date().toISOString() };
   await db().$transaction(async (tx) => {
     const updated = await tx.emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: 'processing' }, data: {
       result: result.primaryStatus, rawResult: JSON.stringify(stored), details: stored, expiresAt: new Date(Date.now() + cacheMs),
     } });
     if (!updated.count) return;
-    if (row.leadId) await tx.lead.updateMany({ where: { id: row.leadId, workspaceId }, data: { emailVerificationStatus: result.primaryStatus, emailVerifiedAt: new Date() } });
+    const linkedLeadId = row.leadId ?? (await tx.lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: row.email } }, select: { id: true } }))?.id;
+    if (linkedLeadId) {
+      await tx.lead.updateMany({ where: { id: linkedLeadId, workspaceId }, data: { emailVerificationStatus: result.primaryStatus, emailVerifiedAt: new Date() } });
+      if (!row.leadId) await tx.emailVerification.updateMany({ where: { id: row.id, workspaceId, leadId: null }, data: { leadId: linkedLeadId } });
+    }
     if (row.batchId) {
       const batch = await tx.emailVerificationBatch.findFirst({ where: { id: row.batchId, workspaceId } });
       if (batch && batch.status !== 'CANCELLED') {
@@ -153,9 +166,9 @@ export async function releaseFirstPartyVerification(workspaceId: string, verific
 export async function failFirstPartyVerification(workspaceId: string, verificationId: string, error: string) {
   const safe = error.replace(/[\r\n\t]+/g, ' ').slice(0, 160) || 'Verification failed';
   await db().$transaction(async (tx) => {
-    const row = await tx.emailVerification.findFirst({ where: { id: verificationId, workspaceId, provider: 'first-party-dns', rawResult: { in: ['queued', 'processing'] } }, select: { id: true, batchId: true } });
+    const row = await tx.emailVerification.findFirst({ where: { id: verificationId, workspaceId, provider: 'first-party-dns', rawResult: { in: ['queued', 'processing'] } }, select: { id: true, batchId: true, details: true } });
     if (!row) return;
-    await tx.emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: { in: ['queued', 'processing'] } }, data: { rawResult: 'failed', details: { state: 'FAILED', error: safe } } });
+    await tx.emailVerification.updateMany({ where: { id: row.id, workspaceId, rawResult: { in: ['queued', 'processing'] } }, data: { rawResult: 'failed', details: { ...sourceColumns(row.details), state: 'FAILED', error: safe } as Prisma.InputJsonValue } });
     if (row.batchId) {
       const batch = await tx.emailVerificationBatch.findFirst({ where: { id: row.batchId, workspaceId } });
       if (!batch || batch.status === 'CANCELLED') return;

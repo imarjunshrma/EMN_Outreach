@@ -146,7 +146,10 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/batches/:id/re
   const failed = await db().emailVerification.count({ where: { batchId: batch.id, workspaceId: c.workspaceId, provider: 'first-party-dns', rawResult: 'failed' } });
   if (!failed) return { batchId: batch.id, retried: 0 };
   await db().$transaction(async (tx) => {
-    await tx.emailVerification.updateMany({ where: { batchId: batch.id, workspaceId: c.workspaceId, provider: 'first-party-dns', rawResult: 'failed' }, data: { rawResult: 'queued', result: 'UNKNOWN', details: { state: 'QUEUED', manualRetry: true }, step: 1 } });
+    // Keep the uploaded CSV row (originalRow/sourceRow) so the export still lines up after a retry.
+    await tx.$executeRaw`UPDATE "EmailVerification" SET "rawResult" = 'queued', "result" = 'UNKNOWN', "step" = 1,
+      "details" = jsonb_build_object('state', 'QUEUED', 'manualRetry', true) || jsonb_strip_nulls(jsonb_build_object('originalRow', "details"->'originalRow', 'sourceRow', "details"->'sourceRow'))
+      WHERE "batchId" = ${batch.id}::uuid AND "workspaceId" = ${c.workspaceId}::uuid AND "provider" = 'first-party-dns' AND "rawResult" = 'failed'`;
     await tx.emailVerificationBatch.update({ where: { id: batch.id }, data: { processed: Math.max(0, batch.processed - failed), status: 'PROCESSING', completedAt: null, error: null } });
   });
   const actionId = String(Date.now());
@@ -192,5 +195,5 @@ route({ method: 'post', path: '/w/:workspaceId/email-verification/diagnostics', 
     redis().ping().then(() => 'CONNECTED').catch(() => 'UNAVAILABLE'),
     queue(QUEUES.verify).getJobCounts('waiting','active','delayed','failed','completed').catch(() => null),
   ]);
-  return { smtpEnabled: env.EMAIL_VERIFY_SMTP_ENABLED, mailFromConfigured: !!env.EMAIL_VERIFY_MAIL_FROM, smtp, redis: redisStatus, verificationQueue };
+  return { smtpEnabled: env.EMAIL_VERIFY_SMTP_ENABLED, catchAllProbeEnabled: env.EMAIL_VERIFY_CATCH_ALL_ENABLED, mailFromConfigured: !!env.EMAIL_VERIFY_MAIL_FROM, smtp, redis: redisStatus, verificationQueue };
 } });

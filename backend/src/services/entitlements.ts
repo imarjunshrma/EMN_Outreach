@@ -19,7 +19,26 @@ export interface TenantState {
   operational: boolean; reason: string | null; entitlements: Entitlements; plan: { code: string; name: string } | null; source: 'unlimited' | 'plan' | 'trial' | 'grace' | 'none';
 }
 
+/**
+ * Per-tenant module/limit overrides set by platform admins (Platform → Tenant → Modules & limits). Stored in
+ * Organization.settings.adminOverrides, which tenants cannot write. Applied on top of the plan (SaaS) or on top
+ * of "unlimited" (self-hosted), so admins can switch modules off or cap limits in both modes.
+ */
+export function applyAdminOverrides(ent: Entitlements, orgSettings: unknown): Entitlements {
+  const o = ((orgSettings ?? {}) as { adminOverrides?: Partial<Entitlements> }).adminOverrides;
+  if (!o || typeof o !== 'object') return ent;
+  const { features, integrations, ...limits } = o;
+  return normalizeEntitlements({ ...ent, ...limits, features: { ...ent.features, ...(features ?? {}) }, ...(Array.isArray(integrations) ? { integrations } : {}) });
+}
+
 export async function tenantState(organizationId: string, now = new Date()): Promise<TenantState> {
+  const st = await tenantStateBase(organizationId, now);
+  if (!st.operational) return st;
+  const org = await db().organization.findUnique({ where: { id: organizationId }, select: { settings: true } });
+  return { ...st, entitlements: applyAdminOverrides(st.entitlements, org?.settings) };
+}
+
+async function tenantStateBase(organizationId: string, now = new Date()): Promise<TenantState> {
   const org = await db().organization.findUniqueOrThrow({ where: { id: organizationId }, include: { subscription: { include: { plan: true } } } });
   const status = org.status as OrgStatus;
   const base = { organizationId, orgStatus: status, subscriptionStatus: org.subscription?.status ?? null, plan: org.subscription ? { code: org.subscription.plan.code, name: org.subscription.plan.name } : null };

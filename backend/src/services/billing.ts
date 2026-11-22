@@ -53,7 +53,7 @@ export async function assertEntitled(workspaceId: string, what: Legacy) {
 /** API-key traffic: per-tenant per-minute fair-use limit plus the monthly API-call allowance; every call is metered. */
 export async function countApiCall(workspaceId: string, requestId: string) {
   const org = await orgIdOf(workspaceId);
-  const st = await assertFeature(org, 'apiAccess').catch(async (e) => { if (!billingEnabled()) return tenantState(org); throw e; });
+  const st = await assertFeature(org, 'apiAccess').catch(async (e) => { if (!billingEnabled() && (e as { code?: string }).code !== 'QUOTA_EXCEEDED') return tenantState(org); throw e; }); // an admin can switch API access off in either mode
   const minute = Math.floor(Date.now() / 60_000);
   const k = `rl:tenant:${org}:api:${minute}`;
   const n = await redis().incr(k);

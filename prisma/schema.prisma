@@ -2885,3 +2885,11 @@ model AiWorkflowStageExecution {
   @@index([runId])
   @@index([workspaceId, startedAt])
 }
+
+/// Platform-wide settings edited by super admins (sign-up mode, announcement banner). One row per key.
+model PlatformSetting {
+  key         String   @id
+  value       Json
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+}

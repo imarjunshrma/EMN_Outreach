@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Resolver } from 'node:dns/promises';
 import { calculateEmailRisk, inspectEmail, validateEmailSyntax } from '../../integrations/src/email-verification.js';
-import { classifySmtpReply, diagnoseSmtpConnectivity, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
+import { classifyMailboxEvidence, classifySmtpReply, diagnoseSmtpConnectivity, isPublicMxAddress, probeRecipientSmtp } from '../../integrations/src/email-verification-smtp.js';
 import { chooseEmailColumn, csvSafe } from '../../backend/src/services/verification-csv.js';
+import { verificationCacheVersion } from '../../backend/src/services/email-verification-datasets.js';
 
 const resolver = (overrides: Record<string, unknown> = {}) => ({
   resolveMx: vi.fn().mockResolvedValue([{ exchange: 'mx.example.com', priority: 10 }]),
@@ -54,6 +55,25 @@ describe('first-party email verification primitives', () => {
     expect(classifySmtpReply('550 Recipient address rejected: access denied').classification).toBe('POLICY_REJECTION');
     expect(classifySmtpReply('451 4.7.1 Greylisted, try again later').classification).toBe('GREYLISTED');
     expect(classifySmtpReply('451 4.3.0 Temporary failure').classification).toBe('TEMPORARY_FAILURE');
+  });
+
+  it('only marks accepted recipients VALID when a randomized control is explicitly rejected', () => {
+    const accepted = { classification: 'ACCEPTED_BUT_UNCONFIRMED', durationMs: 1 } as const;
+    const unknown = { classification: 'USER_UNKNOWN', durationMs: 1 } as const;
+    const policy = { classification: 'POLICY_REJECTION', durationMs: 1 } as const;
+    expect(classifyMailboxEvidence(accepted)).toBe('UNKNOWN');
+    expect(classifyMailboxEvidence(accepted, policy)).toBe('UNKNOWN');
+    expect(classifyMailboxEvidence(accepted, unknown)).toBe('VALID');
+    expect(classifyMailboxEvidence(accepted, accepted)).toBe('CATCH_ALL');
+    expect(classifyMailboxEvidence(unknown)).toBe('INVALID');
+  });
+
+  it('invalidates first-party result cache when SMTP verification settings change', () => {
+    const base = { workspaceSmtpEnabled: false, smtpEnabled: false, catchAllEnabled: false, mailFrom: undefined };
+    const oldVersion = verificationCacheVersion('dataset-v1', base);
+    expect(verificationCacheVersion('dataset-v1', { ...base, workspaceSmtpEnabled: true })).not.toBe(oldVersion);
+    expect(verificationCacheVersion('dataset-v1', { ...base, smtpEnabled: true, mailFrom: 'verify@example.test' })).not.toBe(oldVersion);
+    expect(verificationCacheVersion('dataset-v1', { ...base, catchAllEnabled: true })).not.toBe(oldVersion);
   });
 
   it('permits SMTP connections only to public MX addresses', () => {

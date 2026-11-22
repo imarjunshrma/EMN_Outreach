@@ -12,17 +12,27 @@ const SOURCE_URL = 'https://raw.githubusercontent.com/disposable-email-domains/d
 const cache = new Map<string, { expiresAt: number; dictionaries: VerificationDictionaries }>();
 const loading = new Map<string, Promise<VerificationDictionaries>>();
 
+export function verificationCacheVersion(datasetVersion: string, options: { workspaceSmtpEnabled: boolean; smtpEnabled: boolean; catchAllEnabled: boolean; mailFrom?: string }) {
+  return createHash('sha256').update(JSON.stringify({
+    datasetVersion,
+    workspaceSmtpEnabled: options.workspaceSmtpEnabled,
+    smtpEnabled: options.smtpEnabled,
+    catchAllEnabled: options.catchAllEnabled,
+    mailFrom: options.mailFrom?.trim().toLowerCase() ?? null,
+  })).digest('hex');
+}
+
 function normalizeDomain(input: string) {
   const domain = domainToASCII(input.trim().replace(/^@/, '').replace(/\.$/, '').toLowerCase());
   if (!domain || domain.length > 253 || domain.includes('/') || domain.includes(':') || domain.split('.').some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) throw new AppError('VALIDATION_FAILED', 'Provide a valid domain name', 400);
   return domain;
 }
 
-export async function verificationDictionaries(workspaceId: string): Promise<VerificationDictionaries> {
+export async function verificationDictionaries(workspaceId: string, workspaceSmtpEnabled = false): Promise<VerificationDictionaries> {
   const cached = cache.get(workspaceId);
-  if (cached && cached.expiresAt > Date.now()) return cached.dictionaries;
+  if (cached && cached.expiresAt > Date.now()) return withVerificationConfig(cached.dictionaries, workspaceSmtpEnabled);
   const inFlight = loading.get(workspaceId);
-  if (inFlight) return inFlight;
+  if (inFlight) return withVerificationConfig(await inFlight, workspaceSmtpEnabled);
   const pending = (async () => {
     const [domains, overrides, patterns] = await Promise.all([
       db().disposableEmailDomain.findMany({ where: { source: SOURCE }, select: { domain: true } }),
@@ -47,8 +57,18 @@ export async function verificationDictionaries(workspaceId: string): Promise<Ver
     return dictionaries;
   })();
   loading.set(workspaceId, pending);
-  try { return await pending; }
+  try { return withVerificationConfig(await pending, workspaceSmtpEnabled); }
   finally { if (loading.get(workspaceId) === pending) loading.delete(workspaceId); }
+}
+
+function withVerificationConfig(dictionaries: VerificationDictionaries, workspaceSmtpEnabled: boolean): VerificationDictionaries {
+  const env = {
+    workspaceSmtpEnabled,
+    smtpEnabled: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_SMTP_ENABLED ?? ''),
+    catchAllEnabled: /^(true|1)$/i.test(process.env.EMAIL_VERIFY_CATCH_ALL_ENABLED ?? ''),
+    mailFrom: process.env.EMAIL_VERIFY_MAIL_FROM,
+  };
+  return { ...dictionaries, datasetVersion: verificationCacheVersion(dictionaries.datasetVersion ?? 'unknown', env) };
 }
 
 export async function listVerificationDatasets(workspaceId: string) {

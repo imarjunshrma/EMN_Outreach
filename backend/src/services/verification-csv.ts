@@ -8,6 +8,8 @@ import { store, assertKeyBelongsTo } from '../core/storage.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { validateEmailSyntax } from '../../../integrations/src/email-verification.js';
 import { verificationDictionaries } from './email-verification-datasets.js';
+import { NotFound } from '../core/errors.js';
+import { readSettings } from './workspace.js';
 
 type CsvRow = { email: string; row: string[]; sourceRow: number };
 const CHUNK_SIZE = 250;
@@ -35,7 +37,8 @@ export async function processVerificationCsvBatch(workspaceId: string, batchId: 
   const batch = await db().emailVerificationBatch.findFirst({ where: { id: batchId, workspaceId } });
   if (!batch || !batch.storageKey) throw new Error('CSV verification batch or stored file was not found');
   if (batch.status === 'CANCELLED') return { skipped: 'batch cancelled' };
-  const dictionaries = await verificationDictionaries(workspaceId);
+  const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const dictionaries = await verificationDictionaries(workspaceId, readSettings(workspace?.settings).verificationSmtpProbeEnabled);
   assertKeyBelongsTo(batch.storageKey, workspaceId);
   const parser = parse({ bom: true, skip_empty_lines: true, relax_column_count: true, max_record_size: 256 * 1024 });
   const stream = store().stream(batch.storageKey).pipe(parser);
@@ -50,29 +53,45 @@ export async function processVerificationCsvBatch(workspaceId: string, batchId: 
     if (!chunk.length) return;
     const currentBatch = await db().emailVerificationBatch.findFirst({ where: { id: batchId, workspaceId }, select: { status: true } });
     if (!currentBatch || currentBatch.status === 'CANCELLED') throw new Error('CSV batch was cancelled during import');
-    const unique = [...new Map(chunk.map((r) => {
+    // De-duplicate within the chunk, keeping the first occurrence (the row the customer sees first in their file).
+    const firstByEmail = new Map<string, CsvRow>();
+    for (const r of chunk) {
       const syntax = validateEmailSyntax(r.email);
       const email = (syntax.valid ? syntax.normalizedEmail : r.email.trim().normalize('NFC')).toLowerCase();
-      return [email, { ...r, email }];
-    })).values()];
+      if (!firstByEmail.has(email)) firstByEmail.set(email, { ...r, email });
+    }
+    const unique = [...firstByEmail.values()];
     const emails = unique.map((r) => r.email);
     const priorBatch = await db().emailVerification.findMany({ where: { workspaceId, batchId, email: { in: emails } }, select: { email: true } });
     const seen = new Set(priorBatch.map((x) => x.email));
     const fresh = unique.filter((r) => !seen.has(r.email));
     if (fresh.length) {
+      const matchedLeads = await db().lead.findMany({ where: { workspaceId, emailNormalized: { in: fresh.map((r) => r.email) } }, select: { id: true, emailNormalized: true } });
+      const leadIdsByEmail = new Map(matchedLeads.map((lead) => [lead.emailNormalized, lead.id]));
       const cachedRows = await db().emailVerification.findMany({ where: { workspaceId, email: { in: fresh.map((r) => r.email) }, provider: 'first-party-dns', batchId: null, leadId: null, expiresAt: { gt: new Date() } }, orderBy: { createdAt: 'desc' } });
       const cached = new Map<string, typeof cachedRows[number]>();
       for (const r of cachedRows) if ((r.details as { datasetVersion?: string } | null)?.datasetVersion === dictionaries.datasetVersion && !cached.has(r.email)) cached.set(r.email, r);
       const data = fresh.map((r) => {
         const previous = cached.get(r.email);
         const details = previous ? { ...(previous.details as Record<string, unknown>), originalRow: r.row, sourceRow: r.sourceRow } : { state: 'QUEUED', originalRow: r.row, sourceRow: r.sourceRow };
-        return { workspaceId, batchId, email: r.email, provider: 'first-party-dns', result: previous?.result ?? 'UNKNOWN', rawResult: previous?.rawResult ?? 'queued', details: details as Prisma.InputJsonValue, expiresAt: previous?.expiresAt ?? null };
+        return { workspaceId, batchId, ...(leadIdsByEmail.has(r.email) ? { leadId: leadIdsByEmail.get(r.email)! } : {}), email: r.email, provider: 'first-party-dns', result: previous?.result ?? 'UNKNOWN', rawResult: previous?.rawResult ?? 'queued', details: details as Prisma.InputJsonValue, expiresAt: previous?.expiresAt ?? null };
       });
       const cacheHits = fresh.filter((r) => cached.has(r.email)).length;
-      const inserted = await db().$transaction(async (tx) => {
+      await db().$transaction(async (tx) => {
         const state = await tx.$queryRaw<Array<{ status: string }>>`SELECT "status" FROM "EmailVerificationBatch" WHERE "id" = ${batchId}::uuid AND "workspaceId" = ${workspaceId}::uuid FOR UPDATE`;
         if (state[0]?.status !== 'INGESTING') throw new Error('CSV batch is no longer ingesting');
         const created = await tx.emailVerification.createMany({ data, skipDuplicates: true });
+        // A CSV may contain addresses already present as leads. Link each result to the
+        // matching tenant lead and apply cache hits immediately; queued rows are updated
+        // again by the first-party worker when their checks complete.
+        for (const row of fresh) {
+          const leadId = leadIdsByEmail.get(row.email);
+          const previous = cached.get(row.email);
+          if (!leadId || !previous) continue;
+          const checkedAtValue = (previous.details as { checkedAt?: string } | null)?.checkedAt;
+          const checkedAt = checkedAtValue ? new Date(checkedAtValue) : previous.createdAt;
+          await tx.lead.updateMany({ where: { id: leadId, workspaceId }, data: { emailVerificationStatus: previous.result, emailVerifiedAt: checkedAt } });
+        }
         await tx.emailVerificationBatch.update({ where: { id: batchId }, data: { total: { increment: created.count }, processed: { increment: Math.min(created.count, cacheHits) }, emailColumn: String(emailIndex), csvHeaders: headers as unknown as Prisma.InputJsonValue } });
         return created;
       });
@@ -138,7 +157,7 @@ export async function markCsvImportFailed(workspaceId: string, batchId: string, 
 
 export async function streamVerificationBatchCsv(workspaceId: string, batchId: string, response: Response) {
   const batch = await db().emailVerificationBatch.findFirst({ where: { id: batchId, workspaceId }, select: { id: true, csvHeaders: true, emailColumn: true } });
-  if (!batch) throw new Error('Verification batch was not found');
+  if (!batch) throw NotFound('Verification batch'); // 404 for another workspace's batch, never a 500
   const originals = Array.isArray(batch.csvHeaders) ? batch.csvHeaders.map((x) => String(x)) : [];
   const selectedEmailColumn = Number(batch.emailColumn ?? -1);
   const extra = ['original_email','normalized_email','primary_status','dns_status','mx_summary','smtp_status','catch_all_status','disposable','free_provider','role_based','risk_score','risk_signals','failure_reason','verified_at'];

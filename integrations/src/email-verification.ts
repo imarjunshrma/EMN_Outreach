@@ -5,7 +5,7 @@ import type { SmtpResult } from './email-verification-smtp.js';
 
 export type EmailCheck = {
   normalizedEmail: string;
-  primaryStatus: 'INVALID' | 'UNKNOWN';
+  primaryStatus: 'INVALID' | 'UNKNOWN' | 'VALID' | 'CATCH_ALL';
   syntax: { valid: boolean; reason?: string };
   domain: string;
   dns: { status: 'NOT_CHECKED' | 'MX' | 'NULL_MX' | 'A_FALLBACK' | 'NO_MAIL_ROUTE' | 'NXDOMAIN' | 'DNS_ERROR'; mx: Array<{ exchange: string; priority: number; addresses: string[] }>; error?: string };

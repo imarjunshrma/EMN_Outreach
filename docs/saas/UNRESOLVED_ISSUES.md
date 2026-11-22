@@ -22,4 +22,14 @@ Stripe, Razorpay, system SMTP, Gmail and Microsoft 365 OAuth, Cloudflare DNS, AI
 - Staging/production infrastructure, alerts and backups on real servers.
 
 ## Accepted risks
-- `npm audit`: 3 high (backend, build-time Prisma tooling), 1 high + 1 moderate (frontend, build-time). Fixes need major-version changes; revisit when Prisma and Next releases allow.
+- `npm audit`: resolved in the v1.3 audit with same-major overrides (`effect` 3.22.5, `postcss` 8.5.33). Remove the overrides once Prisma and Next ship the fixed versions themselves.
+
+## Open after the v1.3 product audit (22 November 2026)
+
+1. **Coverage below a comfortable level** in `outreach-brain.ts` (37%), `copilot.ts` (49%), `worker/processors.ts` (50%), the Gmail and Microsoft adapters (50%) and billing gateways (58%). Overall server line coverage is 76%; branch coverage 57%.
+2. **SMTP probing paths** in first-party verification are not covered by tests (need a controllable mail server); probing stays off by default.
+3. **No load test**; performance is unmeasured beyond removing one redundant query.
+4. **Frontend Content-Security-Policy** allows inline scripts (Next.js bootstrap); a nonce pipeline would tighten it.
+5. **16 lint warnings** (`any` types in older files); no errors.
+6. **No frontend unit coverage**; screens are covered by browser tests only.
+7. Everything in "Requires live credentials" and "Not verified" above still applies.

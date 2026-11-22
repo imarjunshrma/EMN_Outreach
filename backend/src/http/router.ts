@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from 'express';
 import { z, type ZodType } from 'zod';
 import { hasRole, type Role } from '../../../shared/src/permissions.js';
-import { AppError, Forbidden, Unauthorized } from '../core/errors.js';
+import { AppError, Forbidden, NotFound, Unauthorized } from '../core/errors.js';
 import { rateLimit } from '../core/redis.js';
 import type { Actor } from '../core/audit.js';
 import { db } from '../core/db.js';
@@ -79,6 +79,14 @@ export function scopeAllows(scopes: string[], def: { tag: string; method: string
 
 export function validationError(err: z.ZodError) {
   return new AppError('VALIDATION_FAILED', 'Validation failed', 400, err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })));
+}
+
+/** Path parameters that always name a database record (every model key is a UUID). */
+const UUID_PARAMS = new Set(['id', 'batchId', 'leadId', 'memberId', 'organizationId', 'pid', 'userId', 'versionId', 'workspaceId']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A malformed record ID can never match a record: answer 404 instead of letting the database reject it (500). */
+export function assertRecordParams(params: Record<string, string>) {
+  for (const [k, v] of Object.entries(params)) if (UUID_PARAMS.has(k) && !UUID_RE.test(v)) throw NotFound('Resource');
 }
 
 export function mountRoutes(app: Express) {
@@ -170,6 +178,7 @@ export function mountRoutes(app: Express) {
 
         if (def.prepare) await def.prepare(ctx as Ctx<any, any>);
 
+        assertRecordParams(ctx.params);
         if (def.body) {
           const parsed = def.body.safeParse(req.body ?? {});
           if (!parsed.success) throw validationError(parsed.error);

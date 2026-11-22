@@ -35,7 +35,12 @@ export async function verifyWaterfall(workspaceId: string, leadId: string, opts:
   const domain = lead.emailNormalized.split('@')[1] ?? '';
   let final: string | null = null;
   if (DISPOSABLE_DOMAINS.has(domain)) {
-    await save('offline-disposable-list', 'UNKNOWN', 'disposable domain attribute; mailbox validity not checked', 0, 0);
+    // Recorded with the disposable attribute and an expiry, because the send-time check (compliance.canContact)
+    // only trusts unexpired first-party/offline results. Without these, a workspace that allows UNKNOWN
+    // addresses would send to disposable domains even when its disposable policy is "block".
+    const wsRow = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+    const freshnessDays = readSettings(wsRow.settings).verificationFreshnessDays;
+    await db().emailVerification.create({ data: { workspaceId, leadId, email: lead.emailNormalized, provider: 'offline-disposable-list', result: 'UNKNOWN', rawResult: 'disposable domain attribute; mailbox validity not checked', kind: 'VERIFY', step: 0, costCredits: 0, details: { attributes: { disposable: true } }, expiresAt: new Date(Date.now() + freshnessDays * 86_400_000) } });
     steps.push({ provider: 'offline-disposable-list', result: 'UNKNOWN' });
     final = 'UNKNOWN';
   } else {
@@ -43,7 +48,7 @@ export async function verifyWaterfall(workspaceId: string, leadId: string, opts:
     const st = readSettings(ws.settings);
     let order = [...new Set([...st.verifierOrder, ...(st.verifierProvider !== 'none' ? [st.verifierProvider] : [])])].filter((p) => LEGACY.has(p));
     const bill = await import('./billing.js');
-    if (bill.billingEnabled() && !(await bill.billingState(workspaceId)).entitlements.features.waterfall) order = order.slice(0, 1); // plan without waterfall: single provider
+    if (!(await bill.billingState(workspaceId)).entitlements.features.waterfall) order = order.slice(0, 1); // plan without waterfall: single provider
     let step = 0;
     let lastNonDefinitive: string | null = null;
     for (const provider of order) {
