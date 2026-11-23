@@ -76,7 +76,13 @@ function formatGuidance(stage: Stage, priorVariantCount: number): string {
 
 interface BuiltPrompt { system: string; user: string }
 
-export async function buildStagePrompt(run: { workspaceId: string; leadId: string; ownerUserId: string; playbookVersionId: string | null }, stages: Stage[], index: number, outputs: Outputs): Promise<BuiltPrompt> {
+/** One-off instructions given when this generation was started ("Extra instructions" box). */
+const runInstructions = (run: { workflowSnapshot?: unknown }) => {
+  const v = (run.workflowSnapshot as { instructions?: unknown } | null | undefined)?.instructions;
+  return typeof v === 'string' ? v.trim() : '';
+};
+
+export async function buildStagePrompt(run: { workspaceId: string; leadId: string; ownerUserId: string; playbookVersionId: string | null; workflowSnapshot?: unknown }, stages: Stage[], index: number, outputs: Outputs): Promise<BuiltPrompt> {
   const stage = stages[index];
   const lead = await db().lead.findFirst({ where: { id: run.leadId, workspaceId: run.workspaceId }, include: { company: true } });
   if (!lead) throw NotFound('Lead');
@@ -101,6 +107,7 @@ export async function buildStagePrompt(run: { workspaceId: string; leadId: strin
     `Task: ${TASK_LABELS[stage.taskType]}. ${TASK_INSTRUCTIONS[stage.taskType]}`,
     web ? 'You may use web search and open public pages (read-only) to research the prospect. Prefer the prospect\'s own website and linked profiles. Do not log in anywhere.' : 'You cannot browse. Use only the inputs provided; if something is unknown, say so instead of guessing.',
     stage.instructions.trim() ? `Additional instructions from the sender (apply them unless they conflict with the rules above):\n${stage.instructions.trim()}` : '',
+    runInstructions(run) ? `Instructions for this particular email from the sender (follow them closely unless they conflict with the rules above):\n${runInstructions(run)}` : '',
     formatGuidance(stage, priorVariants),
     'Answer with JSON that matches the required schema exactly.',
   ].filter(Boolean).join('\n\n');
@@ -219,6 +226,8 @@ export const CreateRunSchema = z.object({
   campaignId: z.string().uuid().nullable().optional(),
   mode: z.enum(['workflow', 'claude', 'codex']).default('workflow'),
   workflowId: z.string().uuid().nullable().optional(),
+  /** One-off guidance for this generation only (tone, angle, offer, length…). Kept with the run. */
+  instructions: z.string().trim().max(2000).optional(),
 });
 
 async function enqueueStage(run: { id: string; workspaceId: string; ownerUserId: string }, stage: Stage, stageIndex: number, attempt = 1, delayMs = 0) {
@@ -260,7 +269,7 @@ export async function createRun(ownerUserId: string, workspaceId: string, input:
   if (!stages.length) throw new AppError('VALIDATION_FAILED', 'This workflow has no enabled stages', 400);
   const pb = await currentPlaybook(ownerUserId);
   const run = await db().aiWorkflowRun.create({
-    data: { ownerUserId, workspaceId, leadId: input.leadId, campaignId: input.campaignId ?? null, workflowId: wf.id, workflowName: wf.name, workflowSnapshot: { version: wf.version, stages } as unknown as Prisma.InputJsonValue, playbookVersionId: pb.id, status: 'QUEUED' },
+    data: { ownerUserId, workspaceId, leadId: input.leadId, campaignId: input.campaignId ?? null, workflowId: wf.id, workflowName: wf.name, workflowSnapshot: { version: wf.version, stages, instructions: input.instructions || null } as unknown as Prisma.InputJsonValue, playbookVersionId: pb.id, status: 'QUEUED' },
   });
   await enqueueStage(run, stages[0], 0);
   return run;

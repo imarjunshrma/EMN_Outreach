@@ -22,13 +22,15 @@ export function GeneratePanel({ leadId, defaultCampaignId }: { leadId: string; d
   const [runId, setRunId] = useState<string | null>(null);
   const [workflowId, setWorkflowId] = useState('');
   const [campaignId, setCampaignId] = useState(defaultCampaignId ?? '');
+  const [instructions, setInstructions] = useState('');
   useEffect(() => { if (!runId && history.data?.data.length) setRunId(history.data.data[0].id); }, [history.data, runId]);
-  const create = useWsMutation((b: Record<string, unknown>) => ({ path: '/ai-runs', body: { leadId, campaignId: campaignId || null, ...b } }), { success: 'Generation queued', onSuccess: (r: any) => setRunId(r.id) });
+  const create = useWsMutation((b: Record<string, unknown>) => ({ path: '/ai-runs', body: { leadId, campaignId: campaignId || null, ...(instructions.trim() ? { instructions: instructions.trim() } : {}), ...b } }), { success: 'Generation queued', onSuccess: (r: any) => setRunId(r.id) });
   const active = workflows.data?.workflows.find((w) => w.isDefault);
   const campaignList: Array<{ id: string; name: string }> = Array.isArray(campaigns.data) ? campaigns.data : campaigns.data?.data ?? campaigns.data?.campaigns ?? [];
   return (
     <div className="space-y-4">
       <Card>
+        <div className="mb-3"><Field label="Extra instructions for this email (optional)" hint="Only for this generation, on top of your Writing Playbook. E.g. “mention their new clinic in Austin”, “keep it under 60 words”, “offer a free content audit”."><Textarea rows={2} maxLength={2000} value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Angle, tone, offer, length…" /></Field></div>
         <div className="flex flex-wrap items-end gap-3">
           <Button loading={create.isPending} onClick={() => create.mutate({ mode: 'workflow' })} title={active ? `Uses “${active.name}”` : undefined}>Generate with selected workflow</Button>
           <Button variant="secondary" loading={create.isPending} onClick={() => create.mutate({ mode: 'claude' })}>Generate with Claude</Button>

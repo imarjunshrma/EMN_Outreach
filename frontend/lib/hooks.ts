@@ -32,7 +32,8 @@ export function useWsMutation<TBody = unknown, TRes = unknown>(
   return useMutation<TRes, Error, TBody>({
     mutationFn: async (body) => {
       const req = build(body);
-      return api<TRes>(`/w/${ws}${req.path}`, { method: req.method, body: req.body, form: req.form });
+      // A mutation is never a read: default to POST even when the request carries no body (otherwise it went out as GET → 404).
+      return api<TRes>(`/w/${ws}${req.path}`, { method: req.method ?? 'POST', body: req.body, form: req.form });
     },
     onSuccess: (r) => {
       if (opts.invalidate !== false) void qc.invalidateQueries({ queryKey: ['ws', ws] });
