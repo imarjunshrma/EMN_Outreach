@@ -109,7 +109,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   log "Configuring PostgreSQL roles and database"
   OWNER_PW="$(openssl rand -hex 24)"; APP_PW="$(openssl rand -hex 24)"; REDIS_PW="$(openssl rand -hex 24)"
   if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='emn_owner'" | grep -q 1; then
-    sudo -u postgres psql -v ON_ERROR_STOP=1 -v owner_pw="'$OWNER_PW'" -v app_pw="'$APP_PW'" -f "$SRC_DIR/deployment/postgres/setup.sql"
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -v owner_pw="'$OWNER_PW'" -v app_pw="'$APP_PW'" < "$SRC_DIR/deployment/postgres/setup.sql"
   else
     die "PostgreSQL role emn_owner already exists but $ENV_FILE is missing — restore the .env or drop the roles first"
   fi

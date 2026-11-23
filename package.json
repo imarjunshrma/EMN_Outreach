@@ -31,7 +31,12 @@
     "reset-password": "node --import tsx scripts/reset-password.ts",
     "test:e2e": "bash scripts/e2e.sh",
     "live-check": "node --import tsx scripts/live-check.ts",
-    "saas:matrices": "node --import tsx scripts/generate-saas-matrices.ts"
+    "saas:matrices": "node --import tsx scripts/generate-saas-matrices.ts",
+    "server:use-local-env": "bash scripts/server.sh use-local-env",
+    "server:restart": "bash scripts/server.sh restart",
+    "server:status": "bash scripts/server.sh status",
+    "server:logs": "bash scripts/server.sh logs",
+    "server:deploy": "bash scripts/server.sh deploy"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",
