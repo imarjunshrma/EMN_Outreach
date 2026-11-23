@@ -5,6 +5,8 @@
 #   npm run server:status          are the services running?
 #   npm run server:logs            follow the logs (Ctrl+C to stop)
 #   npm run server:deploy          build and release the code in this folder
+#   npm run server:create-admin -- --email you@x.com --name "Your Name" --workspace "Elite Media Networks"
+#   npm run server:reset-password -- --email you@x.com
 #   npm run server:nginx -- outvexa.com you@example.com
 #                                  publish the app on a domain: Nginx site + free SSL certificate (auto-renewing)
 set -euo pipefail
@@ -60,6 +62,18 @@ case "${1:-}" in
   deploy)
     need_root "$@"
     exec bash "$SRC_DIR/scripts/deploy.sh"
+    ;;
+  create-admin|reset-password)
+    need_root "$@"
+    # Runs the script from the live release, as the app user, with the app's own Node (not the system one).
+    # shellcheck disable=SC1091
+    [[ -f "$EMN_ROOT/shared/install.conf" ]] && source "$EMN_ROOT/shared/install.conf"
+    NODE_BIN="${EMN_NODE_BIN:-$(command -v node)}"
+    [[ -d "$EMN_ROOT/current" ]] || die "nothing deployed yet — run: npm run server:deploy"
+    cmd="$1"; shift
+    cd "$EMN_ROOT/current"
+    exec sudo -u emn -H env HOME=/home/emn PATH="$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" ${EMN_ADMIN_PASSWORD:+EMN_ADMIN_PASSWORD="$EMN_ADMIN_PASSWORD"} ${EMN_NEW_PASSWORD:+EMN_NEW_PASSWORD="$EMN_NEW_PASSWORD"} \
+      "$NODE_BIN" --import tsx "scripts/$cmd.ts" "$@"
     ;;
   nginx)
     need_root "$@"
@@ -124,5 +138,5 @@ NGX
     grep -q "^APP_URL=https://$DOMAIN\$" "$SHARED_ENV" 2>/dev/null || log "WARNING: APP_URL in .env is not https://$DOMAIN — fix it, then: npm run server:restart"
     ;;
   *)
-    sed -n '2,10p' "$0"; exit 1 ;;
+    sed -n '2,13p' "$0"; exit 1 ;;
 esac
