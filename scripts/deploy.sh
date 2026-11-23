@@ -15,11 +15,16 @@ KEEP_RELEASES="${KEEP_RELEASES:-5}"
 PROCESS_MANAGER="${PROCESS_MANAGER:-systemd}"   # systemd | pm2
 SKIP_BACKUP="${SKIP_BACKUP:-0}"
 RELEASE="$EMN_ROOT/releases/$(date -u +%Y%m%d%H%M%S)"
+# Choices made by install.sh (private Node, ports). Older installs have no file: the defaults below apply.
+# shellcheck disable=SC1091
+[[ -f "$EMN_ROOT/shared/install.conf" ]] && source "$EMN_ROOT/shared/install.conf"
+NODE_BIN="${EMN_NODE_BIN:-$(command -v node)}"
+export EMN_API_URL="http://127.0.0.1:${EMN_API_PORT:-4000}" EMN_WEB_URL="http://127.0.0.1:${EMN_WEB_PORT:-3000}"
 ENV_FILE="$EMN_ROOT/shared/.env"
 
 log() { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[deploy] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-as_emn() { sudo -u emn -H env HOME=/home/emn "$@"; }
+as_emn() { sudo -u emn -H env HOME=/home/emn PATH="$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin" "$@"; }
 
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE missing — run scripts/install.sh first"
@@ -57,7 +62,7 @@ cd "$RELEASE"
 as_emn npm ci --no-audit --no-fund
 as_emn npm run build
 as_emn npm --prefix frontend ci --no-audit --no-fund
-as_emn env NEXT_TELEMETRY_DISABLED=1 npm --prefix frontend run build
+as_emn env NEXT_TELEMETRY_DISABLED=1 EMN_API_INTERNAL_URL="$EMN_API_URL" npm --prefix frontend run build
 
 if [[ "$SKIP_BACKUP" != 1 && -n "$PREVIOUS" ]]; then
   log "Backing up database before migrating"

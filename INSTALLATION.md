@@ -156,3 +156,29 @@ Test a restore at least once on a spare database before you need it.
 * **Campaign auto-paused** — open the campaign log: content changed after approval, bounce-rate threshold,
   or a disconnected mailbox. Fix the cause, re-approve if needed, resume.
 * **Realtime updates missing** — the SSE location in the Nginx config must keep `proxy_buffering off`.
+
+## Installing on a server that already hosts other sites (CloudPanel, Plesk, a PM2 app)
+
+Use shared-server mode. It leaves everything that is already there alone:
+
+```bash
+sudo EMN_SHARED_SERVER=1 bash scripts/install.sh outvexa.com
+```
+
+| | Normal install | Shared-server mode |
+|---|---|---|
+| Node.js | Upgrades the system Node to 22 | Private Node 22 in `/opt/emn/node`; the system Node (and PM2 apps) keep theirs |
+| Redis | Adds a password to the system Redis | Its own Redis on `127.0.0.1:6380` (`emn-redis` service); the existing Redis is untouched |
+| Ports | web 3000, API 4000 | web **3100**, API 4000 (change with `EMN_WEB_PORT` / `EMN_API_PORT`); refuses ports already in use |
+| Nginx / SSL | Installs Nginx + Certbot and writes a site | Touches neither: you add the site in your panel |
+| Packages | `apt-get install` (may upgrade) | Installs only missing packages; never upgrades or restarts existing ones |
+| Swap | — | Adds a 2 GB swap file if RAM < 6 GB and there is none (the UI build needs memory) |
+
+Then, in **CloudPanel**:
+1. **Sites → Add Site → Create a Reverse Proxy**: domain `outvexa.com`, reverse proxy URL `http://127.0.0.1:3100`.
+2. Open the site → **SSL/TLS → Actions → New Let's Encrypt Certificate** (add `www.outvexa.com` too).
+3. Open the site → **Vhost**: inside the `server { … 443 … }` block, paste the contents of `/opt/emn/shared/nginx-site.conf`
+   **above** the existing `location / {` block, then **Save**. This sends `/api` to the API and keeps live updates unbuffered.
+
+Deploy with `sudo bash scripts/deploy.sh` as usual (it reads the choices from `/opt/emn/shared/install.conf`).
+Outvexa runs under systemd as the `emn` user (`emn-api`, `emn-worker`, `emn-web`, `emn-redis`); the PM2 apps keep running as before.

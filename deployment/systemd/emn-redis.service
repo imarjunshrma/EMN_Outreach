@@ -1,0 +1,18 @@
+[Unit]
+Description=Outvexa — dedicated Redis (queues and cache)
+After=network.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/bin/redis-server /etc/redis/emn-redis.conf
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/emn-redis
+
+[Install]
+WantedBy=multi-user.target
