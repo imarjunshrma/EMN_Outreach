@@ -324,7 +324,7 @@ export async function onboardingStatus(organizationId: string) {
   const wsIds = org.workspaces.map((w) => w.id);
   const first = org.workspaces[0];
   const [members, ai, mailboxes, domains, verifiedDomains, leads, campaigns, kb] = await Promise.all([
-    db().organizationMember.count({ where: { organizationId } }), db().aiProvider.count({ where: { workspaceId: { in: wsIds }, isEnabled: true } }),
+    db().organizationMember.count({ where: { organizationId } }), (async () => { const { aiAvailability } = await import('./ai-source.js'); let n = 0; for (const w of wsIds) if ((await aiAvailability(w)).ok) n++; return n; })(),
     db().emailAccount.count({ where: { workspaceId: { in: wsIds }, status: 'CONNECTED' } }), db().domain.count({ where: { workspaceId: { in: wsIds } } }),
     db().domain.count({ where: { workspaceId: { in: wsIds }, verifiedAt: { not: null } } }), db().lead.count({ where: { workspaceId: { in: wsIds } } }),
     db().campaign.count({ where: { workspaceId: { in: wsIds } } }), db().aiConfigVersion.count({ where: { workspaceId: { in: wsIds }, kind: 'KNOWLEDGE' } }).catch(() => 0),

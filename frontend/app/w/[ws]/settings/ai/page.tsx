@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { SubscriptionCards } from '@/components/ai/subscription-cards';
+import { AiSourceCard } from '@/components/ai/ai-source-card';
 import { WorkflowBuilder } from '@/components/ai/workflow-builder';
 import { PlaybookEditor } from '@/components/ai/playbook-editor';
 import { AiQueue } from '@/components/ai/ai-queue';
@@ -52,9 +53,9 @@ function AiSettingsInner() {
   const shown = ownerOnly.includes(tab) && !owner.allowed ? 'providers' : tab;
   return (
     <>
-      <PageHeader title="AI providers" subtitle="Connect hosted or local language models. Keys are encrypted at rest; route each task and configure fallbacks." />
+      <PageHeader title="AI providers" subtitle="Choose where AI runs (API keys or your Claude / Codex subscription), connect providers, and route each task. Keys are encrypted at rest." />
       <Tabs active={shown} onChange={setTab} tabs={[{ id: 'providers', label: 'Providers & keys' }, ...ownerTabs, { id: 'routes', label: 'Model routing' }, { id: 'prompts', label: 'Prompt versions' }, { id: 'logs', label: 'AI response logs' }, { id: 'prices', label: 'Prices' }]} />
-      {shown === 'providers' && <>{owner.allowed && <SubscriptionCards />}{owner.allowed && <h2 className="mb-3 text-base font-semibold text-ink">API providers</h2>}<Providers /></>}
+      {shown === 'providers' && <><AiSourceCard />{owner.allowed && <SubscriptionCards />}{owner.allowed && <h2 className="mb-3 text-base font-semibold text-ink">API providers</h2>}<Providers /></>}
       {shown === 'workflows' && owner.allowed && <WorkflowBuilder />}
       {shown === 'playbook' && owner.allowed && <PlaybookEditor />}
       {shown === 'queue' && owner.allowed && <AiQueue />}

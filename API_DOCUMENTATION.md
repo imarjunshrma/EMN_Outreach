@@ -1,6 +1,6 @@
 # Outvexa — API documentation
 
-Generated from the route registry by `npm run api-docs` (428 operations). The machine-readable
+Generated from the route registry by `npm run api-docs` (430 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
 
 ## Conventions
@@ -90,6 +90,8 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 
 | Method | Path | Auth · role | Rate limit | Body | Query | Summary |
 |---|---|---|---|---|---|---|
+| GET | `/w/:workspaceId/ai/source` | session/API key · VIEWER+ | — | — | — | Where AI runs for this workspace (API keys or a Claude / Codex subscription) and which options you can choose |
+| PUT | `/w/:workspaceId/ai/source` | session/API key · ADMIN+ | — | `mode`: api\|claude_subscription\|codex_subscription, `fallbackToApi?`: boolean | — | Choose where AI runs for every AI feature in this workspace. A subscription uses your own login. |
 | GET | `/w/:workspaceId/ai/providers` | session/API key · ADMIN+ | — | — | — | Configured AI providers (key shown as last 4 only) |
 | PUT | `/w/:workspaceId/ai/providers` | session/API key · ADMIN+ | — | `provider`: OPENAI\|ANTHROPIC\|GOOGLE\|OPENROUTER\|GROQ\|TOGETHER…, `apiKey?`: string, `defaultModel`: string, `baseUrl?`: object, `isEnabled?`: boolean | — | Add/update an AI provider key and default model |
 | DELETE | `/w/:workspaceId/ai/providers/:provider` | session/API key · ADMIN+ | — | — | — | Remove an AI provider |

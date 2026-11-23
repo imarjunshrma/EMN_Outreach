@@ -8848,6 +8848,151 @@
         }
       }
     },
+    "/api/v1/w/{workspaceId}/ai/source": {
+      "get": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "Where AI runs for this workspace (API keys or a Claude / Codex subscription) and which options you can choose",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: VIEWER\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "VIEWER",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "Choose where AI runs for every AI feature in this workspace. A subscription uses your own login.",
+        "description": "Authentication: workspace member (session cookie or workspace API key)\n\nMinimum workspace role: ADMIN\n\nRate limit: global Nginx limit",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "api",
+                      "claude_subscription",
+                      "codex_subscription"
+                    ]
+                  },
+                  "fallbackToApi": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfHeader": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "x-emn": {
+          "auth": "workspace",
+          "role": "ADMIN",
+          "orgPermission": null,
+          "platformPermission": null,
+          "rateLimit": null,
+          "status": 200,
+          "allowWhenInactive": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success (JSON). List endpoints return { data, page, pageSize, total, totalPages }."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/v1/w/{workspaceId}/ai/providers": {
       "get": {
         "tags": [
@@ -20106,6 +20251,16 @@
                         "default": "",
                         "type": "string",
                         "maxLength": 20000
+                      },
+                      "aiSource": {
+                        "default": "workspace",
+                        "type": "string",
+                        "enum": [
+                          "workspace",
+                          "api",
+                          "claude_subscription",
+                          "codex_subscription"
+                        ]
                       }
                     }
                   },

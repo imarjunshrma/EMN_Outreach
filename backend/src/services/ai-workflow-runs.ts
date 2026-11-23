@@ -276,7 +276,7 @@ export async function createRun(ownerUserId: string, workspaceId: string, input:
 }
 
 /** Concurrency + spacing per provider for this owner (subscriptions: from AI settings; API: env defaults). */
-async function acquireProviderSlot(ownerUserId: string, provider: string, holder: string): Promise<{ release: () => Promise<void> } | { retryInMs: number }> {
+export async function acquireProviderSlot(ownerUserId: string, provider: string, holder: string): Promise<{ release: () => Promise<void> } | { retryInMs: number }> {
   const conn = isSubscriptionProvider(provider) ? await loadConnection(ownerUserId, provider) : null;
   const limit = conn?.concurrency ?? Math.max(1, Number(process.env.AI_API_STAGE_CONCURRENCY ?? 2));
   const spacing = conn?.delayMs ?? Number(process.env.AI_API_STAGE_DELAY_MS ?? 0);

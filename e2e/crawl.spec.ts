@@ -64,6 +64,7 @@ test('every screen works with real data: no errors, every tab opens', async ({ p
     await page.waitForLoadState('networkidle');
     await expect(page.locator('h1').first(), `heading on ${p}`).toBeVisible({ timeout: 15_000 });
     if (await page.getByText('Couldn’t load this data').count()) problems.push(`${p}: error panel — ${(await page.getByRole('alert').first().textContent())?.slice(0, 200)}`);
+    if (!absolute.includes(p) && !(await page.getByTestId('page-help').isVisible())) problems.push(`${p}: no "How this page works" help`);
     const tabs = page.getByRole('tab');
     for (let i = 0; i < (await tabs.count()); i++) {
       where = `${p} [tab ${i}]`;
@@ -73,6 +74,18 @@ test('every screen works with real data: no errors, every tab opens', async ({ p
     }
   }
   expect(problems, problems.join('\n')).toEqual([]);
+
+  // AI source: one choice for every AI feature, shown at the top of AI providers; help can be hidden and reopened.
+  await page.goto(`${base}/settings/ai`);
+  await expect(page.getByRole('radiogroup', { name: 'AI source' })).toBeVisible();
+  await expect(page.getByTestId('ai-source-api')).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByTestId('ai-source-status')).toContainText(/AI can’t run yet|AI runs on/);
+  await page.getByRole('button', { name: 'Hide help for this page' }).click();
+  await expect(page.getByTestId('page-help')).toHaveCount(0);
+  await page.reload(); await page.waitForLoadState('networkidle');
+  await expect(page.getByTestId('page-help')).toHaveCount(0); // remembered
+  await page.getByTestId('page-help-open').click();
+  await expect(page.getByTestId('page-help')).toContainText('Pick the AI source at the top');
 });
 
 test('command palette and mobile menu navigate', async ({ page }) => {

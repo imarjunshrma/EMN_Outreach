@@ -112,6 +112,8 @@ export const CampaignAiOverridesSchema = z.object({
   audienceContext: str(5000).default(''),
   offerContext: str(5000).default(''),
   customInstructions: str(20000).default(''),
+  /** Where this campaign's AI runs: the workspace AI source, API keys, or a personal Claude / Codex subscription. */
+  aiSource: z.enum(['workspace', 'api', 'claude_subscription', 'codex_subscription']).default('workspace'),
 });
 export type CampaignAiOverrides = z.infer<typeof CampaignAiOverridesSchema>;
 

@@ -31,7 +31,7 @@ export async function dashboard(workspaceId: string) {
     db().conversation.count({ where: { workspaceId, isUnread: true } }),
   ]);
   const setup = {
-    postalAddress: !!ws.postalAddress, aiProvider: (await db().aiProvider.count({ where: { workspaceId } })) > 0,
+    postalAddress: !!ws.postalAddress, aiProvider: (await (await import('./ai-source.js')).aiAvailability(workspaceId)).ok,
     mailbox: (await db().emailAccount.count({ where: { workspaceId, status: 'CONNECTED' } })) > 0,
     icp: (await db().idealCustomerProfile.count({ where: { workspaceId } })) > 0,
     leads: (await db().lead.count({ where: { workspaceId } })) > 0,

@@ -91,7 +91,8 @@ test('owner: subscription cards, workflow builder, playbook history, prospect ge
 
   // Queue dashboard shows the pending run.
   await page.goto(`${base}/settings/ai?tab=queue`);
-  await expect(page.getByText('Claude subscription')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'AI queue' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByText('Claude subscription').first()).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Execution log' }).or(page.getByText('Execution log'))).toBeVisible();
   expect((await sql(`SELECT count(*)::int AS n FROM "AiWorkflowRun"`))[0].n).toBe(1);
   expect((await sql(`SELECT count(*)::int AS n FROM "OutboundEmail"`))[0].n).toBe(0);

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { route, Paging, paged } from '../http/router.js';
 import * as intel from '../services/intelligence.js';
 import * as ai from '../services/ai.js';
+import * as aiSource from '../services/ai-source.js';
 import * as integrations from '../services/integrations.js';
 import { AI_TASKS, type AiTaskName } from '../../../shared/src/ai-schemas.js';
 import { AI_PROVIDER_NAMES } from '../../../integrations/src/ai/types.js';
@@ -36,6 +37,8 @@ route({ method: 'post', path: '/w/:workspaceId/writing/fact-check', tag: 'Writin
   handler: async (c) => { const { getWorkspace } = await import('../services/workspace.js'); return intel.factCheck(c.workspaceId, c.body.leadId, c.body.text, (await getWorkspace(c.workspaceId)).settings.offerFacts); } });
 
 // ---------------------------------------------------------------- AI configuration
+route({ method: 'get', path: '/w/:workspaceId/ai/source', tag: 'AI', summary: 'Where AI runs for this workspace (API keys or a Claude / Codex subscription) and which options you can choose', auth: 'workspace', role: 'VIEWER', handler: (c) => aiSource.getAiSource(c.workspaceId, c.userId || null) });
+route({ method: 'put', path: '/w/:workspaceId/ai/source', tag: 'AI', summary: 'Choose where AI runs for every AI feature in this workspace. A subscription uses your own login.', auth: 'workspace', role: 'ADMIN', body: aiSource.SetAiSourceSchema, handler: (c) => aiSource.setAiSource(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/ai/providers', tag: 'AI', summary: 'Configured AI providers (key shown as last 4 only)', auth: 'workspace', role: 'ADMIN', handler: async (c) => ({ providers: await ai.listProviders(c.workspaceId), suggestions: ai.SUGGESTED_MODELS }) });
 route({ method: 'put', path: '/w/:workspaceId/ai/providers', tag: 'AI', summary: 'Add/update an AI provider key and default model', auth: 'workspace', role: 'ADMIN',
   body: z.object({ provider: z.enum(AI_PROVIDER_NAMES), apiKey: z.string().min(1).max(500).optional(), defaultModel: z.string().min(1).max(150), baseUrl: z.string().max(500).nullable().optional(), isEnabled: z.boolean().optional() }),

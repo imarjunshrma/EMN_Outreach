@@ -18,7 +18,7 @@ async function sentCampaign(stopOnAutoReply = false) {
   const list = await db().leadList.create({ data: { workspaceId: s.workspaceId, name: 'L', members: { create: { workspaceId: s.workspaceId, leadId: lead.id } } } });
   const c = await engine.createCampaign(s.workspaceId, engine.CampaignSettingsSchema.parse({ name: 'C', sendingWindow: { days: [1, 2, 3, 4, 5, 6, 7], start: '00:00', end: '23:59' }, reviewMode: 'NONE', stopOnAutoReply }), { type: 'SYSTEM' });
   await engine.saveSequence(s.workspaceId, c.id, { steps: [
-    { delayDays: 0, threadMode: 'NEW_THREAD', personalizationMode: 'TEMPLATE_ONLY', condition: 'ALWAYS', variants: [{ label: 'A', subject: 'Hello {{firstName}}', body: 'Hi', weight: 1 }] },
+    { delayDays: 0, threadMode: 'NEW_THREAD', personalizationMode: 'TEMPLATE_ONLY', condition: 'ALWAYS', variants: [{ label: 'A', subject: 'Hello {{firstName}}', body: 'Hi {{firstName}}, a quick question about your site.', weight: 1 }] },
     { delayDays: 2, threadMode: 'REPLY_IN_THREAD', personalizationMode: 'TEMPLATE_ONLY', condition: 'ALWAYS', variants: [{ label: 'A', subject: '', body: 'Bump', weight: 1 }] },
   ] }, { type: 'SYSTEM' });
   await engine.setCampaignLists(s.workspaceId, c.id, [list.id], { type: 'SYSTEM' });

@@ -117,6 +117,17 @@ export async function runAi<T = unknown>(
     maxLeadCostUsd?: number | null;
   } = {},
 ): Promise<AiRunResult<T>> {
+  // AI source (Settings → AI providers → "AI source", or the campaign's own choice): a personal subscription runs the
+  // call instead of the API keys. No silent fallback to paid API calls unless an admin allowed it.
+  const { resolveAiSource, AI_SOURCE_LABEL } = await import('./ai-source.js');
+  const source = await resolveAiSource(workspaceId, opts.attribution?.campaignId ?? null);
+  if (source.mode !== 'api') {
+    try { return await runAiOnSubscription<T>(workspaceId, task, vars, opts, source); }
+    catch (e) {
+      if (!source.fallbackToApi) throw e instanceof AppError ? e : new AppError('AI_SUBSCRIPTION_UNAVAILABLE', `${AI_SOURCE_LABEL[source.mode]}: ${(e as Error).message}`, 503);
+      logger.warn({ task, err: (e as Error).message }, 'AI subscription failed; falling back to API keys as allowed in AI settings');
+    }
+  }
   const { candidates, maxOutputTokens, temperature, budget } = await resolveCandidates(workspaceId, task);
   if (budget !== null && !opts.critical && (await monthSpend(workspaceId, task)) >= budget) {
     throw new AppError('AI_BUDGET_EXCEEDED', `Monthly AI budget for ${task} is used up`, 402);
@@ -197,6 +208,50 @@ export async function runAi<T = unknown>(
     }
   }
   throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed: ${lastError}`, 502);
+}
+
+
+/** runAi() on a personal subscription: same prompt, schema validation (one repair attempt) and execution log; no API cost. */
+async function runAiOnSubscription<T>(
+  workspaceId: string, task: AiTaskName, vars: Record<string, string>,
+  opts: { entity?: { type: string; id: string }; attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null } },
+  source: import('./ai-source.js').ResolvedSource,
+): Promise<AiRunResult<T>> {
+  const { runOnSubscription, AI_SOURCE_LABEL } = await import('./ai-source.js');
+  const prompt = await ensurePrompt(workspaceId, task);
+  if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
+  const schema = AI_OUTPUT_SCHEMAS[task];
+  const userPrompt = renderPrompt(prompt.userPromptTemplate, vars);
+  const att = { campaignId: opts.attribution?.campaignId ?? null, leadId: opts.attribution?.leadId ?? null, profileVersionId: opts.attribution?.profileVersionId ?? null };
+  const label = AI_SOURCE_LABEL[source.mode];
+  let user = userPrompt;
+  let lastError = 'unknown error';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const started = Date.now();
+    try {
+      const r = await runOnSubscription(source, { system: prompt.systemPrompt, user, jsonSchema: jsonSchemaFor(task) });
+      const parsed = schema.safeParse(r.data);
+      const exec = await db().aiExecution.create({
+        data: {
+          workspaceId, task, provider: r.provider, model: `${label}${r.model ? ` (${r.model})` : ''}`.slice(0, 120), promptTemplateId: prompt.id,
+          status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: false,
+          inputTokens: r.usage?.inputTokens ?? 0, outputTokens: r.usage?.outputTokens ?? 0, costUsd: 0, costIsEstimate: false, latencyMs: Date.now() - started,
+          entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: redactForLog(userPrompt).slice(0, 1500),
+          output: (r.data ?? null) as Prisma.InputJsonValue,
+          errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        },
+      });
+      (await import('./usage.js')).meter({ workspaceId, metric: 'ai_requests', quantity: 1, key: `ai:${exec.id}` });
+      if (parsed.success) return { data: parsed.data as T, executionId: exec.id, provider: r.provider, model: exec.model };
+      lastError = `schema invalid: ${exec.errorMessage}`;
+      user = `${userPrompt}\n\nYour previous answer failed validation (${exec.errorMessage}). Return output that matches the schema exactly.`;
+    } catch (e) {
+      lastError = (e as Error).message;
+      await db().aiExecution.create({ data: { workspaceId, task, provider: source.mode === 'claude_subscription' ? 'ANTHROPIC' : 'OPENAI', model: label, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: false, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: redactForLog(userPrompt).slice(0, 1500) } });
+      throw new AppError('AI_SUBSCRIPTION_UNAVAILABLE', `${label}: ${lastError}`, 503);
+    }
+  }
+  throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed on ${label}: ${lastError}`, 502);
 }
 
 // ---------------------------------------------------------------- provider configuration

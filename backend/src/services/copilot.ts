@@ -123,7 +123,7 @@ async function run(workspaceId: string, type: keyof typeof P, raw: Record<string
     case 'create_campaign_draft': {
       const p = P.create_campaign_draft.parse(raw);
       const c = await engine.createCampaign(workspaceId, engine.CampaignSettingsSchema.parse({ name: p.name }), actor);
-      await engine.updateCampaignAi(workspaceId, c.id, { aiOverrides: { writing: {}, research: {}, audienceContext: p.audienceContext, offerContext: '', customInstructions: p.customInstructions } }, actor);
+      await engine.updateCampaignAi(workspaceId, c.id, { aiOverrides: { writing: {}, research: {}, audienceContext: p.audienceContext, offerContext: '', customInstructions: p.customInstructions, aiSource: 'workspace' } }, actor);
       return { campaignId: c.id, status: 'DRAFT', note: 'Draft only — add lists and mailboxes, review and approve it yourself.' };
     }
     case 'draft_sequence': {

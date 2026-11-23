@@ -294,3 +294,31 @@ describe('AI personalization in the send pipeline', () => {
     expect(fakes.gmail.sent[0].text).not.toMatch(/award/);
   });
 });
+
+describe('never sends an email without a message (the "Hi Test, … Best" incident)', () => {
+  it('a new campaign cannot be submitted until step 1 is written', async () => {
+    const s = await createUserSession('owner@x.com');
+    const c = await s.agent.post(`/api/v1/w/${s.workspaceId}/campaigns`).set('x-csrf-token', s.csrf).send({ name: 'Starter' });
+    const v = await s.agent.post(`/api/v1/w/${s.workspaceId}/campaigns/${c.body.id}/validate`).set('x-csrf-token', s.csrf);
+    expect(v.body.blocking.join(' ')).toMatch(/Step 1 variant A: .*placeholder/);
+    expect(v.body.blocking.join(' ')).not.toMatch(/Step [234] /); // the follow-up starters are real text
+  });
+
+  it('an empty or placeholder AI email fails instead of sending the template', async () => {
+    const s = await createUserSession('owner@x.com');
+    await addAiProvider(s.workspaceId);
+    const ai = fakes.anthropic as FakeAi;
+    ai.on('FACT_CHECK', () => ({ sentences: [] }));
+    const { campaignId } = await setupCampaign(s, { leads: 2, steps: [{ delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Hi {{firstName}}', body: 'Hi {{firstName}},\n\n[Write your message here]\n\nBest,\n{{sender.name}}' }] }], settings: { usePregeneratedAi: false } });
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const [a, b] = await db().outboundEmail.findMany({ where: { status: 'PENDING' }, orderBy: { createdAt: 'asc' } });
+    ai.on('EMAIL_WRITING', () => ({ subject: 'Quick idea', firstLine: null, body: '', usedClaimIds: [] }));
+    await engine.prepareOutbound(a.workspaceId, a.id);
+    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ status: 'FAILED', lastError: expect.stringMatching(/AI returned an empty email/) });
+    ai.on('EMAIL_WRITING', () => ({ subject: 'Quick idea', firstLine: null, body: 'Hi Lead1,\n\n…\n\nBest,\nArjun', usedClaimIds: [] }));
+    await engine.prepareOutbound(b.workspaceId, b.id);
+    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({ status: 'FAILED', lastError: expect.stringMatching(/placeholder text.*nothing was sent/) });
+    expect(fakes.gmail.sent).toHaveLength(0);
+  });
+});

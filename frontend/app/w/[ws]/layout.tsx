@@ -12,6 +12,7 @@ import { Loading } from '@/components/ui';
 import { visibleNav } from '@/components/shell/nav';
 import { CommandPalette } from '@/components/shell/command-palette';
 import { PageMeta } from '@/components/shell/page-context';
+import { PageHelpPanel } from '@/components/shell/page-help-panel';
 import { BrandLogo } from '@/components/brand';
 
 type Me = { user: { name: string; email: string; isPlatformAdmin?: boolean; platformRole?: string | null; emailVerified?: boolean }; organizations: Array<{ id: string; name: string; role: string; status: string }>; workspaces: Array<{ id: string; name: string; role: string; organizationId: string; organizationName: string; organizationStatus: string }> };
@@ -193,7 +194,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
         {(me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'OWNER' || me.data.organizations.find((o) => o.id === current.organizationId)?.role === 'ADMIN') && <SetupReminder orgId={current.organizationId} />}
         {me.data.user.emailVerified === false && bill.data?.mode === 'saas' && <div className="bg-brand-50 px-4 py-2 text-sm text-brand-900 lg:px-8">Confirm your email address to invite teammates and start campaigns. <ResendVerification /></div>}
         {bill.data?.mode === 'saas' && (!bill.data.active || bill.data.reason) && <div data-testid="billing-banner" className={`px-4 py-2 text-sm lg:px-8 ${bill.data.active ? 'bg-amber-50 text-amber-900' : 'bg-red-50 text-red-800'}`}>{bill.data.reason}. <Link className="font-semibold underline" href={`${base}/billing`}>Open plan & billing</Link></div>}
-        <main className="mx-auto max-w-[1360px] px-4 py-6 lg:px-8 lg:py-8"><PageMeta.Provider value={{ icon: currentItem?.icon, group: currentItem?.group }}>{children}</PageMeta.Provider></main>
+        <main className="mx-auto max-w-[1360px] px-4 py-6 lg:px-8 lg:py-8"><PageMeta.Provider value={{ icon: currentItem?.icon, group: currentItem?.group }}>{currentItem && <PageHelpPanel href={currentItem.href} base={base} />}{children}</PageMeta.Provider></main>
       </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} groups={groups} base={base} />
       {open && <button className="fixed right-4 top-4 z-50 rounded-lg bg-white p-1.5 lg:hidden" onClick={() => setOpen(false)} aria-label="Close menu"><X className="h-5 w-5" /></button>}

@@ -58,7 +58,15 @@ export function CampaignAiPanel({ campaign }: { campaign: any }) {
   );
 }
 
+const SOURCE_HINT = {
+  workspace: 'Uses the AI source chosen in Settings → AI providers.',
+  api: 'Uses the workspace API keys; billed per use.',
+  claude_subscription: 'Writes with your Claude subscription; no API bill. Generate drafts before starting the campaign.',
+  codex_subscription: 'Writes with your Codex subscription; no API bill. Generate drafts before starting the campaign.',
+};
+
 function CampaignAiSettings({ campaign }: { campaign: any }) {
+  const ws = useWsQuery<{ mode: string; options: Array<{ mode: string; label: string; available: boolean }> }>('/ai/source');
   const profiles = useWsQuery<any[]>('/ai-studio/profiles');
   const icps = useWsQuery<any>('/icps');
   const [f, setF] = useState<any>(null);
@@ -69,6 +77,7 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
       writing: { tone: '', ctaStyle: '', formality: '', personalizationIntensity: '', minWords: '', maxWords: '', ...(o.writing ?? {}) },
       avoid: (o.writing?.avoidPhrases ?? []).join('\n'), forbidden: (o.writing?.forbiddenClaims ?? []).join('\n'),
       audienceContext: o.audienceContext ?? '', offerContext: o.offerContext ?? '', customInstructions: o.customInstructions ?? '',
+      aiSource: o.aiSource ?? 'workspace',
       personTopics: (o.research?.personTopics ?? []).join('\n'), companyTopics: (o.research?.companyTopics ?? []).join('\n'), onMissing: o.research?.onMissing ?? '', researchNotes: o.research?.customInstructions ?? '',
     });
   }, [campaign]);
@@ -83,7 +92,7 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
     if (lines(f.companyTopics).length) r.companyTopics = lines(f.companyTopics);
     if (f.onMissing) r.onMissing = f.onMissing;
     if (f.researchNotes.trim()) r.customInstructions = f.researchNotes;
-    return { path: `/campaigns/${campaign.id}/ai`, method: 'PUT', body: { aiProfileId: f.aiProfileId || null, icpId: f.icpId || null, maxAiCostPerLeadUsd: f.maxAiCostPerLeadUsd === '' ? null : Number(f.maxAiCostPerLeadUsd), aiOverrides: { writing: w, research: r, audienceContext: f.audienceContext, offerContext: f.offerContext, customInstructions: f.customInstructions } } };
+    return { path: `/campaigns/${campaign.id}/ai`, method: 'PUT', body: { aiProfileId: f.aiProfileId || null, icpId: f.icpId || null, maxAiCostPerLeadUsd: f.maxAiCostPerLeadUsd === '' ? null : Number(f.maxAiCostPerLeadUsd), aiOverrides: { writing: w, research: r, audienceContext: f.audienceContext, offerContext: f.offerContext, customInstructions: f.customInstructions, aiSource: f.aiSource } } };
   }, { success: 'AI settings saved (campaign needs re-approval)' });
   if (!f) return null;
   const set = (k: string, v: any) => setF({ ...f, [k]: v });
@@ -92,6 +101,7 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
     <Card title="Campaign AI profile & overrides" actions={<Button loading={save.isPending} onClick={() => save.mutate()}>Save AI settings</Button>}>
       <Notice>Order of precedence: <b>platform safety rules</b> (cannot be overridden) → AI Studio workspace defaults → prompt profile → <b>these campaign settings</b> → ICP instructions → step instructions → variant angle → per-prospect instructions. Blank fields inherit. Words to avoid and forbidden claims add to the workspace lists; they never remove from them.</Notice>
       <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <Field label="AI source for this campaign" hint={SOURCE_HINT[f.aiSource as keyof typeof SOURCE_HINT]}><Select aria-label="AI source for this campaign" value={f.aiSource} onChange={(e) => set('aiSource', e.target.value)} options={[{ value: 'workspace', label: `Workspace setting${ws.data ? ` (${ws.data.options.find((x) => x.mode === ws.data!.mode)?.label ?? ''})` : ''}` }, ...(ws.data?.options ?? []).map((x) => ({ value: x.mode, label: x.available || x.mode === 'api' ? x.label : `${x.label} (not connected)` }))]} /></Field>
         <Field label="Prompt profile"><Select value={f.aiProfileId} onChange={(e) => set('aiProfileId', e.target.value)} options={[{ value: '', label: '— none —' }, ...(profiles.data ?? []).map((p: any) => ({ value: p.id, label: `${p.name}${p.activeVersion ? ` (v${p.activeVersion})` : ''}${p.isApproved ? ' ✓' : ''}` }))]} /></Field>
         <Field label="ICP (adds its AI instructions)"><Select value={f.icpId} onChange={(e) => set('icpId', e.target.value)} options={[{ value: '', label: '— none —' }, ...((icps.data?.data ?? icps.data ?? []) as any[]).map((i: any) => ({ value: i.id, label: i.name }))]} /></Field>
         <Field label="Max AI cost per lead (USD)" hint="Blank = workspace default"><Input type="number" step="0.01" min={0} value={f.maxAiCostPerLeadUsd} onChange={(e) => set('maxAiCostPerLeadUsd', e.target.value)} /></Field>

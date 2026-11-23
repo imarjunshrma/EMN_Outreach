@@ -114,7 +114,7 @@ describe('AI personalization engine', () => {
     ai.on('PERSONALIZATION', honestWriter()).on('FACT_CHECK', factChecker);
     await studio.saveConfig(s.workspaceId, 'WRITING', { tone: 'professional', formality: 'formal', customInstructions: 'WORKSPACE-RULE: never sound like an agency salesperson.', avoidPhrases: ['circle back'] }, 'v', ACTOR);
     const { campaignId, steps, leads } = await setup(s);
-    await engine.updateCampaignAi(s.workspaceId, campaignId, { aiOverrides: { writing: { tone: 'casual', avoidPhrases: ['touch base'] }, research: {}, audienceContext: 'Consulting founders', offerContext: '', customInstructions: 'CAMPAIGN-RULE: focus on qualified consulting enquiries.' } }, ACTOR);
+    await engine.updateCampaignAi(s.workspaceId, campaignId, { aiOverrides: { writing: { tone: 'casual', avoidPhrases: ['touch base'] }, research: {}, audienceContext: 'Consulting founders', offerContext: '', customInstructions: 'CAMPAIGN-RULE: focus on qualified consulting enquiries.', aiSource: 'workspace' } }, ACTOR);
     const prev = await pz.promptPreview(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     expect(prev.resolved.writing.tone).toBe('casual');
     expect(prev.resolved.writingSources.tone).toBe('campaign');

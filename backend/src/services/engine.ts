@@ -10,7 +10,7 @@ import { acquireLock } from '../core/redis.js';
 import { logger } from '../core/logger.js';
 import { ProviderError } from '../../../integrations/src/http.js';
 import { OUTBOUND_HEADER, type OutgoingMessage } from '../../../integrations/src/email/types.js';
-import { renderTemplate, lintTemplate } from '../../../shared/src/template.js';
+import { renderTemplate, lintTemplate, bodyContentProblem } from '../../../shared/src/template.js';
 import { DEFAULT_WINDOW, SendingWindowSchema, computeNextStepAt, isInWindow, isValidZone, nextWindowStart, startOfDayIn, startOfNextDayIn, type SendingWindow } from '../../../shared/src/schedule.js';
 import { canContact } from './compliance.js';
 import { getAuth, markNeedsReauth } from './accounts.js';
@@ -74,7 +74,7 @@ async function getCampaignOr404(workspaceId: string, id: string) {
 
 export async function createCampaign(workspaceId: string, input: z.infer<typeof CampaignSettingsSchema>, actor: Actor) {
   const defaultSteps: Array<{ order: number; delayDays: number; threadMode: 'NEW_THREAD' | 'REPLY_IN_THREAD'; subject: string; body: string }> = [
-    { order: 1, delayDays: 0, threadMode: 'NEW_THREAD', subject: 'Quick question, {{firstName|there}}', body: 'Hi {{firstName|there}},\n\n…\n\nBest,\n{{sender.name}}' },
+    { order: 1, delayDays: 0, threadMode: 'NEW_THREAD', subject: 'Quick question, {{firstName|there}}', body: 'Hi {{firstName|there}},\n\n[Write your message here]\n\nBest,\n{{sender.name}}' }, // a campaign cannot be approved until this is replaced
     { order: 2, delayDays: 3, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nJust following up on my note. Would it be useful if I shared a short example of our work, or should I close the loop?\n\nBest,\n{{sender.name}}' },
     { order: 3, delayDays: 5, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nOne more thought: if improving short-form content or paid social is on your roadmap, I can share a relevant example. Would that be useful?\n\nBest,\n{{sender.name}}' },
     { order: 4, delayDays: 7, threadMode: 'REPLY_IN_THREAD', subject: 'Re: Quick question', body: 'Hi {{firstName|there}},\n\nI will leave it here for now. If this becomes relevant later, happy to reconnect. Should I close this out?\n\nBest,\n{{sender.name}}' },
@@ -213,6 +213,9 @@ export async function validateCampaign(workspaceId: string, id: string) {
       if ((s.order === 1 || s.threadMode === 'NEW_THREAD') && !v.subject.trim()) blocking.push(`Step ${s.order} variant ${v.label} needs a subject`);
       const unknown = [...lintTemplate(v.subject), ...lintTemplate(v.body)];
       if (unknown.length) blocking.push(`Step ${s.order} variant ${v.label} uses unknown variables: ${[...new Set(unknown)].join(', ')}`);
+      // The AI writes the whole email in AI_FULL mode (the template is its guidance); otherwise this text is what gets sent.
+      const problem = s.personalizationMode === 'AI_FULL' ? null : bodyContentProblem(v.body.replace(/\{\{\s*aiFirstLine\s*\}\}/g, ''));
+      if (problem) blocking.push(`Step ${s.order} variant ${v.label}: ${problem}. Write the email before submitting.`);
       if (s.personalizationMode === 'AI_FIRST_LINE' && !v.body.includes('aiFirstLine')) warnings.push(`Step ${s.order} variant ${v.label} uses AI first line but the body has no {{aiFirstLine}} placeholder`);
     }
     if (s.condition !== 'ALWAYS' && !c.trackOpens) warnings.push(`Step ${s.order} condition ${s.condition} needs open tracking; it will behave like ALWAYS`);
@@ -222,7 +225,11 @@ export async function validateCampaign(workspaceId: string, id: string) {
   if (!connected.length) blocking.push('Select at least one connected sending mailbox');
   if (c.accounts.length > connected.length) warnings.push(`${c.accounts.length - connected.length} selected mailbox(es) are not connected and will not send`);
   if (!ws.postalAddress?.trim()) blocking.push('Set the sender postal address in Settings → Compliance (required in the email footer)');
-  if (steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY') && !(await db().aiProvider.count({ where: { workspaceId, isEnabled: true } }))) blocking.push('AI personalization is used but no AI provider is configured');
+  if (steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY')) {
+    // Counts API keys or the selected Claude/Codex subscription (workspace AI source or this campaign's own choice).
+    const avail = await (await import('./ai-source.js')).aiAvailability(workspaceId, id);
+    if (!avail.ok) blocking.push(avail.problem ?? 'AI personalization is used but no AI source is ready');
+  }
   if (c.trackOpens || c.trackClicks) warnings.push('Open/click tracking is enabled: tracking pixels and rewritten links can reduce deliverability and require a privacy notice. Open data is an estimate (image blocking, privacy proxies).');
   if (c.reviewMode === 'NONE' && steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY')) warnings.push('AI-written emails will be sent without human review (fact-check still applies)');
 
@@ -651,7 +658,8 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
     } else if (o.step.personalizationMode === 'AI_FULL') {
       const g = await generateEmail(workspaceId, { leadId: lead.id, mode: previous.length ? 'followup' : 'full', templateSubject: subject, templateBody: body, previousEmails: previous.map((p) => `${p.subject}\n${p.bodyText}`).join('\n---\n'), instructions: '' });
       if (g.subject && !previous.length) subject = g.subject;
-      if (g.body) body = g.body;
+      if (!g.body?.trim()) return fail('AI returned an empty email; nothing was sent (the template is guidance only, never sent instead)');
+      body = g.body;
       usedClaimIds = g.usedClaimIds; aiGenerated = true;
     }
   } catch (e) {
@@ -666,6 +674,9 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
   const b = renderTemplate(body, vars);
   const missing = [...new Set([...s.missing, ...b.missing])];
   if (missing.length) return fail(`Missing template variables: ${missing.join(', ')}`);
+  // Last line of defence: whatever produced the text (template, AI, approved personalization), never mail a non-message.
+  const contentProblem = bodyContentProblem(b.text);
+  if (contentProblem) return fail(`${contentProblem}; nothing was sent`);
 
   let finalSubject = s.text.trim();
   if (o.step.threadMode === 'REPLY_IN_THREAD' && previous.length) {
@@ -1063,7 +1074,7 @@ export async function previewForLead(workspaceId: string, id: string, leadId: st
   let text = b.text.trim();
   if (account?.signatureText) text += `\n\n${account.signatureText}`;
   text += buildFooter(ws, unsubscribeUrl);
-  return { stepOrder, variant: variant.label, subject: s.text, body: text, missingVariables: [...new Set([...s.missing, ...b.missing])], personalizationStatus: p?.status ?? null, notes };
+  return { stepOrder, variant: variant.label, subject: s.text, body: text, missingVariables: [...new Set([...s.missing, ...b.missing])], personalizationStatus: p?.status ?? null, notes, contentProblem: bodyContentProblem(b.text) };
 }
 
 export const TestEmailSchema = z.object({ leadId: z.string().uuid(), stepOrder: z.number().int().min(1).max(10), to: z.string().email(), emailAccountId: z.string().uuid().optional() });
@@ -1082,6 +1093,7 @@ export async function sendTestEmail(workspaceId: string, id: string, input: z.in
   if (!account) throw new AppError('ACCOUNT_NOT_CONNECTED', 'Select a connected mailbox for the test', 400);
   const pv = await previewForLead(workspaceId, id, input.leadId, input.stepOrder);
   if (pv.missingVariables.length) throw BadRequest('UNRESOLVED_VARIABLES', `Missing variables for this lead: ${pv.missingVariables.join(', ')}`);
+  if (pv.contentProblem) throw BadRequest('EMPTY_EMAIL', `${pv.contentProblem}. Write the email first.`);
   const messageId = `<test-${randomUUID()}@${account.emailAddress.split('@')[1]}>`;
   await adapters().email[account.provider].send(await getAuth(account.id), {
     from: { address: account.emailAddress, name: account.displayName ?? undefined }, to,

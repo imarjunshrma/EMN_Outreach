@@ -8,7 +8,7 @@ test('light mode is fully light even when the Mac is in dark mode; dark mode is 
   await page.getByRole('button', { name: /E2E Owner/ }).click();
   await page.getByTestId('theme-toggle').getByRole('button', { name: 'Light' }).click();
   await page.keyboard.press('Escape');
-  await page.mouse.click(700, 500);
+  await page.locator('main h1').first().click(); // close the menu by clicking somewhere inert (not a fixed position)
   await page.waitForTimeout(300);
   const lum = (sel: string) => page.locator(sel).first().evaluate((el) => { const m = getComputedStyle(el).backgroundColor.match(/\d+/g)!.map(Number); return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255; });
   for (const sel of ['body', 'aside', 'header', '[data-testid="today-flow"]', '.card']) expect(await lum(sel), `${sel} should be light`).toBeGreaterThan(0.85);
