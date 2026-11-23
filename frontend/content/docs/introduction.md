@@ -2,9 +2,9 @@
 title: Introduction
 section: Getting started
 order: 1
-description: What EMN Outreach OS is, how it is organized, and where to start.
+description: What Outvexa is, how it is organized, and where to start.
 ---
-EMN Outreach OS is a cold-email platform built around one idea: every email should be researched, grounded in sources you can check, and approved by a person before it is sent. It covers the whole outbound workflow — finding prospects, researching them, writing, sending from your own mailboxes, and handling replies — for a single team or for an agency running many clients.
+Outvexa is a cold-email platform built around one idea: every email should be researched, grounded in sources you can check, and approved by a person before it is sent. It covers the whole outbound workflow — finding prospects, researching them, writing, sending from your own mailboxes, and handling replies — for a single team or for an agency running many clients.
 
 ## Where to start
 

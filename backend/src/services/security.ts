@@ -25,7 +25,7 @@ export async function requestPasswordReset(email: string, ip?: string) {
     const token = randomToken(32);
     await db().passwordResetToken.create({ data: { userId: user.id, kind: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + RESET_TTL_MS), ip: ip ?? null } });
     const link = `${process.env.APP_URL}/reset-password/${token}`;
-    await trySendSystemMail({ to: user.email, subject: 'Reset your EMN Outreach OS password', text: `Someone (hopefully you) asked to reset the password for ${user.email}.\n\nReset it here (valid for 60 minutes, single use):\n${link}\n\nIf you did not ask for this, ignore this email — your password will not change.` });
+    await trySendSystemMail({ to: user.email, subject: 'Reset your Outvexa password', text: `Someone (hopefully you) asked to reset the password for ${user.email}.\n\nReset it here (valid for 60 minutes, single use):\n${link}\n\nIf you did not ask for this, ignore this email — your password will not change.` });
     await audit(null, { type: 'USER', userId: user.id, ip }, 'auth.password_reset_requested');
   }
   return { ok: true, message: 'If an account exists for that address, a reset link has been sent.', emailConfigured: systemMailer().configured };
@@ -42,7 +42,7 @@ export async function resetPassword(token: string, newPassword: string, ip?: str
     db().session.updateMany({ where: { userId: t.userId, revokedAt: null }, data: { revokedAt: new Date() } }),
   ]);
   const u = await db().user.findUniqueOrThrow({ where: { id: t.userId } });
-  await trySendSystemMail({ to: u.email, subject: 'Your EMN Outreach OS password was changed', text: 'Your password was just reset and all sessions were signed out. If this was not you, contact your workspace owner immediately.' });
+  await trySendSystemMail({ to: u.email, subject: 'Your Outvexa password was changed', text: 'Your password was just reset and all sessions were signed out. If this was not you, contact your workspace owner immediately.' });
   await audit(null, { type: 'USER', userId: t.userId, ip }, 'auth.password_reset_completed');
   return { ok: true };
 }
@@ -79,7 +79,7 @@ export async function enableMfa(userId: string, code: string, actor: Actor) {
   const recovery = Array.from({ length: 10 }, () => `${randomToken(5).slice(0, 5)}-${randomToken(5).slice(0, 5)}`.toLowerCase());
   await db().user.update({ where: { id: userId }, data: { mfaEnabled: true, mfaEnabledAt: new Date(), mfaRecoveryHashes: recovery.map((r) => sha256(r)) } });
   await audit(null, actor, 'auth.mfa_enabled');
-  await trySendSystemMail({ to: u.email, subject: 'Two-factor authentication enabled', text: 'Two-factor authentication is now on for your EMN Outreach OS account.' });
+  await trySendSystemMail({ to: u.email, subject: 'Two-factor authentication enabled', text: 'Two-factor authentication is now on for your Outvexa account.' });
   return { enabled: true, recoveryCodes: recovery };
 }
 

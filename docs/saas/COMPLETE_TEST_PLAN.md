@@ -1,4 +1,4 @@
-# Complete test plan — EMN Outreach OS
+# Complete test plan — Outvexa
 
 How the product is tested, what each layer is responsible for, and how to run it. Results are in `COMPLETE_TEST_RESULTS.md`.
 

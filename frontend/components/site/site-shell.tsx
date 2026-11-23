@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Menu, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { BrandLogo } from '@/components/brand';
 
 const NAV = [
   { href: '/features', label: 'Product' },
@@ -16,9 +17,8 @@ const NAV = [
 
 export function Logo({ invert = false }: { invert?: boolean }) {
   return (
-    <Link href="/" className="flex items-center gap-2.5" aria-label="EMN Outreach OS home">
-      <span className="font-display grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-400 to-brand-700 text-[14px] font-bold text-white shadow-brand">em</span>
-      <span className={`font-display text-[18px] font-bold tracking-[-0.02em] ${invert ? 'text-white' : 'text-ink'}`}>Outreach OS</span>
+    <Link href="/" className="flex items-center" aria-label="Outvexa home">
+      <BrandLogo height={32} tone={invert ? 'dark' : 'light'} />
     </Link>
   );
 }
@@ -76,7 +76,7 @@ export function SiteShell({ children }: { children: ReactNode }) {
           <FooterCol title="Developers" links={[['/docs', 'Documentation'], ['/docs/api', 'API reference'], ['/docs/quickstart', 'Quickstart'], ['/docs/webhooks', 'Webhooks']]} />
           <FooterCol title="Company" links={[['/contact', 'Contact & support'], ['/legal/terms', 'Terms of service'], ['/legal/privacy', 'Privacy policy'], ['/legal/acceptable-use', 'Acceptable use']]} />
         </div>
-        <div className="mx-auto max-w-6xl border-t border-slate-200 px-5 py-6 text-xs text-slate-500">© {new Date().getFullYear()} Elite Media Networks. EMN Outreach OS is a product of Elite Media Networks.</div>
+        <div className="mx-auto max-w-6xl border-t border-slate-200 px-5 py-6 text-xs text-slate-500">© {new Date().getFullYear()} Elite Media Networks. Outvexa is a product of Elite Media Networks.</div>
       </footer>
     </div>
   );

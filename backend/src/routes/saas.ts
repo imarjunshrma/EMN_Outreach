@@ -37,7 +37,7 @@ route({ method: 'post', path: '/orgs/:organizationId/workspaces/:workspaceId/arc
 route({ method: 'get', path: '/orgs/:organizationId/onboarding', tag: 'Organizations', summary: 'Setup checklist computed from real configuration', auth: 'org', handler: (c) => tenancy.onboardingStatus(c.organizationId) });
 route({ method: 'post', path: '/orgs/:organizationId/onboarding/:step/skip', tag: 'Organizations', summary: 'Skip (or un-skip) an optional setup step', auth: 'org', orgPermission: 'manage', status: 200,
   body: z.object({ skip: z.boolean().default(true) }), handler: (c) => tenancy.skipOnboardingStep(c.organizationId, c.params.step as (typeof ONBOARDING_STEPS)[number]['id'], c.body.skip) });
-route({ method: 'get', path: '/orgs/:organizationId/support-access', tag: 'Organizations', summary: 'When EMN support accessed this organization, why, and how many pages they viewed', auth: 'org', orgPermission: 'manage', allowWhenInactive: true,
+route({ method: 'get', path: '/orgs/:organizationId/support-access', tag: 'Organizations', summary: 'When Outvexa support accessed this organization, why, and how many pages they viewed', auth: 'org', orgPermission: 'manage', allowWhenInactive: true,
   handler: (c) => platform.supportAccessForOrg(c.organizationId) });
 route({ method: 'get', path: '/w/:workspaceId/access', tag: 'Workspaces', summary: 'How the caller is accessing this workspace (member, organization admin, or audited support access) and the tenant status', auth: 'workspace', allowWhenInactive: true,
   handler: async (c) => {
@@ -76,7 +76,7 @@ route({ method: 'post', path: '/orgs/:organizationId/deletion', tag: 'Organizati
 route({ method: 'delete', path: '/orgs/:organizationId/deletion', tag: 'Organizations', summary: 'Cancel a scheduled deletion', auth: 'org', orgPermission: 'own', allowWhenInactive: true, status: 200,
   handler: async (c) => { await tenancy.cancelDeletion(c.organizationId, c.actor); return { ok: true }; } });
 
-// ---------------------------------------------------------------- platform administration (EMN staff; invisible to tenants)
+// ---------------------------------------------------------------- platform administration (Outvexa staff; invisible to tenants)
 route({ method: 'get', path: '/platform/me', tag: 'Platform', summary: 'My platform role, permissions, whether 2FA is on and whether this install requires it for staff', auth: 'platform', allowWithoutMfa: true,
   handler: async (c) => ({ role: c.platformRole, mfaEnabled: !!c.res.locals.mfaEnabled, mfaRequired: (await import('../core/tenant.js')).platformMfaRequired(), permissions: (await import('../../../shared/src/tenancy.js')).PLATFORM_PERMISSIONS[c.platformRole!] }) });
 route({ method: 'get', path: '/platform/users', tag: 'Platform', summary: 'Find user accounts by email or name', auth: 'platform', platformPermission: 'tenants:read', query: platform.UserQuery, handler: (c) => platform.searchUsers(c.query) });

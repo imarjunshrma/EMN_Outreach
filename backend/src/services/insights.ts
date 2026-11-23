@@ -146,7 +146,7 @@ export async function deliverToChannels(workspaceId: string, n: { type: string; 
       const cfg = JSON.parse(decryptSecret(c.encryptedConfig)) as { webhookUrl?: string; to?: string };
       if (c.type === 'SLACK') {
         const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
-        const res = await slackFetch(cfg.webhookUrl!, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `${n.title}${link ? `\n<${link}|Open in EMN Outreach OS>` : ''}` }), signal: ctrl.signal, redirect: 'error' }).finally(() => clearTimeout(t));
+        const res = await slackFetch(cfg.webhookUrl!, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `${n.title}${link ? `\n<${link}|Open in Outvexa>` : ''}` }), signal: ctrl.signal, redirect: 'error' }).finally(() => clearTimeout(t));
         if (!res.ok) throw new Error(`Slack responded ${res.status}`);
       } else if (!(await trySendSystemMail({ to: cfg.to!, subject: `[EMN] ${n.title.slice(0, 150)}`, text: `${n.title}\n\n${link}` }))) throw new Error('System email not configured');
       delivered++;

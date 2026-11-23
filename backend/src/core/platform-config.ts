@@ -42,7 +42,7 @@ export const SETTING_DEFAULTS: Settings = {
   maintenance: { enabled: false, message: '' },
   security: { passwordMinLength: 12, sessionIdleDays: 7, requireMfaForAllUsers: false, impersonationMaxMinutes: 60 },
   signups: { defaultPlanCode: '', maxOrgsPerUser: null },
-  branding: { appName: 'EMN Outreach OS', supportEmail: '' },
+  branding: { appName: 'Outvexa', supportEmail: '' },
 };
 
 /** Stored values are merged over the defaults key by key, so a new sub-setting never breaks an older row. */

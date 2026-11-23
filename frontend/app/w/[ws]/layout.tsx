@@ -12,6 +12,7 @@ import { Loading } from '@/components/ui';
 import { visibleNav } from '@/components/shell/nav';
 import { CommandPalette } from '@/components/shell/command-palette';
 import { PageMeta } from '@/components/shell/page-context';
+import { BrandLogo } from '@/components/brand';
 
 type Me = { user: { name: string; email: string; isPlatformAdmin?: boolean; platformRole?: string | null; emailVerified?: boolean }; organizations: Array<{ id: string; name: string; role: string; status: string }>; workspaces: Array<{ id: string; name: string; role: string; organizationId: string; organizationName: string; organizationStatus: string }> };
 
@@ -44,7 +45,7 @@ function Announcement() {
   return <div className={`flex items-center gap-3 px-4 py-2 text-sm lg:px-8 ${c}`} role="status" data-testid="announcement-banner"><span className="flex-1">{a.message}</span><button className="opacity-80 hover:opacity-100" onClick={() => { try { localStorage.setItem(key, 'hidden'); } catch { /* ignore */ } setHidden(true); }} aria-label="Hide announcement"><X className="h-4 w-4" /></button></div>;
 }
 
-/** Shown to EMN staff while they are inside a customer's workspace through a support grant. */
+/** Shown to Outvexa staff while they are inside a customer's workspace through a support grant. */
 function SupportBanner({ ws }: { ws: string }) {
   const q = useQuery({ queryKey: ['ws-access', ws], queryFn: () => api<{ via: string; support: { expiresAt: string; reason: string } | null }>(`/w/${ws}/access`), staleTime: 60_000 });
   if (q.data?.via !== 'support') return null;
@@ -127,8 +128,7 @@ export default function WorkspaceLayout({ children }: { children: ReactNode }) {
       <aside className={`${open ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 flex w-[264px] flex-col border-r border-slate-200 bg-white text-slate-600 transition-transform dark:border-white/5 dark:text-slate-300 lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
         <div className="px-4 pb-3 pt-4">
           <Link href={base} className="flex items-center gap-2.5">
-            <span className="font-display grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-400 to-brand-700 text-[14px] font-bold text-white shadow-brand">em</span>
-            <span className="leading-tight"><span className="font-display block text-[17px] font-bold tracking-[-0.02em] text-ink">Outreach OS</span><span className="block text-[11px] text-slate-500">Elite Media Networks</span></span>
+            <BrandLogo height={30} />
           </Link>
           <label className="relative mt-4 block">
             <span className="sr-only">Workspace</span>

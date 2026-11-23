@@ -49,7 +49,7 @@ export async function listDeliveries(workspaceId: string, webhookId: string) {
 export async function sendTest(workspaceId: string, id: string) {
   const h = await db().webhook.findFirst({ where: { id, workspaceId } });
   if (!h) throw NotFound('Webhook');
-  const d = await db().webhookDelivery.create({ data: { workspaceId, webhookId: h.id, event: 'webhook.test', payload: { event: 'webhook.test', occurredAt: new Date().toISOString(), data: { message: 'Test delivery from EMN Outreach OS' } } } });
+  const d = await db().webhookDelivery.create({ data: { workspaceId, webhookId: h.id, event: 'webhook.test', payload: { event: 'webhook.test', occurredAt: new Date().toISOString(), data: { message: 'Test delivery from Outvexa' } } } });
   await enqueue(QUEUES.webhooks, 'webhook.deliver', { workspaceId, deliveryId: d.id }, { attempts: 1 });
   return { deliveryId: d.id };
 }

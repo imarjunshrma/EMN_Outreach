@@ -15,7 +15,7 @@ export default function ApiKeys() {
   const revoke = useWsMutation<string>((id) => ({ path: `/api-keys/${id}`, method: 'DELETE' }), { success: 'Revoked' });
   return (
     <>
-      <PageHeader title="API keys" subtitle="Keys let other systems call the EMN API (Authorization: Bearer emn_…). A key acts with the role you give it, only inside this workspace. See API_DOCUMENTATION.md and /api/v1/openapi.json." />
+      <PageHeader title="API keys" subtitle="Keys let other systems call the Outvexa API (Authorization: Bearer emn_…). A key acts with the role you give it, only inside this workspace. See API_DOCUMENTATION.md and /api/v1/openapi.json." />
       {token && <div className="mb-4"><Notice kind="warning"><b>Copy this key now — it will not be shown again:</b><div className="mt-1 break-all rounded bg-white p-2 font-mono text-xs">{token}</div><Button variant="secondary" className="mt-2" onClick={() => { void navigator.clipboard.writeText(token); }}>Copy</Button> <Button variant="ghost" onClick={() => setToken(null)}>Done</Button></Notice></div>}
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Create key">

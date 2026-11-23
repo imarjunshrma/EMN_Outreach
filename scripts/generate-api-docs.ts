@@ -23,7 +23,7 @@ const authText = (a: string, role?: string) => a === 'public' ? 'public' : a ===
 const byTag = new Map<string, typeof routes>();
 for (const r of routes) byTag.set(r.tag, [...(byTag.get(r.tag) ?? []), r]);
 
-let md = `# EMN Outreach OS — API documentation
+let md = `# Outvexa — API documentation
 
 Generated from the route registry by \`npm run api-docs\` (${routes.length} operations). The machine-readable
 OpenAPI 3.1 document is \`docs/openapi.json\` (\`npm run openapi\`) and is also served at \`GET /api/v1/openapi.json\`.

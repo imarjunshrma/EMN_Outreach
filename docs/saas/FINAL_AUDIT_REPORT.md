@@ -1,4 +1,4 @@
-# Final audit report — EMN Outreach OS v1.3
+# Final audit report — Outvexa v1.3
 
 **A. Scope.** Whole repository: API, frontend, worker, integrations, shared code, database, tests, dependencies. Platform admin (ERP console) built as phase 13.
 

@@ -41,6 +41,6 @@ export function verifyTotp(secret: string, code: string, now = Date.now()): numb
   return null;
 }
 
-export function otpauthUri(secret: string, account: string, issuer = 'EMN Outreach OS') {
+export function otpauthUri(secret: string, account: string, issuer = 'Outvexa') {
   return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
 }

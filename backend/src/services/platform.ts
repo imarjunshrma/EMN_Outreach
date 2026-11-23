@@ -9,7 +9,7 @@ import { tenantState } from './entitlements.js';
 import { currentUsage, usageHistory } from './usage.js';
 import { purgeTenant, setOrgStatus } from './tenancy.js';
 
-// Platform administration (EMN staff only). Every write here records an append-only PlatformAuditEvent
+// Platform administration (Outvexa staff only). Every write here records an append-only PlatformAuditEvent
 // with the acting admin and a reason. Nothing here returns a tenant's secrets.
 
 type Admin = { userId: string; ip?: string | null };
@@ -286,7 +286,7 @@ export async function supportAccessForOrg(organizationId: string) {
   // Number of pages viewed under each grant (from the append-only platform audit trail).
   const reads = await db().platformAuditEvent.findMany({ where: { organizationId, action: 'support.read', createdAt: { gte: grants.at(-1)?.createdAt ?? now } }, select: { metadata: true } });
   const count = (id: string) => reads.filter((r) => (r.metadata as { grantId?: string } | null)?.grantId === id).length;
-  return grants.map((g) => ({ pagesViewed: count(g.id), id: g.id, staffName: staff.find((s) => s.id === g.adminUserId)?.name ?? 'EMN support', reason: g.reason, scope: g.scope, createdAt: g.createdAt, expiresAt: g.expiresAt, revokedAt: g.revokedAt, active: !g.revokedAt && g.expiresAt > now }));
+  return grants.map((g) => ({ pagesViewed: count(g.id), id: g.id, staffName: staff.find((s) => s.id === g.adminUserId)?.name ?? 'Outvexa support', reason: g.reason, scope: g.scope, createdAt: g.createdAt, expiresAt: g.expiresAt, revokedAt: g.revokedAt, active: !g.revokedAt && g.expiresAt > now }));
 }
 
 // ------------------------------------------------------------------ operations (queues, dead letters, failures)

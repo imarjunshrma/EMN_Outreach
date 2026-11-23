@@ -45,7 +45,7 @@ export function BillingPanel({ orgId, checkoutReturned }: { orgId: string; check
           {sub.trialEndsAt && b.status === 'TRIALING' && <div>Trial ends {fmtDay(sub.trialEndsAt)}</div>}
           {sub.currentPeriodEnd && <div>{sub.cancelAtPeriodEnd ? 'Ends' : 'Renews'} {fmtDay(sub.currentPeriodEnd)}</div>}
           {sub.graceUntil && <div>Grace period until {fmtDay(sub.graceUntil)}</div>}
-          {sub.provider && <div className="text-xs text-slate-500">Paid through {sub.provider === 'manual' ? 'an arrangement with EMN' : sub.provider} · billed per {sub.interval}</div>}
+          {sub.provider && <div className="text-xs text-slate-500">Paid through {sub.provider === 'manual' ? 'an arrangement with Outvexa' : sub.provider} · billed per {sub.interval}</div>}
         </dl>}
         {canBill ? (
           <div className="mt-3 flex flex-wrap gap-2">
@@ -63,7 +63,7 @@ export function BillingPanel({ orgId, checkoutReturned }: { orgId: string; check
       </Card>
       {canBill && (
         <Card title="Plans" className="lg:col-span-3" actions={<><Select className="!w-auto" value={interval} onChange={(e) => setInterval(e.target.value as any)} options={[{ value: 'month', label: 'Monthly' }, { value: 'year', label: 'Yearly' }]} /><Select className="!w-auto" value={provider} onChange={(e) => setProvider(e.target.value as any)} options={[{ value: 'stripe', label: `Card (Stripe)${b.gateways.stripe ? '' : ' — not configured'}` }, { value: 'razorpay', label: `India (Razorpay)${b.gateways.razorpay ? '' : ' — not configured'}` }]} /></>}>
-          {!b.gateways[provider] && <div className="mb-3"><Notice kind="warning">{provider === 'stripe' ? 'Stripe' : 'Razorpay'} is not configured on this server yet, so checkout is unavailable. Contact EMN at info@elitemedianetworks.com.</Notice></div>}
+          {!b.gateways[provider] && <div className="mb-3"><Notice kind="warning">{provider === 'stripe' ? 'Stripe' : 'Razorpay'} is not configured on this server yet, so checkout is unavailable. Contact Outvexa at info@elitemedianetworks.com.</Notice></div>}
           <div className="grid gap-3 md:grid-cols-3">{b.plans.map((p: any) => (
             <div key={p.id} className="rounded-xl border border-slate-200 p-4">
               <p className="font-bold">{p.name} {b.plan?.code === p.code && <Badge color="blue">current</Badge>}</p>

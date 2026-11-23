@@ -19,7 +19,7 @@ export const INTEGRATION_INFO: Record<IntegrationType, { label: string; category
   cloudflare: { label: 'Cloudflare DNS', category: 'Domains', secretLabel: 'API token (Zone.DNS edit)', publicFields: [], docs: 'Reads and creates DNS records (verification TXT, SPF, DMARC) only when you click to apply them. Cannot register domains.' },
   brave: { label: 'Brave Search API', category: 'Web search', secretLabel: 'Subscription token', publicFields: [], docs: 'Used by research to find public pages about a company.' },
   serper: { label: 'Serper.dev', category: 'Web search', secretLabel: 'API key', publicFields: [], docs: 'Alternative web-search provider for research.' },
-  smartlead: { label: 'Smartlead (optional)', category: 'Export', secretLabel: 'API key', publicFields: [], docs: 'Optional: push a lead list into an existing Smartlead campaign. Not required by EMN Outreach OS.' },
+  smartlead: { label: 'Smartlead (optional)', category: 'Export', secretLabel: 'API key', publicFields: [], docs: 'Optional: push a lead list into an existing Smartlead campaign. Not required by Outvexa.' },
   booking: { label: 'Booking webhook (Cal.com / Calendly)', category: 'Calendar', secretLabel: 'Webhook signing secret', publicFields: ['bookingLink'], docs: 'Point your booking tool webhook to /api/v1/hooks/booking/<workspaceId>. Marks the lead MEETING_BOOKED.' },
 };
 

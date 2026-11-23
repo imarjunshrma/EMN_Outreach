@@ -6,7 +6,7 @@ import './globals.css';
 import { Providers } from './providers';
 import { THEME_SCRIPT } from '@/lib/theme-script';
 
-export const metadata: Metadata = { title: 'EMN Outreach OS', description: 'Elite Media Networks outreach platform', robots: { index: false, follow: false } };
+export const metadata: Metadata = { title: 'Outvexa', description: 'Outvexa — research-led cold email: research every prospect, write to each one, send only what you approved.', applicationName: 'Outvexa', robots: { index: false, follow: false } };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (

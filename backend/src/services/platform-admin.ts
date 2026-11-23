@@ -65,9 +65,9 @@ async function issueSetupLink(userId: string, email: string, purpose: 'invite' |
   const token = randomToken(32);
   await db().passwordResetToken.create({ data: { userId, kind: 'RESET', tokenHash: sha256(token), expiresAt: new Date(Date.now() + SETUP_TTL_MS), ip: admin.ip ?? null } });
   const link = `${process.env.APP_URL}/reset-password/${token}`;
-  const subject = purpose === 'invite' ? 'Your EMN Outreach OS account is ready' : 'Reset your EMN Outreach OS password';
+  const subject = purpose === 'invite' ? 'Your Outvexa account is ready' : 'Reset your Outvexa password';
   const text = purpose === 'invite'
-    ? `An administrator created an EMN Outreach OS account for ${email}.\n\nChoose your password here (valid for 7 days, single use):\n${link}\n`
+    ? `An administrator created an Outvexa account for ${email}.\n\nChoose your password here (valid for 7 days, single use):\n${link}\n`
     : `An administrator started a password reset for ${email}.\n\nChoose a new password here (valid for 7 days, single use):\n${link}\n\nIf you did not expect this, contact your administrator.`;
   const mailed = systemMailer().configured ? await trySendSystemMail({ to: email, subject, text }) : false;
   return { mailed, link: mailed ? null : link };

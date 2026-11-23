@@ -27,5 +27,5 @@ export default function AppEntry() {
       router.replace(`/w/${ws.id}`);
     })();
   }, [router]);
-  return <Loading label="Opening EMN Outreach OS…" />;
+  return <Loading label="Opening Outvexa…" />;
 }

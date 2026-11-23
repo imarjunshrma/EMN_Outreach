@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# EMN Outreach OS — zero-surprise release deploy (run as root from the unpacked project folder).
+# Outvexa — zero-surprise release deploy (run as root from the unpacked project folder).
 #   1. copies the source into /opt/emn/releases/<timestamp>
 #   2. installs dependencies and builds API, worker and web UI (no Docker)
 #   3. backs up the database, runs migrations, seeds reference data (idempotent)

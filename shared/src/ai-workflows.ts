@@ -6,7 +6,7 @@ import { z } from 'zod';
 export const SUBSCRIPTION_PROVIDERS = ['CLAUDE_SUBSCRIPTION', 'CODEX_SUBSCRIPTION'] as const;
 export type SubscriptionProviderName = typeof SUBSCRIPTION_PROVIDERS[number];
 
-/** API providers already supported by Outreach OS (workspace API keys). */
+/** API providers already supported by Outvexa (workspace API keys). */
 export const API_PROVIDERS = ['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENROUTER', 'GROQ', 'TOGETHER', 'DEEPSEEK', 'MISTRAL', 'OLLAMA', 'CUSTOM_OPENAI'] as const;
 export type ApiProviderName = typeof API_PROVIDERS[number];
 

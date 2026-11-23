@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# EMN Outreach OS — first-time server preparation for Ubuntu 22.04/24.04 (run as root).
+# Outvexa — first-time server preparation for Ubuntu 22.04/24.04 (run as root).
 # Installs Node 22, PostgreSQL, Redis, Nginx and Certbot; creates the emn user, directories,
 # database roles and a shared .env with generated secrets. It does NOT deploy code — run
 # scripts/deploy.sh afterwards. Safe to re-run: every step checks before changing anything.

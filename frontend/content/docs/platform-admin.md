@@ -2,7 +2,7 @@
 title: Platform administration
 section: Security & operations
 order: 3
-description: For EMN staff — tenants, plans, metrics, support access and the audit trail.
+description: For Outvexa staff — tenants, plans, metrics, support access and the audit trail.
 ---
 The platform console at `/platform` is visible only to users with a platform role. To everyone else it does not exist (`404`). **Staff must turn on two-factor sign-in** before any console screen or customer support access works, and cannot turn it off while they hold a platform role.
 

@@ -1,6 +1,6 @@
 # Security
 
-This file has two parts. The first is the security controls built into EMN Outreach OS 1.0.0. The second is what the operator is responsible for. To report a vulnerability, email info@elitemedianetworks.com. Do not open a public issue.
+This file has two parts. The first is the security controls built into Outvexa 1.0.0. The second is what the operator is responsible for. To report a vulnerability, email info@elitemedianetworks.com. Do not open a public issue.
 
 ## Built-in controls
 

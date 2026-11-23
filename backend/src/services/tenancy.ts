@@ -189,7 +189,7 @@ export async function sendVerificationEmail(userId: string) {
   await db().passwordResetToken.updateMany({ where: { userId, kind: 'EMAIL_VERIFY', usedAt: null }, data: { usedAt: new Date() } });
   const token = randomToken(32);
   await db().passwordResetToken.create({ data: { userId, kind: 'EMAIL_VERIFY', tokenHash: sha256(token), expiresAt: new Date(Date.now() + 48 * 3600_000) } });
-  const sent = await trySendSystemMail({ to: user.email, subject: 'Confirm your email for EMN Outreach OS', text: `Hi ${user.name},\n\nConfirm your email address to finish setting up your account (link valid for 48 hours):\n${process.env.APP_URL}/verify-email/${token}\n\nIf you did not sign up, ignore this email.` });
+  const sent = await trySendSystemMail({ to: user.email, subject: 'Confirm your email for Outvexa', text: `Hi ${user.name},\n\nConfirm your email address to finish setting up your account (link valid for 48 hours):\n${process.env.APP_URL}/verify-email/${token}\n\nIf you did not sign up, ignore this email.` });
   return { sent };
 }
 

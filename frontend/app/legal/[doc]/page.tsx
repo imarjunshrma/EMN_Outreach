@@ -15,7 +15,7 @@ function load(doc: string) {
 }
 export async function generateMetadata({ params }: { params: Promise<{ doc: string }> }): Promise<Metadata> {
   const d = load((await params).doc);
-  return d ? { title: `${d.meta.title} — EMN Outreach OS` } : {};
+  return d ? { title: `${d.meta.title} — Outvexa` } : {};
 }
 export default async function Legal({ params }: { params: Promise<{ doc: string }> }) {
   const d = load((await params).doc);

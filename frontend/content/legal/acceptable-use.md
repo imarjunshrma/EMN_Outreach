@@ -5,7 +5,7 @@ updated: 2026-11-21
 > [!warning]
 > **Draft for legal review.** Remove this notice once approved.
 
-EMN Outreach OS is for honest, relevant business outreach. You may not use it to:
+Outvexa is for honest, relevant business outreach. You may not use it to:
 
 - Send email to people you have no lawful basis to contact, or keep emailing anyone who has opted out.
 - Use purchased or scraped lists that the law in the recipient's country does not allow you to use.

@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Activity, ArrowLeft, BarChart3, Building, Database, FileClock, KeyRound, Layers, LifeBuoy, Settings, ShieldAlert, ShieldCheck, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Loading } from '@/components/ui';
+import { BrandLogo } from '@/components/brand';
 
 type PlatformMe = { role: string; permissions: string[]; mfaEnabled: boolean; mfaRequired?: boolean };
 const Ctx = createContext<PlatformMe>({ role: '', permissions: [], mfaEnabled: false });
@@ -38,8 +39,8 @@ export function PlatformShell({ children }: { children: ReactNode }) {
         {/* Same surface as the workspace sidebar, so the console follows light and dark mode the same way. */}
         <aside className="flex flex-col border-b border-slate-200 bg-white text-slate-600 dark:border-white/5 dark:text-slate-300 lg:sticky lg:top-0 lg:h-screen lg:w-60 lg:shrink-0 lg:border-b-0 lg:border-r" data-testid="platform-sidebar">
           <div className="px-5 py-5">
-            <p className="font-display text-[17px] font-bold text-ink">EMN Platform</p>
-            <p className="text-[12px] text-slate-500">Staff console · {me.data.role.replace('_', ' ').toLowerCase()}</p>
+            <BrandLogo height={28} />
+            <p className="mt-1.5 text-[12px] text-slate-500">Staff console · {me.data.role.replace('_', ' ').toLowerCase()}</p>
           </div>
           <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:block lg:flex-1 lg:space-y-0.5 lg:overflow-y-auto" aria-label="Platform">
             {nav.map((n) => {

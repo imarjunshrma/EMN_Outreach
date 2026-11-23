@@ -1,4 +1,4 @@
-# EMN Outreach OS — Architecture & Implementation Docs (v1.2.0)
+# Outvexa — Architecture & Implementation Docs (v1.2.0)
 
 These documents started as the pre-build architecture pack. They have been **updated to describe the
 system as implemented**. Where the build differs from the original plan, the difference is called out

@@ -50,7 +50,7 @@ export function buildOpenApi(routes: RouteDef<any, any>[]) {
   }
   return {
     openapi: '3.1.0',
-    info: { title: 'EMN Outreach OS API', version: '1.4.0', description: `Error codes:\n${Object.entries(ERROR_CODES).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` },
+    info: { title: 'Outvexa API', version: '1.4.0', description: `Error codes:\n${Object.entries(ERROR_CODES).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` },
     servers: [{ url: process.env.APP_URL ?? 'http://localhost:3000' }],
     components: {
       securitySchemes: {

@@ -5,7 +5,7 @@ updated: 2026-11-21
 > [!warning]
 > **Draft for legal review.** This template was prepared with the product and must be reviewed by a qualified lawyer before Elite Media Networks offers the service commercially. Remove this notice once approved.
 
-These terms govern use of EMN Outreach OS (the "Service"), provided by Elite Media Networks ("we", "us"). By creating an account you agree to them on behalf of the organization you register ("Customer").
+These terms govern use of Outvexa (the "Service"), provided by Elite Media Networks ("we", "us"). By creating an account you agree to them on behalf of the organization you register ("Customer").
 
 ## 1. Accounts
 

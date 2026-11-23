@@ -364,7 +364,7 @@ export async function sendMailboxDiagnostic(workspaceId: string, id: string, act
       to: account.emailAddress,
       replyTo: account.replyTo ?? undefined,
       subject: '[EMN mailbox diagnostic] Explicit self-test',
-      text: `This is an automated mailbox delivery diagnostic requested by an administrator in EMN Outreach OS at ${now.toISOString()}. It was sent from this mailbox to itself to verify provider submission and mailbox synchronization. It is not a prospect message. No reply or engagement action is requested.`,
+      text: `This is an automated mailbox delivery diagnostic requested by an administrator in Outvexa at ${now.toISOString()}. It was sent from this mailbox to itself to verify provider submission and mailbox synchronization. It is not a prospect message. No reply or engagement action is requested.`,
       messageId,
       headers: { 'X-EMN-Mailbox-Diagnostic': '1' },
     });

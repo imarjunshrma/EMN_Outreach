@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "EMN Outreach OS API",
+    "title": "Outvexa API",
     "version": "1.4.0",
     "description": "Error codes:\n- VALIDATION_FAILED: Request body, query or params failed validation (400)\n- UNAUTHENTICATED: Missing or expired session / API key (401)\n- CSRF_FAILED: Missing or wrong X-CSRF-Token header (403)\n- FORBIDDEN: Role does not allow this action (403)\n- NOT_FOUND: Resource does not exist in this workspace (404)\n- RATE_LIMITED: Too many requests (429)\n- CONFLICT: Unique constraint or state conflict (409)\n- CAMPAIGN_INVALID: Campaign failed validation and cannot be approved/started (400)\n- CAMPAIGN_STATE: Action not allowed in the campaign current status (409)\n- PROVIDER_NOT_CONFIGURED: Integration / AI provider / OAuth app not configured (400)\n- PROVIDER_ERROR: External provider returned an error (502)\n- AI_BUDGET_EXCEEDED: Monthly AI budget for this task is used up (402)\n- AI_COST_LIMIT: Per-lead AI cost limit would be exceeded (402)\n- QUALITY_CHECK_FAILED: Personalization has failing quality checks and cannot be approved (400)\n- AI_OUTPUT_INVALID: AI response failed schema validation (502)\n- WEAK_PASSWORD: Password does not meet the strength policy (400)\n- INVALID_PASSWORD: Current password is wrong (400)\n- REGISTRATION_CLOSED: Public registration is disabled; use an invitation (403)\n- LOGIN_REQUIRED: Invitation belongs to an existing account; log in first (400)\n- INVITATION_INVALID: Invitation token invalid, used or expired (400)\n- INVITATION_EMAIL_MISMATCH: Logged-in user is not the invited email (400)\n- LAST_OWNER: Cannot remove/demote the last workspace owner (400)\n- OAUTH_STATE_INVALID: OAuth state expired, reused or for another provider (400)\n- OAUTH_DENIED: User or tenant admin denied consent (400)\n- OAUTH_NO_REFRESH: Provider returned no refresh token (400)\n- ACCOUNT_NOT_CONNECTED: Mailbox is disconnected / needs re-authentication (400/409)\n- UNRESOLVED_VARIABLES: Template still contains unresolved {{variables}} (400)\n- FACT_CHECK_FAILED: Independent fact-check found unsupported claims (400)\n- ICP_REQUIRED: Scoring needs an ICP first (400)\n- NOT_ELIGIBLE: Lead fails a compliance/suppression/verification gate (400)\n- REVIEW_REQUIRED: Country rule needs explicit review before enabling (400)\n- INVALID_TOKEN: Unsubscribe/booking token invalid (400)\n- MFA_REQUIRED: Workspace requires two-factor authentication (403)\n- INVALID_CODE: Two-factor code invalid (400)\n- QUOTA_EXCEEDED: Plan limit reached for this resource (402)\n- SUBSCRIPTION_INACTIVE: Subscription inactive; feature unavailable (402)\n- INVALID_SIGNATURE: Webhook signature verification failed (400)\n- TENANT_INACTIVE: Organization is suspended, cancelled or being deleted; writes are blocked (403)\n- EMAIL_NOT_VERIFIED: Confirm your email address before this action (403)\n- INVALID_TRANSITION: Organization status change not allowed from the current status (409)\n- SUPPRESSED: Recipient is on the suppression list (400)\n- INTERNAL: Unexpected server error (500)"
   },
@@ -29616,7 +29616,7 @@
         "tags": [
           "Organizations"
         ],
-        "summary": "When EMN support accessed this organization, why, and how many pages they viewed",
+        "summary": "When Outvexa support accessed this organization, why, and how many pages they viewed",
         "description": "Authentication: organization member (session cookie)\n\nOrganization permission: manage\n\nAvailable while the organization is suspended or cancelled\n\nRate limit: global Nginx limit",
         "parameters": [
           {
@@ -34320,6 +34320,10 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "maxLength": 2000
                   }
                 },
                 "required": [

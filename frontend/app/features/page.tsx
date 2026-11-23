@@ -16,7 +16,7 @@ export default function Features() {
     <SiteShell>
       <Section className="pb-14 pt-16 lg:pt-20">
         <h1 className="font-display max-w-3xl text-[44px] font-bold leading-[1.05] tracking-[-0.04em] sm:text-[54px]">Everything between “who should we email?” and “they replied.”</h1>
-        <p className="mt-5 max-w-2xl text-[17px] leading-relaxed text-slate-600">Outreach OS covers the whole outbound workflow. Each part can be used on its own, and each one keeps a person in charge of what gets sent.</p>
+        <p className="mt-5 max-w-2xl text-[17px] leading-relaxed text-slate-600">Outvexa covers the whole outbound workflow. Each part can be used on its own, and each one keeps a person in charge of what gets sent.</p>
         <nav className="mt-8 flex flex-wrap gap-2" aria-label="On this page">
           {AREAS.map((a) => <a key={a.id} href={`#${a.id}`} className="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 hover:border-ink hover:text-ink">{a.title}</a>)}
         </nav>

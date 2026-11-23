@@ -2,7 +2,7 @@
   "name": "emn-outreach-os",
   "version": "1.4.0",
   "private": true,
-  "description": "EMN Outreach OS — self-hosted AI outreach and email management platform (Elite Media Networks)",
+  "description": "Outvexa — self-hosted AI outreach and email management platform (Elite Media Networks)",
   "type": "module",
   "engines": {
     "node": ">=22"

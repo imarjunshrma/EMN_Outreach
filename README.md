@@ -1,4 +1,4 @@
-# EMN Outreach OS
+# Outvexa
 
 Self-hosted AI outreach and email-management platform for Elite Media Networks. It finds and imports
 leads, researches them from public sources with cited evidence, writes fact-checked emails with Claude

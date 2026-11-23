@@ -41,7 +41,7 @@ export default function Analytics() {
       </QueryView>
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
         <Card title="Daily activity"><QueryView q={daily}>{(r) => <DailyChart rows={r} />}</QueryView></Card>
-        <Card title="Monthly activity"><QueryView q={monthly}>{(r) => <SimpleBars rows={r.map((m: any) => ({ label: m.month, sent: m.sent, replied: m.replied, bounced: m.bounced }))} keys={[{ key: 'sent', label: 'Sent', color: '#c62f96' }, { key: 'replied', label: 'Replies', color: '#0f9d6b' }, { key: 'bounced', label: 'Bounces', color: '#dc2626' }]} />}</QueryView></Card>
+        <Card title="Monthly activity"><QueryView q={monthly}>{(r) => <SimpleBars rows={r.map((m: any) => ({ label: m.month, sent: m.sent, replied: m.replied, bounced: m.bounced }))} keys={[{ key: 'sent', label: 'Sent', color: '#4f26fc' }, { key: 'replied', label: 'Replies', color: '#0f9d6b' }, { key: 'bounced', label: 'Bounces', color: '#dc2626' }]} />}</QueryView></Card>
       </div>
       <div className="mt-5"><Card title="Campaign performance & attribution">
         <QueryView q={camps} isEmpty={(d) => d.length === 0} empty={<p className="text-sm text-slate-500">No campaigns yet.</p>}>

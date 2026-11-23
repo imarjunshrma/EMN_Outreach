@@ -1,6 +1,6 @@
 # 14 — Instantly feature-parity audit (November 2026)
 
-This audit compares EMN Outreach OS 1.1.0 with Instantly's feature set as Instantly and independent reviewers described it in late 2026. The Instantly side comes from public pages, not from hands-on testing of an Instantly account.
+This audit compares Outvexa 1.1.0 with Instantly's feature set as Instantly and independent reviewers described it in late 2026. The Instantly side comes from public pages, not from hands-on testing of an Instantly account.
 
 **What Instantly offers (per its public pages and reviews):**
 - **Lead Finder (formerly SuperSearch).** A 450M+ B2B contact database with waterfall enrichment across about seven providers. Verification is metered on a credit system.
@@ -25,7 +25,7 @@ Classification key:
 
 A feature marked External cannot be called working until it has been tested against the live service.
 
-| Area | Instantly | EMN Outreach OS 1.1.0 | Class |
+| Area | Instantly | Outvexa 1.1.0 | Class |
 |---|---|---|---|
 | Email account management | Unlimited accounts, OAuth/SMTP, health | Google OAuth, Microsoft 365 OAuth and SMTP/IMAP. Encrypted tokens, health status, reauth flow, daily limits and sending windows per mailbox | Full (code) · External (live OAuth apps) |
 | Domain & mailbox provisioning | Done-for-you domains and inboxes, DNS automation | DNS checks with history, TXT ownership verification, propagation across 3 resolvers, recommended records with confirmed one-record apply via Cloudflare, renewal reminders, mailbox health, capability registry. No registrar purchasing or mailbox provisioning (no reviewed APIs) | Partial · External (registrar or provider APIs) |

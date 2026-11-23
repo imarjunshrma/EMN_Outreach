@@ -45,7 +45,7 @@ async function mailboxRoundTrip(name: string, p: EmailProvider, auth: AuthHandle
   const to = env('LIVE_SEND_TO');
   if (to) {
     const outboundId = randomUUID();
-    const sent = await p.send(auth, { from: { address: profile.email }, to, subject: `[EMN live-check] ${name} ${new Date().toISOString()}`, text: 'Automated live integration check from EMN Outreach OS. No action needed.', messageId: `<${outboundId}@${profile.email.split('@')[1]}>`, headers: { 'X-EMN-Outbound-Id': outboundId } });
+    const sent = await p.send(auth, { from: { address: profile.email }, to, subject: `[EMN live-check] ${name} ${new Date().toISOString()}`, text: 'Automated live integration check from Outvexa. No action needed.', messageId: `<${outboundId}@${profile.email.split('@')[1]}>`, headers: { 'X-EMN-Outbound-Id': outboundId } });
     const found = await p.findSentByOutboundId(auth, { outboundId, to, since: new Date(Date.now() - 600_000) }).catch(() => null);
     detail += `; sent test to ${to} (provider id ${sent.providerMessageId ? 'returned' : 'missing'}; found in Sent: ${found ? 'yes' : 'not yet'})`;
   }

@@ -1,4 +1,4 @@
-# EMN Outreach OS — API documentation
+# Outvexa — API documentation
 
 Generated from the route registry by `npm run api-docs` (428 operations). The machine-readable
 OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also served at `GET /api/v1/openapi.json`.
@@ -166,7 +166,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/ai-playbook/versions/:id/restore` | session | — | — | — | Restore a previous playbook version (creates a new version) |
 | POST | `/ai-queue/pause` | session | — | — | — | Pause all AI workflow queues |
 | POST | `/ai-queue/resume` | session | — | — | — | Resume all AI workflow queues |
-| POST | `/w/:workspaceId/ai-runs` | session/API key · MEMBER+ | 120/3600s per user | `leadId`: string, `campaignId?`: object, `mode?`: workflow\|claude\|codex, `workflowId?`: object | — | Generate emails for a prospect with a workflow, Claude or Codex (queued; never sends) |
+| POST | `/w/:workspaceId/ai-runs` | session/API key · MEMBER+ | 120/3600s per user | `leadId`: string, `campaignId?`: object, `mode?`: workflow\|claude\|codex, `workflowId?`: object, `instructions?`: string | — | Generate emails for a prospect with a workflow, Claude or Codex (queued; never sends) |
 | GET | `/w/:workspaceId/ai-runs` | session/API key · VIEWER+ | — | — | `page?`: integer, `pageSize?`: integer, `leadId?`: string, `status?`: QUEUED\|RUNNING\|SUCCEEDED\|FAILED\|PAUSED\|PAUSED_LIMIT… | Generation history |
 | GET | `/w/:workspaceId/ai-runs/:id` | session/API key · VIEWER+ | — | — | — | Run detail: research, variants, stages and execution log |
 | POST | `/w/:workspaceId/ai-runs/:id/pause` | session/API key · VIEWER+ | — | — | — | Pause a run |
@@ -494,7 +494,7 @@ OpenAPI 3.1 document is `docs/openapi.json` (`npm run openapi`) and is also serv
 | POST | `/orgs/:organizationId/workspaces/:workspaceId/archive` | session/API key · VIEWER+ | — | — | — | Archive a workspace (data kept; hidden from members) |
 | GET | `/orgs/:organizationId/onboarding` | session/API key · VIEWER+ | — | — | — | Setup checklist computed from real configuration |
 | POST | `/orgs/:organizationId/onboarding/:step/skip` | session/API key · VIEWER+ | — | `skip?`: boolean | — | Skip (or un-skip) an optional setup step |
-| GET | `/orgs/:organizationId/support-access` | session/API key · VIEWER+ | — | — | — | When EMN support accessed this organization, why, and how many pages they viewed |
+| GET | `/orgs/:organizationId/support-access` | session/API key · VIEWER+ | — | — | — | When Outvexa support accessed this organization, why, and how many pages they viewed |
 | GET | `/orgs/:organizationId/usage` | session/API key · VIEWER+ | — | — | — | Usage this period and the last 6 months |
 | POST | `/orgs/:organizationId/export` | session/API key · VIEWER+ | 3/3600s per user | — | — | Download a JSON export of the organization and all its workspaces (secrets excluded) |
 | POST | `/orgs/:organizationId/deletion` | session/API key · VIEWER+ | — | `confirmName`: string | — | Schedule permanent deletion of the organization (grace period, then erased) |

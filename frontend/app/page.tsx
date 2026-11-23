@@ -20,7 +20,7 @@ export default function Home() {
       <Section className="grid items-center gap-14 pb-20 pt-16 lg:grid-cols-[1.05fr_1fr] lg:pt-24">
         <div>
           <h1 className="font-display text-[44px] font-bold leading-[1.02] tracking-[-0.04em] text-ink sm:text-[60px]">Cold email that shows you did the homework.</h1>
-          <p className="mt-6 max-w-lg text-[17px] leading-relaxed text-slate-600">Outreach OS researches every prospect, drafts an email grounded in what it found, and waits for your approval before anything is sent. One place for leads, sequences, mailboxes and replies — for your team or for every client you run.</p>
+          <p className="mt-6 max-w-lg text-[17px] leading-relaxed text-slate-600">Outvexa researches every prospect, drafts an email grounded in what it found, and waits for your approval before anything is sent. One place for leads, sequences, mailboxes and replies — for your team or for every client you run.</p>
           <div className="mt-8 flex flex-wrap gap-3">
             {signedIn ? <Link href="/app" className="btn-site-primary h-12 px-6 text-[15px]">Open the app</Link> : <Link href="/signup" className="btn-site-primary h-12 px-6 text-[15px]">Start a 14-day trial</Link>}
             <Link href="/features" className="btn-site-ghost h-12 px-6 text-[15px]">See how it works</Link>

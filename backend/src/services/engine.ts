@@ -1085,7 +1085,7 @@ export async function sendTestEmail(workspaceId: string, id: string, input: z.in
   const messageId = `<test-${randomUUID()}@${account.emailAddress.split('@')[1]}>`;
   await adapters().email[account.provider].send(await getAuth(account.id), {
     from: { address: account.emailAddress, name: account.displayName ?? undefined }, to,
-    subject: `[TEST] ${pv.subject || '(no subject — reply step)'}`, text: `${pv.body}\n\n[Test email from EMN Outreach OS — campaign "${c.name}", step ${input.stepOrder}, variant ${pv.variant}. Not sent to the prospect.]`,
+    subject: `[TEST] ${pv.subject || '(no subject — reply step)'}`, text: `${pv.body}\n\n[Test email from Outvexa — campaign "${c.name}", step ${input.stepOrder}, variant ${pv.variant}. Not sent to the prospect.]`,
     messageId, headers: { 'X-EMN-Test': '1' },
   });
   await audit(workspaceId, actor, 'campaign.test_email_sent', { type: 'campaign', id }, { to, leadId: input.leadId, stepOrder: input.stepOrder, mailbox: account.emailAddress });

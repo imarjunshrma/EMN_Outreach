@@ -23,7 +23,7 @@ class SmtpSystemMailer implements SystemMailer {
 
 let mailer: SystemMailer | null = null;
 export function systemMailer(): SystemMailer {
-  mailer ??= new SmtpSystemMailer(process.env.SYSTEM_SMTP_URL || undefined, process.env.SYSTEM_MAIL_FROM || 'EMN Outreach OS <no-reply@localhost>');
+  mailer ??= new SmtpSystemMailer(process.env.SYSTEM_SMTP_URL || undefined, process.env.SYSTEM_MAIL_FROM || 'Outvexa <no-reply@localhost>');
   return mailer;
 }
 export function setSystemMailerForTests(m: SystemMailer | null) { mailer = m; }

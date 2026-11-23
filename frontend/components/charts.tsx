@@ -14,7 +14,7 @@ export function DailyChart({ rows }: { rows: Array<{ day: string; sent: number; 
           <YAxis allowDecimals={false} fontSize={11} tickLine={false} axisLine={false} stroke="#786f80" />
           <Tooltip contentStyle={{ borderRadius: 10, border: '1px solid #e5e0e9', fontSize: 12 }} />
           <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-          <Line type="monotone" dataKey="sent" stroke="#c62f96" strokeWidth={2.5} dot={false} name="Sent" />
+          <Line type="monotone" dataKey="sent" stroke="#4f26fc" strokeWidth={2.5} dot={false} name="Sent" />
           <Line type="monotone" dataKey="replied" stroke="#0f9d6b" strokeWidth={2} dot={false} name="Replies" />
           <Line type="monotone" dataKey="bounced" stroke="#dc2626" strokeWidth={2} dot={false} name="Bounces" />
           {rows[0]?.leads !== undefined && <Line type="monotone" dataKey="leads" stroke="#a59cad" strokeWidth={1} dot={false} name="New prospects" />}

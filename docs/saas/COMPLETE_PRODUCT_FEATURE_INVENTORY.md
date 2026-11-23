@@ -1,4 +1,4 @@
-# Complete product feature inventory — EMN Outreach OS
+# Complete product feature inventory — Outvexa
 
 Generated from the code on 22 November 2026 (API tables from the live route registry, pages from the `frontend/app` tree), then annotated. Counts are exact at the time of writing.
 

@@ -56,7 +56,7 @@ function OrgInner() {
 function Profile({ org, canEdit }: { org: any; canEdit: boolean }) {
   const toast = useToast(); const qc = useQueryClient();
   const b = (org.branding ?? {}) as Record<string, string>;
-  const [f, setF] = useState({ name: org.name, timezone: org.timezone ?? 'UTC', locale: org.locale ?? 'en', currency: org.currency ?? 'USD', displayName: b.displayName ?? '', website: b.website ?? '', logoUrl: b.logoUrl ?? '', primaryColor: b.primaryColor ?? '#d134a0' });
+  const [f, setF] = useState({ name: org.name, timezone: org.timezone ?? 'UTC', locale: org.locale ?? 'en', currency: org.currency ?? 'USD', displayName: b.displayName ?? '', website: b.website ?? '', logoUrl: b.logoUrl ?? '', primaryColor: b.primaryColor ?? '#4F26FC' });
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
@@ -216,9 +216,9 @@ function AccessLog({ orgId }: { orgId: string }) {
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorState error={q.error} />;
   return (
-    <Card title="When EMN support looked at your data">
-      <p className="mb-3 text-sm text-slate-600">EMN staff can only open your workspaces read-only, for a limited time, with a written reason. Every page they open is recorded.</p>
-      {q.data!.length === 0 ? <p className="text-sm text-slate-500">EMN support has never accessed this organization.</p> : (
+    <Card title="When Outvexa support looked at your data">
+      <p className="mb-3 text-sm text-slate-600">Outvexa staff can only open your workspaces read-only, for a limited time, with a written reason. Every page they open is recorded.</p>
+      {q.data!.length === 0 ? <p className="text-sm text-slate-500">Outvexa support has never accessed this organization.</p> : (
         <Table head={['Started', 'Staff member', 'Reason', 'Pages viewed', 'Status']}>
           {q.data!.map((g) => <tr key={g.id}><td className="td text-xs">{fmtDate(g.createdAt)}</td><td className="td">{g.staffName}</td><td className="td text-sm">{g.reason}</td><td className="td tnum">{g.pagesViewed}</td><td className="td">{g.active ? <Badge color="red">active until {new Date(g.expiresAt).toLocaleTimeString()}</Badge> : <Badge>{g.revokedAt ? 'ended early' : 'expired'}</Badge>}</td></tr>)}
         </Table>

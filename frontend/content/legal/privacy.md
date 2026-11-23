@@ -5,7 +5,7 @@ updated: 2026-11-21
 > [!warning]
 > **Draft for legal review.** This template must be reviewed by a qualified lawyer, and completed with the company's registered details, before commercial launch. Remove this notice once approved.
 
-This policy explains how Elite Media Networks handles personal data in EMN Outreach OS.
+This policy explains how Elite Media Networks handles personal data in Outvexa.
 
 ## Two kinds of data
 
