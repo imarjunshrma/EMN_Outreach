@@ -36,7 +36,8 @@
     "server:restart": "bash scripts/server.sh restart",
     "server:status": "bash scripts/server.sh status",
     "server:logs": "bash scripts/server.sh logs",
-    "server:deploy": "bash scripts/server.sh deploy"
+    "server:deploy": "bash scripts/server.sh deploy",
+    "server:nginx": "bash scripts/server.sh nginx"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",
