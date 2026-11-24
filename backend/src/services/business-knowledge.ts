@@ -54,7 +54,9 @@ export async function createService(workspaceId: string, input: z.infer<typeof S
   if (duplicate) throw new AppError('CONFLICT', 'A service with this name already exists in the workspace', 409);
   const service = await db().businessService.create({ data: {
     workspaceId, name, slug, createdById: actor.userId ?? null,
-    versions: { create: { workspaceId, version: 1, status: 'DRAFT', ...data, changeNote: changeNote ?? null, createdById: actor.userId ?? null } },
+    // The nested relation supplies both serviceId and workspaceId from its parent.
+    // Passing workspaceId here is rejected by Prisma's nested create input.
+    versions: { create: { version: 1, status: 'DRAFT', ...data, changeNote: changeNote ?? null, createdById: actor.userId ?? null } },
   }, include: { versions: true } });
   await audit(workspaceId, actor, 'business_service.created', { type: 'business_service', id: service.id }, { version: 1 });
   return service;
