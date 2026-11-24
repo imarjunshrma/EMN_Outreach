@@ -393,6 +393,19 @@ export async function purgeTenant(organizationId: string) {
   }
   await db().$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('emn.allow_audit_delete', 'on', true)`;
+    const snapshotCount = await tx.sequenceVersion.count({ where: { workspaceId: { in: wss.map((w) => w.id) } } });
+    if (snapshotCount > 0) {
+      await tx.platformAuditEvent.create({ data: {
+        actorUserId: null,
+        action: 'tenant.sequence_versions.purged',
+        organizationId,
+        targetType: 'organization',
+        targetId: organizationId,
+        reason: 'Tenant data erasure',
+        metadata: { sequenceVersionCount: snapshotCount, workspaceCount: wss.length, workspaceIds: wss.map((w) => w.id) },
+      } });
+      await tx.$executeRaw`SELECT set_config('emn.allow_sequence_version_purge', 'on', true)`;
+    }
     await tx.workspace.deleteMany({ where: { organizationId } }); // cascades every workspace-owned record
     await tx.organizationMember.deleteMany({ where: { organizationId } });
     await tx.usageEvent.deleteMany({ where: { organizationId } });

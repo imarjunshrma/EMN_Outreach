@@ -96,6 +96,26 @@ enum AiExecutionStatus {
   BLOCKED
 }
 
+enum BusinessServiceVersionStatus {
+  DRAFT
+  APPROVED
+  SUPERSEDED
+  REVOKED
+  EXPIRED
+  REJECTED
+  ARCHIVED
+}
+
+enum BusinessProofStatus {
+  SUBMITTED
+  REVIEWED
+  APPROVED_FOR_USE
+  REJECTED
+  REVOKED
+  UNVERIFIED
+  VERIFIED
+}
+
 enum LeadSourceType {
   CSV_IMPORT
   MANUAL
@@ -412,17 +432,17 @@ model User {
 }
 
 model Session {
-  id                String    @id @default(uuid()) @db.Uuid
-  tokenHash         String    @unique
-  csrfToken         String
-  userId            String    @db.Uuid
-  activeWorkspaceId String?   @db.Uuid
-  ipAddress         String?
-  userAgent         String?
-  expiresAt         DateTime  @db.Timestamptz(3)
-  revokedAt         DateTime? @db.Timestamptz(3)
-  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
-  lastSeenAt        DateTime  @default(now()) @db.Timestamptz(3)
+  id                  String    @id @default(uuid()) @db.Uuid
+  tokenHash           String    @unique
+  csrfToken           String
+  userId              String    @db.Uuid
+  activeWorkspaceId   String?   @db.Uuid
+  ipAddress           String?
+  userAgent           String?
+  expiresAt           DateTime  @db.Timestamptz(3)
+  revokedAt           DateTime? @db.Timestamptz(3)
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3)
+  lastSeenAt          DateTime  @default(now()) @db.Timestamptz(3)
   // "Log in as": set when a super admin opened this session on the user's behalf (time-limited, audited, never extended).
   impersonatorId      String?   @db.Uuid
   impersonationReason String?
@@ -537,6 +557,12 @@ model Workspace {
   outreachExamples            OutreachExample[]
   outreachFeedback            OutreachFeedback[]
   aiLearningSuggestions       AiLearningSuggestion[]
+  businessServices            BusinessService[]
+  businessServiceVersions     BusinessServiceVersion[]
+  businessProof               BusinessProof[]
+  campaignServiceSelections   CampaignServiceSelection[]
+  businessServiceEvents       BusinessServiceLifecycleEvent[]
+  businessProofReviews        BusinessProofReview[]
 
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   aiWorkflowRuns AiWorkflowRun[]
@@ -737,17 +763,17 @@ model AiProvider {
 }
 
 model AiModelRoute {
-  id               String          @id @default(uuid()) @db.Uuid
-  workspaceId      String          @db.Uuid
-  task             AiTask
-  provider         AiProviderType
-  model            String
-  useWorkspaceDefault Boolean       @default(false)
-  fallbackProvider AiProviderType?
-  fallbackModel    String?
-  temperature      Float?
-  maxOutputTokens  Int             @default(1500)
-  monthlyBudgetUsd Decimal?        @db.Decimal(10, 2)
+  id                  String          @id @default(uuid()) @db.Uuid
+  workspaceId         String          @db.Uuid
+  task                AiTask
+  provider            AiProviderType
+  model               String
+  useWorkspaceDefault Boolean         @default(false)
+  fallbackProvider    AiProviderType?
+  fallbackModel       String?
+  temperature         Float?
+  maxOutputTokens     Int             @default(1500)
+  monthlyBudgetUsd    Decimal?        @db.Decimal(10, 2)
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -816,11 +842,14 @@ model AiExecution {
   campaignId       String? @db.Uuid
   leadId           String? @db.Uuid
   profileVersionId String? @db.Uuid
+  campaignSnapshotId String? @db.Uuid
+  campaignSnapshot SequenceVersion? @relation(fields: [workspaceId, campaignSnapshotId], references: [workspaceId, id], onDelete: Restrict)
 
   @@index([workspaceId, createdAt])
   @@index([workspaceId, task, createdAt])
   @@index([entityType, entityId])
   @@index([workspaceId, campaignId, leadId])
+  @@index([campaignSnapshotId])
 }
 
 // Third-party provider credentials: apollo, millionverifier, brave, serper, smartlead, booking
@@ -1030,6 +1059,156 @@ model EmailVerificationBatch {
 
   @@index([workspaceId, createdAt])
   @@index([workspaceId, status])
+}
+
+/// Stable service identity. Business details and approvals live in immutable versions.
+model BusinessService {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  name        String
+  slug        String
+  isArchived  Boolean  @default(false)
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  versions  BusinessServiceVersion[]
+
+  @@unique([workspaceId, id])
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, isArchived])
+}
+
+/// Immutable service definition and approval. Only APPROVED versions may be selected for a campaign.
+model BusinessServiceVersion {
+  id                     String    @id @default(uuid()) @db.Uuid
+  workspaceId            String    @db.Uuid
+  serviceId              String    @db.Uuid
+  version                Int
+  status                 BusinessServiceVersionStatus @default(DRAFT)
+  description            String
+  targetIndustries       String[]  @default([])
+  excludedIndustries     String[]  @default([])
+  targetGeographies      String[]  @default([])
+  excludedGeographies    String[]  @default([])
+  minEmployeeCount       Int?
+  maxEmployeeCount       Int?
+  targetCustomerProfiles String[]  @default([])
+  customerProblems       String[]  @default([])
+  desiredOutcomes        String[]  @default([])
+  deliverables           String[]  @default([])
+  eligibilityCriteria    String[]  @default([])
+  exclusions             String[]  @default([])
+  exclusionRules         Json      @default("[]")
+  commercialBoundaries   String[]  @default([])
+  createdById            String?   @db.Uuid
+  approvedById           String?   @db.Uuid
+  approvedAt             DateTime? @db.Timestamptz(3)
+  lifecycleChangedById   String?   @db.Uuid
+  lifecycleChangedAt     DateTime? @db.Timestamptz(3)
+  lifecycleReason        String?
+  expiresAt              DateTime? @db.Timestamptz(3)
+  changeNote             String?
+  createdAt              DateTime  @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  service   BusinessService            @relation(fields: [workspaceId, serviceId], references: [workspaceId, id], onDelete: Cascade)
+  proof     BusinessProof[]
+  campaigns CampaignServiceSelection[]
+  lifecycleEvents BusinessServiceLifecycleEvent[]
+
+  @@unique([workspaceId, id])
+  @@unique([serviceId, version])
+  @@index([workspaceId, status, serviceId])
+}
+
+model BusinessServiceLifecycleEvent {
+  id               String                       @id @default(uuid()) @db.Uuid
+  workspaceId      String                       @db.Uuid
+  serviceVersionId String                       @db.Uuid
+  fromStatus       BusinessServiceVersionStatus?
+  toStatus         BusinessServiceVersionStatus
+  actorUserId      String?                      @db.Uuid
+  reason           String
+  createdAt        DateTime                     @default(now()) @db.Timestamptz(3)
+
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  serviceVersion BusinessServiceVersion @relation(fields: [workspaceId, serviceVersionId], references: [workspaceId, id], onDelete: Cascade)
+
+  @@index([workspaceId, serviceVersionId, createdAt])
+}
+
+/// EMN proof is distinct from prospect research evidence. Unverified proof is never campaign context.
+model BusinessProof {
+  id                  String    @id @default(uuid()) @db.Uuid
+  workspaceId         String    @db.Uuid
+  serviceVersionId    String    @db.Uuid
+  knowledgeDocumentId String?   @db.Uuid
+  claim               String
+  description         String?
+  sourceUrl           String?
+  sourceTitle         String?
+  sourceType          String    @default("USER_PROVIDED") // URL | KNOWLEDGE_DOCUMENT | USER_PROVIDED
+  verificationMethod  String?   // MANAGER_ATTESTATION | SOURCE_REVIEW | DOCUMENT_REVIEW
+  status              BusinessProofStatus @default(SUBMITTED)
+  permittedUse        Boolean   @default(false)
+  verifiedById        String?   @db.Uuid
+  verifiedAt          DateTime? @db.Timestamptz(3)
+  reviewDueAt         DateTime? @db.Timestamptz(3)
+  revokedById         String?   @db.Uuid
+  revokedAt           DateTime? @db.Timestamptz(3)
+  reviewNote          String?
+  createdById         String?   @db.Uuid
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime  @updatedAt @db.Timestamptz(3)
+
+  workspace         Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  serviceVersion    BusinessServiceVersion @relation(fields: [workspaceId, serviceVersionId], references: [workspaceId, id], onDelete: Cascade)
+  knowledgeDocument KnowledgeDocument?     @relation(fields: [workspaceId, knowledgeDocumentId], references: [workspaceId, id], onDelete: Restrict)
+  reviews           BusinessProofReview[]
+
+  @@index([workspaceId, status, permittedUse])
+  @@index([serviceVersionId])
+  @@unique([workspaceId, id])
+}
+
+model BusinessProofReview {
+  id                 String              @id @default(uuid()) @db.Uuid
+  workspaceId        String              @db.Uuid
+  proofId            String              @db.Uuid
+  fromStatus         BusinessProofStatus?
+  toStatus           BusinessProofStatus
+  verificationMethod String?
+  reviewerId         String?             @db.Uuid
+  permittedUse       Boolean             @default(false)
+  reviewDueAt        DateTime?           @db.Timestamptz(3)
+  note               String?
+  proofSnapshot      Json
+  createdAt          DateTime            @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  proof     BusinessProof @relation(fields: [workspaceId, proofId], references: [workspaceId, id], onDelete: Cascade)
+
+  @@index([workspaceId, proofId, createdAt])
+}
+
+/// Explicit campaign-to-approved-service selection; versions stay pinned after approval.
+model CampaignServiceSelection {
+  id               String   @id @default(uuid()) @db.Uuid
+  workspaceId      String   @db.Uuid
+  campaignId       String   @db.Uuid
+  serviceVersionId String   @db.Uuid
+  isPreferred      Boolean  @default(false)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign       Campaign               @relation(fields: [workspaceId, campaignId], references: [workspaceId, id], onDelete: Cascade)
+  serviceVersion BusinessServiceVersion @relation(fields: [workspaceId, serviceVersionId], references: [workspaceId, id], onDelete: Restrict)
+
+  @@unique([workspaceId, id])
+  @@unique([campaignId, serviceVersionId])
+  @@index([workspaceId, campaignId])
 }
 
 model DisposableEmailDomain {
@@ -1333,10 +1512,12 @@ model Campaign {
   personalizationBatches PersonalizationBatch[]
   sequenceVersions       SequenceVersion[]
 
-  folder         String?
-  tags           String[]
-  aiWorkflowRuns AiWorkflowRun[]
+  folder            String?
+  tags              String[]
+  aiWorkflowRuns    AiWorkflowRun[]
+  serviceSelections CampaignServiceSelection[]
 
+  @@unique([workspaceId, id])
   @@index([workspaceId, status])
 }
 
@@ -1934,8 +2115,10 @@ model KnowledgeDocument {
   createdAt   DateTime @default(now()) @db.Timestamptz(3)
   updatedAt   DateTime @updatedAt @db.Timestamptz(3)
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace     Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  businessProof BusinessProof[]
 
+  @@unique([workspaceId, id])
   @@index([workspaceId, isActive])
 }
 
@@ -1981,40 +2164,43 @@ model PromptProfileVersion {
 /// Per-lead, per-step personalized content for a campaign. One current row per (campaign, lead, step);
 /// every generation or manual edit is also appended to PersonalizationRevision.
 model LeadPersonalization {
-  id                  String                @id @default(uuid()) @db.Uuid
-  workspaceId         String                @db.Uuid
-  campaignId          String                @db.Uuid
-  leadId              String                @db.Uuid
-  stepId              String                @db.Uuid
-  variantId           String?               @db.Uuid
-  status              PersonalizationStatus @default(QUEUED)
-  subject             String?
-  openingLine         String?
-  body                String?
-  cta                 String?
-  subjectAlternatives String[]
-  usedClaimIds        String[]
-  researchReportIds   String[]
-  quality             Json?
-  qualityPassed       Boolean               @default(false)
-  score               Int?
-  scoreExplanation    Json?
-  costUsd             Decimal               @default(0) @db.Decimal(12, 6)
-  costIsEstimate      Boolean               @default(true)
-  manuallyEdited      Boolean               @default(false)
-  editedById          String?               @db.Uuid
-  editedAt            DateTime?             @db.Timestamptz(3)
-  approvedById        String?               @db.Uuid
-  approvedAt          DateTime?             @db.Timestamptz(3)
-  approvedContentHash String?
-  configHash          String?
-  profileVersionId    String?               @db.Uuid
-  revision            Int                   @default(0)
-  batchId             String?               @db.Uuid
-  error               String?
-  generatedAt         DateTime?             @db.Timestamptz(3)
-  createdAt           DateTime              @default(now()) @db.Timestamptz(3)
-  updatedAt           DateTime              @updatedAt @db.Timestamptz(3)
+  id                        String                @id @default(uuid()) @db.Uuid
+  workspaceId               String                @db.Uuid
+  campaignId                String                @db.Uuid
+  leadId                    String                @db.Uuid
+  stepId                    String                @db.Uuid
+  variantId                 String?               @db.Uuid
+  status                    PersonalizationStatus @default(QUEUED)
+  subject                   String?
+  openingLine               String?
+  body                      String?
+  cta                       String?
+  subjectAlternatives       String[]
+  usedClaimIds              String[]
+  researchReportIds         String[]
+  retrievedKnowledgeIds     String[]              @default([])
+  retrievedExampleIds       String[]              @default([])
+  selectedServiceVersionIds String[]              @default([])
+  quality                   Json?
+  qualityPassed             Boolean               @default(false)
+  score                     Int?
+  scoreExplanation          Json?
+  costUsd                   Decimal               @default(0) @db.Decimal(12, 6)
+  costIsEstimate            Boolean               @default(true)
+  manuallyEdited            Boolean               @default(false)
+  editedById                String?               @db.Uuid
+  editedAt                  DateTime?             @db.Timestamptz(3)
+  approvedById              String?               @db.Uuid
+  approvedAt                DateTime?             @db.Timestamptz(3)
+  approvedContentHash       String?
+  configHash                String?
+  profileVersionId          String?               @db.Uuid
+  revision                  Int                   @default(0)
+  batchId                   String?               @db.Uuid
+  error                     String?
+  generatedAt               DateTime?             @db.Timestamptz(3)
+  createdAt                 DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt                 DateTime              @updatedAt @db.Timestamptz(3)
 
   workspace Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaign  Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -2030,22 +2216,25 @@ model LeadPersonalization {
 }
 
 model PersonalizationRevision {
-  id                String         @id @default(uuid()) @db.Uuid
-  workspaceId       String         @db.Uuid
-  personalizationId String         @db.Uuid
-  revision          Int
-  source            RevisionSource
-  subject           String?
-  openingLine       String?
-  body              String?
-  cta               String?
-  usedClaimIds      String[]
-  quality           Json?
-  score             Int?
-  costUsd           Decimal        @default(0) @db.Decimal(12, 6)
-  executionIds      String[]
-  createdById       String?        @db.Uuid
-  createdAt         DateTime       @default(now()) @db.Timestamptz(3)
+  id                        String         @id @default(uuid()) @db.Uuid
+  workspaceId               String         @db.Uuid
+  personalizationId         String         @db.Uuid
+  revision                  Int
+  source                    RevisionSource
+  subject                   String?
+  openingLine               String?
+  body                      String?
+  cta                       String?
+  usedClaimIds              String[]
+  retrievedKnowledgeIds     String[]       @default([])
+  retrievedExampleIds       String[]       @default([])
+  selectedServiceVersionIds String[]       @default([])
+  quality                   Json?
+  score                     Int?
+  costUsd                   Decimal        @default(0) @db.Decimal(12, 6)
+  executionIds              String[]
+  createdById               String?        @db.Uuid
+  createdAt                 DateTime       @default(now()) @db.Timestamptz(3)
 
   workspace       Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
@@ -2075,22 +2264,28 @@ model OutreachRule {
 
 /// Text examples are workspace-scoped and retrieved selectively; never ingested as instructions.
 model OutreachExample {
-  id               String   @id @default(uuid()) @db.Uuid
-  workspaceId      String   @db.Uuid
+  id               String    @id @default(uuid()) @db.Uuid
+  workspaceId      String    @db.Uuid
   name             String
   content          String
   correctedContent String?
   category         String
   polarity         String
   explanation      String?
-  tags             String[] @default([])
-  isActive         Boolean  @default(true)
-  createdById      String?  @db.Uuid
-  createdAt        DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+  tags             String[]  @default([])
+  isActive         Boolean   @default(true)
+  isHumanApproved  Boolean   @default(false)
+  reviewedById     String?   @db.Uuid
+  reviewedAt       DateTime? @db.Timestamptz(3)
+  sourceFeedbackId String?   @unique @db.Uuid
+  createdById      String?   @db.Uuid
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace      Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceFeedback OutreachFeedback? @relation(fields: [workspaceId, sourceFeedbackId], references: [workspaceId, id], onDelete: Restrict)
 
+  @@unique([workspaceId, id])
   @@index([workspaceId, isActive, category, polarity])
 }
 
@@ -2104,13 +2299,16 @@ model OutreachFeedback {
   finalContent      Json
   changedFields     String[] @default([])
   explanation       String?
+  reasonCode        String?
   scope             String   @default("CAMPAIGN")
   createdById       String?  @db.Uuid
   createdAt         DateTime @default(now()) @db.Timestamptz(3)
 
   workspace       Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   personalization LeadPersonalization @relation(fields: [personalizationId], references: [id], onDelete: Cascade)
+  curatedExamples OutreachExample[]
 
+  @@unique([workspaceId, id])
   @@index([workspaceId, feedbackType, createdAt])
   @@index([workspaceId, personalizationId])
 }
@@ -2174,8 +2372,10 @@ model SequenceVersion {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  aiExecutions AiExecution[]
 
   @@unique([campaignId, version])
+  @@unique([workspaceId, id])
 }
 
 // ===================================================================== v1.2 security, AI reply, copilot, workflows, billing, CRM

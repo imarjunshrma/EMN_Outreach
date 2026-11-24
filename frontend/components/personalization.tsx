@@ -13,6 +13,7 @@ const lines = (s: string) => s.split('\n').map((x) => x.trim()).filter(Boolean);
 const usd = (n: number | string | null | undefined) => `$${Number(n ?? 0).toFixed(4)}`;
 const INHERIT = { value: '', label: '— inherit —' };
 const o = (xs: string[]) => xs.map((x) => ({ value: x, label: x.replace(/_/g, ' ') }));
+const REJECTION_REASONS = ['WRONG_PROSPECT', 'WRONG_IDENTITY', 'INCORRECT_RESEARCH', 'UNSUPPORTED_CLAIM', 'WRONG_SERVICE', 'GENERIC_OPENING', 'IRRELEVANT_OPPORTUNITY', 'POOR_WRITING', 'WRONG_TONE', 'WEAK_CTA', 'OTHER'];
 
 export function CheckList({ quality }: { quality: any }) {
   if (!quality?.checks) return null;
@@ -69,7 +70,9 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
   const ws = useWsQuery<{ mode: string; options: Array<{ mode: string; label: string; available: boolean }> }>('/ai/source');
   const profiles = useWsQuery<any[]>('/ai-studio/profiles');
   const icps = useWsQuery<any>('/icps');
+  const serviceCatalog = useWsQuery<any[]>('/ai-studio/services');
   const [f, setF] = useState<any>(null);
+  const [services, setServices] = useState<Array<{ serviceVersionId: string; isPreferred: boolean }>>([]);
   useEffect(() => {
     const o = campaign.aiOverrides ?? {};
     setF({
@@ -77,9 +80,12 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
       writing: { tone: '', ctaStyle: '', formality: '', personalizationIntensity: '', minWords: '', maxWords: '', ...(o.writing ?? {}) },
       avoid: (o.writing?.avoidPhrases ?? []).join('\n'), forbidden: (o.writing?.forbiddenClaims ?? []).join('\n'),
       audienceContext: o.audienceContext ?? '', offerContext: o.offerContext ?? '', customInstructions: o.customInstructions ?? '',
+      objective: o.objective ?? '', targetGeography: (o.targetGeography ?? []).join('\n'), targetIndustries: (o.targetIndustries ?? []).join('\n'), targetDecisionMaker: o.targetDecisionMaker ?? '', desiredProspectOutcome: o.desiredProspectOutcome ?? '', outreachAngle: o.outreachAngle ?? '', buyingSignals: (o.buyingSignals ?? []).join('\n'), exclusions: (o.exclusions ?? []).join('\n'), maxEvidenceAgeDays: o.research?.maxEvidenceAgeDays ?? '',
       aiSource: o.aiSource ?? 'workspace',
+      serviceSelections: campaign.serviceSelections ?? [],
       personTopics: (o.research?.personTopics ?? []).join('\n'), companyTopics: (o.research?.companyTopics ?? []).join('\n'), onMissing: o.research?.onMissing ?? '', researchNotes: o.research?.customInstructions ?? '',
     });
+    setServices((campaign.serviceSelections ?? []).map((s: any) => ({ serviceVersionId: s.serviceVersionId, isPreferred: !!s.isPreferred })));
   }, [campaign]);
   const save = useWsMutation(() => {
     const w: any = {};
@@ -91,13 +97,23 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
     if (lines(f.personTopics).length) r.personTopics = lines(f.personTopics);
     if (lines(f.companyTopics).length) r.companyTopics = lines(f.companyTopics);
     if (f.onMissing) r.onMissing = f.onMissing;
+    if (f.maxEvidenceAgeDays !== '' && f.maxEvidenceAgeDays !== undefined) r.maxEvidenceAgeDays = Number(f.maxEvidenceAgeDays);
     if (f.researchNotes.trim()) r.customInstructions = f.researchNotes;
-    return { path: `/campaigns/${campaign.id}/ai`, method: 'PUT', body: { aiProfileId: f.aiProfileId || null, icpId: f.icpId || null, maxAiCostPerLeadUsd: f.maxAiCostPerLeadUsd === '' ? null : Number(f.maxAiCostPerLeadUsd), aiOverrides: { writing: w, research: r, audienceContext: f.audienceContext, offerContext: f.offerContext, customInstructions: f.customInstructions, aiSource: f.aiSource } } };
+    return { path: `/campaigns/${campaign.id}/ai`, method: 'PUT', body: { aiProfileId: f.aiProfileId || null, icpId: f.icpId || null, maxAiCostPerLeadUsd: f.maxAiCostPerLeadUsd === '' ? null : Number(f.maxAiCostPerLeadUsd), aiOverrides: { writing: w, research: r, audienceContext: f.audienceContext, offerContext: f.offerContext, objective: f.objective, targetGeography: lines(f.targetGeography), targetIndustries: lines(f.targetIndustries), targetDecisionMaker: f.targetDecisionMaker, desiredProspectOutcome: f.desiredProspectOutcome, outreachAngle: f.outreachAngle, buyingSignals: lines(f.buyingSignals), exclusions: lines(f.exclusions), customInstructions: f.customInstructions, aiSource: f.aiSource } } };
   }, { success: 'AI settings saved (campaign needs re-approval)' });
+  const saveServices = useWsMutation(() => ({ path: `/campaigns/${campaign.id}/services`, method: 'PUT', body: { selections: services } }), { success: 'Approved service selection saved (campaign needs re-approval)' });
   if (!f) return null;
   const set = (k: string, v: any) => setF({ ...f, [k]: v });
   const setW = (k: string, v: any) => setF({ ...f, writing: { ...f.writing, [k]: v } });
   return (
+    <div className="space-y-4">
+    <Card title="Approved EMN services" actions={<Button loading={saveServices.isPending} onClick={() => saveServices.mutate()}>Save services</Button>}>
+      <Notice>Select the approved services this campaign is allowed to offer. The AI is held if it cannot support an exact selected service with prospect evidence. A preferred service is used as the primary match.</Notice>
+      <div className="mt-3 space-y-2">{(serviceCatalog.data ?? []).flatMap((svc: any) => (svc.versions ?? []).filter((v: any) => v.status === 'APPROVED').map((v: any) => {
+        const selected = services.some((x) => x.serviceVersionId === v.id);
+        return <div key={v.id} className="flex flex-wrap items-center justify-between gap-3 rounded border border-slate-200 p-2"><Checkbox label={`${svc.name} · v${v.version}`} checked={selected} onChange={(checked) => setServices((cur) => checked ? [...cur, { serviceVersionId: v.id, isPreferred: cur.length === 0 }] : cur.filter((x) => x.serviceVersionId !== v.id))} /><span className="text-xs text-slate-500">{v.description}</span>{selected && <Select aria-label={`Preferred service ${svc.name}`} value={services.find((x) => x.serviceVersionId === v.id)?.isPreferred ? v.id : ''} onChange={(e) => setServices((cur) => cur.map((x) => ({ ...x, isPreferred: x.serviceVersionId === e.target.value })))} options={[{ value: '', label: 'Alternative' }, { value: v.id, label: 'Preferred' }]} />}</div>;
+      }))}{!(serviceCatalog.data ?? []).some((svc: any) => (svc.versions ?? []).some((v: any) => v.status === 'APPROVED')) && <p className="text-sm text-amber-700">No approved service versions yet. Add and approve them in AI Studio → Business knowledge.</p>}</div>
+    </Card>
     <Card title="Campaign AI profile & overrides" actions={<Button loading={save.isPending} onClick={() => save.mutate()}>Save AI settings</Button>}>
       <Notice>Order of precedence: <b>platform safety rules</b> (cannot be overridden) → AI Studio workspace defaults → prompt profile → <b>these campaign settings</b> → ICP instructions → step instructions → variant angle → per-prospect instructions. Blank fields inherit. Words to avoid and forbidden claims add to the workspace lists; they never remove from them.</Notice>
       <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -111,11 +127,20 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
         <Field label="Personalization intensity"><Select value={f.writing.personalizationIntensity} onChange={(e) => setW('personalizationIntensity', e.target.value)} options={[INHERIT, ...o(['light', 'medium', 'deep'])]} /></Field>
         <Field label="Min words"><Input type="number" value={f.writing.minWords} onChange={(e) => setW('minWords', e.target.value)} /></Field>
         <Field label="Max words"><Input type="number" value={f.writing.maxWords} onChange={(e) => setW('maxWords', e.target.value)} /></Field>
+        <Field label="Maximum evidence age (days)" hint="Evidence older than this is excluded"><Input type="number" min={1} max={3650} value={f.maxEvidenceAgeDays} onChange={(e) => set('maxEvidenceAgeDays', e.target.value)} /></Field>
         <Field label="Extra words to avoid (one per line)"><Textarea rows={3} value={f.avoid} onChange={(e) => set('avoid', e.target.value)} /></Field>
         <Field label="Extra claims AI must never make (one per line)"><Textarea rows={3} value={f.forbidden} onChange={(e) => set('forbidden', e.target.value)} /></Field>
         <Field label="If research is missing"><Select value={f.onMissing} onChange={(e) => set('onMissing', e.target.value)} options={[INHERIT, { value: 'hold_for_research', label: 'Hold until researched' }, { value: 'use_role_and_company_only', label: 'Simple honest email (role + company only)' }, { value: 'skip_lead', label: 'Skip the lead' }]} /></Field>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <Field label="Campaign objective"><Input value={f.objective} onChange={(e) => set('objective', e.target.value)} placeholder="Start conversations about an approved service" /></Field>
+        <Field label="Target decision-maker"><Input value={f.targetDecisionMaker} onChange={(e) => set('targetDecisionMaker', e.target.value)} placeholder="e.g. Founder or VP of Marketing" /></Field>
+        <Field label="Target geography" hint="One per line"><Textarea rows={2} value={f.targetGeography} onChange={(e) => set('targetGeography', e.target.value)} /></Field>
+        <Field label="Target industries" hint="One per line"><Textarea rows={2} value={f.targetIndustries} onChange={(e) => set('targetIndustries', e.target.value)} /></Field>
+        <Field label="Desired prospect outcome"><Textarea rows={2} value={f.desiredProspectOutcome} onChange={(e) => set('desiredProspectOutcome', e.target.value)} /></Field>
+        <Field label="Outreach angle"><Textarea rows={2} value={f.outreachAngle} onChange={(e) => set('outreachAngle', e.target.value)} /></Field>
+        <Field label="Buying signals" hint="One per line"><Textarea rows={2} value={f.buyingSignals} onChange={(e) => set('buyingSignals', e.target.value)} /></Field>
+        <Field label="Exclusions" hint="One per line"><Textarea rows={2} value={f.exclusions} onChange={(e) => set('exclusions', e.target.value)} /></Field>
         <Field label="Target audience context"><Textarea rows={3} value={f.audienceContext} onChange={(e) => set('audienceContext', e.target.value)} placeholder="e.g. Consulting founders with 2–20 staff selling B2B advisory services" /></Field>
         <Field label="Offer context"><Textarea rows={3} value={f.offerContext} onChange={(e) => set('offerContext', e.target.value)} placeholder="What this campaign offers" /></Field>
         <Field label="Extra person research topics (one per line)"><Textarea rows={2} value={f.personTopics} onChange={(e) => set('personTopics', e.target.value)} /></Field>
@@ -124,6 +149,7 @@ function CampaignAiSettings({ campaign }: { campaign: any }) {
       <Field label="Campaign instructions for the AI" hint="Overrides workspace instructions where they conflict"><Textarea rows={6} value={f.customInstructions} onChange={(e) => set('customInstructions', e.target.value)} placeholder="This campaign targets consulting founders. Understand their services, audience, public content and business model. Identify opportunities to generate qualified consulting enquiries." /></Field>
       <Field label="Campaign research notes"><Textarea rows={2} value={f.researchNotes} onChange={(e) => set('researchNotes', e.target.value)} /></Field>
     </Card>
+    </div>
   );
 }
 
@@ -230,10 +256,13 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
   const [note, setNote] = useState('');
   const [compare, setCompare] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
+  const [rejectReasonCode, setRejectReasonCode] = useState('OTHER');
+  const [rejectReason, setRejectReason] = useState('');
   const gen = useWsMutation<{ force: boolean }>((b) => ({ path: `/campaigns/${campaignId}/personalizations/generate`, body: { leadId, stepId: step.id, force: b.force, note: note || undefined } }), { success: (r: any) => (r.preserved ? `Preserved: ${r.preserved}` : `Result: ${r.status}`) });
   const save = useWsMutation(() => ({ path: `/personalizations/${row.id}`, method: 'PATCH', body: { ...edit, rerunFactCheck: true } }), { success: (r: any) => `Saved (revision ${r.revision}, ${r.status})`, onSuccess: () => setEdit(null) });
   const approve = useWsMutation(() => ({ path: '/personalizations/approve', body: { ids: [row.id] } }), { success: 'Approved' });
-  const reject = useWsMutation(() => ({ path: `/personalizations/${row.id}/reject`, body: { reason: 'Rejected in review' } }), { success: 'Rejected' });
+  const reject = useWsMutation(() => ({ path: `/personalizations/${row.id}/reject`, body: { reason: rejectReason || rejectReasonCode.replaceAll('_', ' ').toLowerCase(), reasonCode: rejectReasonCode } }), { success: 'Rejected' });
+  const promote = useWsMutation(() => ({ path: `/personalizations/${row.id}/promote-example`, method: 'POST', body: {} }), { success: 'Redacted approved example added to workspace retrieval' });
   const detail = useWsQuery<any>(compare && row ? `/personalizations/${row.id}` : null);
   const prompt = useWsQuery<any>(showPrompt ? `/campaigns/${campaignId}/personalizations/prompt-preview${qs({ leadId, stepId: step.id })}` : null);
   return (
@@ -268,6 +297,8 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
       <div className="mt-3 flex flex-wrap items-end gap-2">
         {row?.body && !edit && <Button variant="secondary" onClick={() => setEdit({ subject: row.subject, openingLine: row.openingLine, body: row.body, feedbackScope: 'CAMPAIGN', feedbackNote: '' })}>Edit</Button>}
         {row && ['GENERATED', 'BLOCKED'].includes(row.status) && <Button disabled={!row.qualityPassed} loading={approve.isPending} onClick={() => approve.mutate()} title={row.qualityPassed ? '' : 'Fix failing checks first'}>Approve</Button>}
+        {row?.status === 'APPROVED' && <Button variant="secondary" loading={promote.isPending} onClick={() => promote.mutate()}>Add as approved example</Button>}
+        {row && ['GENERATED', 'BLOCKED', 'APPROVED'].includes(row.status) && <><Select aria-label="Rejection reason" value={rejectReasonCode} onChange={(e) => setRejectReasonCode(e.target.value)} options={REJECTION_REASONS.map((x) => ({ value: x, label: x.replaceAll('_', ' ').toLowerCase() }))} /><Input className="w-56" placeholder="Optional rejection details" value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={500} /></>}
         {row && ['GENERATED', 'BLOCKED', 'APPROVED'].includes(row.status) && <Button variant="ghost" onClick={() => reject.mutate()}>Reject</Button>}
         <Input className="w-72" placeholder="Optional note for regeneration" value={note} onChange={(e) => setNote(e.target.value)} />
         {(!row || !['APPROVED'].includes(row.status) && !row.manuallyEdited)
@@ -354,7 +385,7 @@ export function VersionsPanel({ campaign }: { campaign: any }) {
         {(d) => <Table head={['Version', 'Approved', 'Steps', 'AI config', '']}>{d.map((v: any) => (
           <tr key={v.id}>
             <td>v{v.version}</td><td>{fmtDate(v.createdAt)}</td><td>{v.snapshot.steps?.length ?? 0}</td>
-            <td className="text-xs">writing v{v.snapshot.ai?.writingVersion ?? 0} · research v{v.snapshot.ai?.researchVersion ?? 0} · knowledge v{v.snapshot.ai?.knowledgeVersion ?? 0}{v.snapshot.ai?.profileVersion ? ` · profile v${v.snapshot.ai.profileVersion}` : ''}</td>
+            <td className="text-xs">writing v{v.snapshot.ai?.writingVersion ?? 0} · research v{v.snapshot.ai?.researchVersion ?? 0} · knowledge v{v.snapshot.ai?.knowledgeVersion ?? 0}{v.snapshot.ai?.profileVersion ? ` · profile v${v.snapshot.ai.profileVersion}` : ''}{v.snapshot.aiConfigSnapshot?.executionSnapshotId ? <div className="mt-1">Snapshot {String(v.snapshot.aiConfigSnapshot.executionSnapshotId).slice(0, 8)} · quality v{v.snapshot.aiConfigSnapshot.qualityPolicyVersion ?? '—'} · prompts {Object.entries(v.snapshot.aiConfigSnapshot.taskExecution ?? {}).map(([task, cfg]: [string, any]) => `${task} v${cfg.promptVersion ?? '—'} (${cfg.candidates?.map((c: any) => `${c.provider}/${c.model}`).join('→') ?? 'no route'})`).join(', ')}</div> : null}</td>
             <td className="space-x-2"><Button variant="ghost" onClick={() => setOpen(v)}>View</Button>{campaign.status !== 'RUNNING' && <ConfirmButton variant="ghost" confirm={`Load v${v.version} into the editor? The campaign must be approved again.`} onConfirm={() => restore.mutate(v.version)}>Restore</ConfirmButton>}</td>
           </tr>
         ))}</Table>}

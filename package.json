@@ -25,6 +25,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
+    "eval:email-quality": "node --import tsx scripts/score-email-quality.ts",
     "openapi": "node --import tsx scripts/generate-openapi.ts",
     "create-admin": "node --import tsx scripts/create-admin.ts",
     "gen-keys": "node scripts/gen-keys.mjs",
@@ -40,7 +41,8 @@
     "server:deploy": "bash scripts/server.sh deploy",
     "server:nginx": "bash scripts/server.sh nginx",
     "server:create-admin": "bash scripts/server.sh create-admin",
-    "server:reset-password": "bash scripts/server.sh reset-password"
+    "server:reset-password": "bash scripts/server.sh reset-password",
+    "eval:email-quality:generate": "node --import tsx scripts/generate-email-quality.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",

@@ -101,6 +101,7 @@ export const ResearchOverridesSchema = z.object({
   companyTopics: list(30).optional(),
   signals: list(30).optional(),
   minClaims: z.number().int().min(0).max(10).optional(),
+  maxEvidenceAgeDays: z.number().int().min(1).max(3650).nullable().optional(),
   mustNotInfer: list(50).optional(),
   onMissing: z.enum(['hold_for_research', 'use_role_and_company_only', 'skip_lead']).optional(),
   customInstructions: str(10000).optional(),
@@ -111,6 +112,14 @@ export const CampaignAiOverridesSchema = z.object({
   research: ResearchOverridesSchema.default({}),
   audienceContext: str(5000).default(''),
   offerContext: str(5000).default(''),
+  objective: str(1000).optional(),
+  targetGeography: list(30).optional(),
+  targetIndustries: list(30).optional(),
+  targetDecisionMaker: str(1000).optional(),
+  desiredProspectOutcome: str(2000).optional(),
+  outreachAngle: str(2000).optional(),
+  buyingSignals: list(30).optional(),
+  exclusions: list(50).optional(),
   customInstructions: str(20000).default(''),
   /** Where this campaign's AI runs: the workspace AI source, API keys, or a personal Claude / Codex subscription. */
   aiSource: z.enum(['workspace', 'api', 'claude_subscription', 'codex_subscription']).default('workspace'),
@@ -134,6 +143,7 @@ export interface ResolvedConfig {
   blocks: InstructionBlock[];
   audienceContext: string;
   offerContext: string;
+  campaignContext: string;
 }
 
 const UNION_WRITING = ['avoidPhrases', 'forbiddenClaims', 'goodExamples', 'badExamples'] as const;
@@ -178,6 +188,7 @@ export function resolveConfig(input: ResolveInput): ResolvedConfig {
     if (ro.signals?.length) research.signals = uniq([...research.signals, ...ro.signals]);
     if (ro.mustNotInfer?.length) research.mustNotInfer = uniq([...research.mustNotInfer, ...ro.mustNotInfer]);
     if (ro.minClaims !== undefined) research.minClaims = ro.minClaims;
+    if (ro.maxEvidenceAgeDays !== undefined) research.maxEvidenceAgeDays = ro.maxEvidenceAgeDays;
     if (ro.onMissing) research.onMissing = ro.onMissing;
     if (ro.customInstructions?.trim()) research.customInstructions = [research.customInstructions, `Campaign: ${ro.customInstructions}`].filter(Boolean).join('\n');
   }
@@ -193,7 +204,17 @@ export function resolveConfig(input: ResolveInput): ResolvedConfig {
   push('step', `Sequence step ${input.step?.order ?? ''} instructions`, input.step?.aiInstructions);
   push('variant', `Variant ${input.variant?.label ?? ''} instructions`, input.variant?.aiInstructions);
 
-  return { writing, research, writingSources: sources, blocks, audienceContext: input.campaign?.audienceContext ?? '', offerContext: input.campaign?.offerContext ?? '' };
+  const campaignContext = [
+    input.campaign?.objective ? `Objective: ${input.campaign.objective}` : '',
+    input.campaign?.targetGeography?.length ? `Target geography: ${input.campaign.targetGeography.join(', ')}` : '',
+    input.campaign?.targetIndustries?.length ? `Target industries: ${input.campaign.targetIndustries.join(', ')}` : '',
+    input.campaign?.targetDecisionMaker ? `Target decision-maker: ${input.campaign.targetDecisionMaker}` : '',
+    input.campaign?.desiredProspectOutcome ? `Desired prospect outcome: ${input.campaign.desiredProspectOutcome}` : '',
+    input.campaign?.outreachAngle ? `Outreach angle: ${input.campaign.outreachAngle}` : '',
+    input.campaign?.buyingSignals?.length ? `Relevant buying signals: ${input.campaign.buyingSignals.join(', ')}` : '',
+    input.campaign?.exclusions?.length ? `Campaign exclusions: ${input.campaign.exclusions.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+  return { writing, research, writingSources: sources, blocks, audienceContext: input.campaign?.audienceContext ?? '', offerContext: input.campaign?.offerContext ?? '', campaignContext };
 }
 
 const LEVEL_ORDER: Level[] = ['workspace', 'profile', 'campaign', 'icp', 'step', 'variant', 'prospect'];
@@ -215,6 +236,7 @@ export function instructionText(r: ResolvedConfig): string {
   if (w.badExamples.length) lines.push('EXAMPLES OF UNACCEPTABLE WRITING (do not write like this):', ...w.badExamples.map((e, i) => `<bad_example n="${i + 1}">\n${e}\n</bad_example>`));
   if (r.audienceContext.trim()) lines.push(`TARGET AUDIENCE CONTEXT (campaign): ${r.audienceContext.trim()}`);
   if (r.offerContext.trim()) lines.push(`OFFER CONTEXT (campaign): ${r.offerContext.trim()}`);
+  if (r.campaignContext.trim()) lines.push(`STRUCTURED CAMPAIGN OBJECTIVE AND TARGETING:\n${r.campaignContext}`);
   if (r.blocks.length) {
     lines.push('CUSTOM INSTRUCTIONS, from general to specific. If two sections conflict, follow the LATER (more specific) one — except the HARD RULES, which always apply:');
     const sorted = [...r.blocks].sort((a, b) => LEVEL_ORDER.indexOf(a.level) - LEVEL_ORDER.indexOf(b.level));

@@ -73,10 +73,10 @@ export function Field({ label, hint, error, children }: { label: string; hint?: 
   );
 }
 
-export function Checkbox({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+export function Checkbox({ label, checked, onChange, hint, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string; disabled?: boolean }) {
   return (
-    <label className="flex cursor-pointer items-start gap-2.5 py-0.5 text-sm">
-      <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-brand-600" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    <label className={`flex items-start gap-2.5 py-0.5 text-sm ${disabled ? 'opacity-70' : 'cursor-pointer'}`}>
+      <input type="checkbox" disabled={disabled} className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-brand-600" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span>{label}{hint && <span className="block text-xs text-slate-500">{hint}</span>}</span>
     </label>
   );

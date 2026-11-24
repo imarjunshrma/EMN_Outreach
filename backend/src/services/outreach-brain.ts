@@ -16,6 +16,9 @@ export const ExampleInputSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(40)).max(30).default([]), isActive: z.boolean().default(true),
 });
 
+export const FeedbackReasonCodeSchema = z.enum(['WRONG_PROSPECT', 'WRONG_IDENTITY', 'INCORRECT_RESEARCH', 'UNSUPPORTED_CLAIM', 'WRONG_SERVICE', 'GENERIC_OPENING', 'IRRELEVANT_OPPORTUNITY', 'POOR_WRITING', 'WRONG_TONE', 'WEAK_CTA', 'OTHER']);
+export type FeedbackReasonCode = z.infer<typeof FeedbackReasonCodeSchema>;
+
 export function validateRuleConflictInput<T extends OutreachRuleLike>(rows: T[], next: OutreachRuleLike) {
   return findRuleConflicts([...rows, next]);
 }
@@ -50,14 +53,14 @@ export async function listExamples(workspaceId: string) {
   return db().outreachExample.findMany({ where: { workspaceId }, orderBy: { updatedAt: 'desc' } });
 }
 export async function createExample(workspaceId: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor) {
-  const example = await db().outreachExample.create({ data: { workspaceId, ...input, correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
+  const example = await db().outreachExample.create({ data: { workspaceId, ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
   await audit(workspaceId, actor, 'outreach_brain.example_created', { type: 'outreach_example', id: example.id }, { category: example.category, polarity: example.polarity });
   return example;
 }
 export async function updateExample(workspaceId: string, id: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor) {
   const example = await db().outreachExample.findFirst({ where: { id, workspaceId } });
   if (!example) throw NotFound('Outreach example');
-  const updated = await db().outreachExample.update({ where: { id }, data: { ...input, correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
+  const updated = await db().outreachExample.update({ where: { id }, data: { ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
   await audit(workspaceId, actor, 'outreach_brain.example_updated', { type: 'outreach_example', id });
   return updated;
 }
@@ -69,7 +72,7 @@ export async function deleteExample(workspaceId: string, id: string, actor: Acto
 
 /** Resolve at most five workspace examples against the current prospect/campaign context. */
 export async function relevantExamples(workspaceId: string, context: string) {
-  const rows = await db().outreachExample.findMany({ where: { workspaceId, isActive: true }, orderBy: { updatedAt: 'desc' }, take: 500 });
+  const rows = await db().outreachExample.findMany({ where: { workspaceId, isActive: true, isHumanApproved: true }, orderBy: { updatedAt: 'desc' }, take: 500 });
   return retrieveRelevantExamples(rows as OutreachExampleLike[], context);
 }
 export async function activeRules(workspaceId: string) {
@@ -81,11 +84,11 @@ export type FeedbackContent = Record<(typeof contentFields)[number], string | nu
 export function changedContentFields(before: FeedbackContent, after: FeedbackContent) {
   return contentFields.filter((k) => (before[k] ?? '').trim() !== (after[k] ?? '').trim());
 }
-export async function recordFeedback(workspaceId: string, personalizationId: string, feedbackType: 'EDITED' | 'APPROVED' | 'REJECTED', originalContent: FeedbackContent, finalContent: FeedbackContent, actor: Actor, explanation?: string, scope: 'GLOBAL' | 'CAMPAIGN' | 'PROSPECT' | 'FACTUAL' = 'CAMPAIGN') {
+export async function recordFeedback(workspaceId: string, personalizationId: string, feedbackType: 'EDITED' | 'APPROVED' | 'REJECTED', originalContent: FeedbackContent, finalContent: FeedbackContent, actor: Actor, explanation?: string, scope: 'GLOBAL' | 'CAMPAIGN' | 'PROSPECT' | 'FACTUAL' = 'CAMPAIGN', reasonCode?: z.infer<typeof FeedbackReasonCodeSchema>) {
   const p = await db().leadPersonalization.findFirst({ where: { id: personalizationId, workspaceId }, select: { id: true } });
   if (!p) throw NotFound('Personalization');
   const changedFields = changedContentFields(originalContent, finalContent);
-  const feedback = await db().outreachFeedback.create({ data: { workspaceId, personalizationId, feedbackType, originalContent: originalContent as unknown as Prisma.InputJsonValue, finalContent: finalContent as unknown as Prisma.InputJsonValue, changedFields, scope, explanation: explanation?.slice(0, 1000) ?? null, createdById: actor.userId ?? null } });
+  const feedback = await db().outreachFeedback.create({ data: { workspaceId, personalizationId, feedbackType, originalContent: originalContent as unknown as Prisma.InputJsonValue, finalContent: finalContent as unknown as Prisma.InputJsonValue, changedFields, scope, reasonCode, explanation: explanation?.slice(0, 1000) ?? null, createdById: actor.userId ?? null } });
   if (feedbackType === 'EDITED' && scope === 'GLOBAL' && changedFields.length) await refreshLearningSuggestions(workspaceId);
   await audit(workspaceId, actor, `outreach_brain.feedback_${feedbackType.toLowerCase()}`, { type: 'personalization', id: personalizationId }, { changedFields });
   return feedback;

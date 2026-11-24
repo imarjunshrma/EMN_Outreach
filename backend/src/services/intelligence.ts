@@ -8,6 +8,8 @@ import { sha256 } from '../core/crypto.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { runAi } from './ai.js';
+import { verifyProspectIdentity } from '../../../shared/src/identity.js';
+import { evaluateIcpQualification } from '../../../shared/src/personalization-gates.js';
 import { getSecret, recordUsage, requireSecret } from './integrations.js';
 import { readSettings } from './workspace.js';
 import { domainFromUrlOrEmail, isValidEmail, normalizeEmail, upsertCompany, LAWFUL_BASES } from './leads.js';
@@ -331,7 +333,7 @@ export async function supportedClaims(workspaceId: string, leadId: string) {
   if (!lead) throw NotFound('Lead');
   return db().researchClaim.findMany({
     where: { workspaceId, status: 'SUPPORTED', report: { status: 'COMPLETED', OR: [{ leadId }, ...(lead.companyId ? [{ companyId: lead.companyId }] : [])] } },
-    include: { evidence: { select: { url: true } } },
+    include: { evidence: { select: { url: true, sourceType: true } } },
     orderBy: { createdAt: 'desc' },
     take: 40,
   });
@@ -350,31 +352,41 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   if (!icp) throw new AppError('ICP_REQUIRED', 'Create an ICP before scoring leads.', 400);
   const criteria = IcpCriteriaSchema.parse(icp.criteria);
   const claims = await supportedClaims(workspaceId, leadId);
-  const leadJson = JSON.stringify({ title: lead.title, country: lead.country, city: lead.city, company: lead.company ? { name: lead.company.name, industry: lead.company.industry, employees: lead.company.employeeCount, services: lead.company.services, audience: lead.company.audience } : null });
-  const r = await runAi<{ score: number; reasons: Array<{ criterion: string; met: boolean; explanation: string; claimIds: string[] }>; risks: string[] }>(
+  const leadJson = JSON.stringify({ firstName: lead.firstName, lastName: lead.lastName, title: lead.title, country: lead.country, city: lead.city, company: lead.company ? { name: lead.company.name, industry: lead.company.industry, employees: lead.company.employeeCount, services: lead.company.services, audience: lead.company.audience } : null });
+  const r = await runAi<{ score: number; reasons: Array<{ criterion: string; met: boolean; explanation: string; claimIds: string[] }>; risks: string[]; identityAssessment: { status: 'VERIFIED' | 'AMBIGUOUS' | 'MISMATCH' | 'UNKNOWN'; evidenceClaimIds: string[]; reason: string } }>(
     workspaceId, 'LEAD_QUALIFICATION', { icp: JSON.stringify(criteria), lead: wrapUntrusted('lead-data', leadJson, 4000), claims: claimsBlock(claims) }, { entity: { type: 'lead', id: leadId } },
   );
   const validIds = new Set(claims.map((c) => c.id));
   const reasons = r.data.reasons.map((x) => ({ ...x, claimIds: x.claimIds.filter((id) => validIds.has(id)) }));
+  const identityEvidenceIds = r.data.identityAssessment.evidenceClaimIds.filter((id) => validIds.has(id));
+  const identity = verifyProspectIdentity({ firstName: lead.firstName, lastName: lead.lastName, companyName: lead.company?.name }, r.data.identityAssessment.status, identityEvidenceIds, claims.map((c) => ({ id: c.id, text: c.text, category: c.category, sourceType: c.evidence.sourceType })));
+  const identityStatus = identity.verified ? 'VERIFIED' as const
+    : identity.reason === 'Identity is ambiguous in research.' ? 'AMBIGUOUS' as const
+      : /conflicting|different person|did not match/i.test(identity.reason) || r.data.identityAssessment.status === 'MISMATCH' ? 'MISMATCH' as const
+        : 'UNKNOWN' as const;
   let score = Math.max(0, Math.min(100, Math.round(r.data.score)));
   const risks = [...r.data.risks];
+  if (!identity.verified) risks.push(identity.reason);
   // Deterministic guardrails on top of the model.
   if (criteria.countries.length && lead.country && !criteria.countries.includes(lead.country)) { score = Math.min(score, 30); risks.push(`Country ${lead.country} is outside the ICP`); }
   if (criteria.employeeMax && lead.company?.employeeCount && lead.company.employeeCount > criteria.employeeMax * 2) { score = Math.min(score, 40); risks.push('Company is much larger than the ICP range'); }
   const tier = score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
-  const qualified = score >= icp.minScore;
+  // ICP fit, professional identity and contactability are separate decisions.
+  // The overall outreach decision remains HOLD when identity is unverified.
+  const qualification = evaluateIcpQualification(score, icp.minScore);
+  const qualified = qualification.qualified;
   await db().$transaction(async (tx) => {
-    await tx.leadScore.create({ data: { workspaceId, leadId, icpId: icp.id, score, tier, qualified, reasons: reasons as Prisma.InputJsonValue, risks } });
+    await tx.leadScore.create({ data: { workspaceId, leadId, icpId: icp.id, score, tier, qualified, reasons: [...reasons, { criterion: 'professional_identity', met: identity.verified, identityStatus, explanation: identity.verified ? identity.reason : `${identity.reason} ${r.data.identityAssessment.reason}`.trim(), claimIds: identity.claimIds }] as Prisma.InputJsonValue, risks } });
     await tx.lead.update({ where: { id: leadId }, data: { currentScore: score } });
     if (['NEW', 'RESEARCHED'].includes(lead.status)) {
-      const to = qualified ? 'QUALIFIED' : 'DISQUALIFIED';
+      const to = !identity.verified ? 'RESEARCHED' : qualified ? 'QUALIFIED' : 'DISQUALIFIED';
       await tx.lead.update({ where: { id: leadId }, data: { status: to } });
       await tx.leadStatusChange.create({ data: { workspaceId, leadId, fromStatus: lead.status, toStatus: to, reason: `ICP score ${score} (${icp.name})` } });
     }
   });
   await emitEvent(workspaceId, 'lead.scored', `${leadId}:${r.executionId}`, { leadId, score, qualified, tier });
   await publish(workspaceId, 'lead.updated', { leadId });
-  return { score, tier, qualified };
+  return { score, tier, qualified, qualificationDecision: qualification.decision, decision: !identity.verified ? 'HOLD' : qualified ? 'QUALIFIED' : 'REJECTED', identityVerified: identity.verified, identityStatus, identityReason: identity.reason, identityEvidenceClaimIds: identity.claimIds };
 }
 
 // ---------------------------------------------------------------- writing & fact-check

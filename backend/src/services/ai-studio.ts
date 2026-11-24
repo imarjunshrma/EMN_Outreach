@@ -9,6 +9,8 @@ import {
 } from '../../../shared/src/ai-studio.js';
 import { lintPromptTemplate, renderPromptTemplate, EXAMPLE_PROFILE_PROMPT, PROMPT_VARIABLES } from '../../../shared/src/prompt-builder.js';
 import { htmlToText } from '../../../integrations/src/research/fetcher.js';
+import { StructuredExclusionRuleSchema, type StructuredExclusionRule } from '../../../shared/src/service-eligibility.js';
+import { QUALITY_POLICY_VERSION } from '../../../shared/src/quality.js';
 
 // AI Studio: versioned workspace AI configuration, knowledge documents and prompt profiles.
 
@@ -229,12 +231,14 @@ export function compareVersions(a: { instructions: string; settings: unknown }, 
 
 export interface AiSnapshot {
   takenAt: string;
+  qualityPolicyVersion: number;
   knowledge: { versionId: string | null; version: number; data: Knowledge };
   writing: { versionId: string | null; version: number; data: Writing };
   research: { versionId: string | null; version: number; data: Research };
   documents: Array<{ id: string; title: string; text: string }>;
   outreachRules: Array<{ id: string; title: string; description: string; category: string; priority: string; condition: string | null; triggerTerms: string[] }>;
   outreachExamples: Array<{ id: string; name: string; content: string; correctedContent: string | null; category: string; polarity: string; explanation: string | null; tags: string[] }>;
+  selectedServices: Array<{ serviceVersionId: string; serviceId: string; name: string; version: number; description: string; targetIndustries: string[]; excludedIndustries: string[]; targetGeographies: string[]; excludedGeographies: string[]; minEmployeeCount: number | null; maxEmployeeCount: number | null; targetCustomerProfiles: string[]; customerProblems: string[]; desiredOutcomes: string[]; deliverables: string[]; eligibilityCriteria: string[]; exclusions: string[]; exclusionRules: StructuredExclusionRule[]; commercialBoundaries: string[]; isPreferred: boolean; proof: Array<{ id: string; claim: string; description: string | null; sourceUrl: string | null; sourceType?: string; verificationMethod?: string | null }> }>;
   profile: { id: string; name: string; versionId: string; version: number; instructions: string; settings: WritingOverrides } | null;
   campaign: CampaignAiOverrides;
   icp: { id: string; name: string; aiInstructions: string | null } | null;
@@ -262,16 +266,23 @@ export async function buildSnapshot(workspaceId: string, campaignId: string): Pr
   const [knowledge, writing, research, documents, outreachRules, outreachExamples] = await Promise.all([
     getConfig(workspaceId, 'KNOWLEDGE'), getConfig(workspaceId, 'WRITING'), getConfig(workspaceId, 'RESEARCH'), activeDocuments(workspaceId),
     db().outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE' }, orderBy: [{ priority: 'asc' }, { updatedAt: 'desc' }], take: 200, select: { id: true, title: true, description: true, category: true, priority: true, condition: true, triggerTerms: true } }),
-    db().outreachExample.findMany({ where: { workspaceId, isActive: true }, orderBy: { updatedAt: 'desc' }, take: 100, select: { id: true, name: true, content: true, correctedContent: true, category: true, polarity: true, explanation: true, tags: true } }),
+    db().outreachExample.findMany({ where: { workspaceId, isActive: true, isHumanApproved: true }, orderBy: { updatedAt: 'desc' }, take: 100, select: { id: true, name: true, content: true, correctedContent: true, category: true, polarity: true, explanation: true, tags: true } }),
   ]);
   let profile: AiSnapshot['profile'] = null;
   if (c.aiProfile && !c.aiProfile.isArchived && c.aiProfile.activeVersionId) {
     const v = await db().promptProfileVersion.findUnique({ where: { id: c.aiProfile.activeVersionId } });
     if (v) profile = { id: c.aiProfile.id, name: c.aiProfile.name, versionId: v.id, version: v.version, instructions: v.instructions, settings: WritingOverridesSchema.parse(v.settings ?? {}) };
   }
+  const selectedServices = await db().campaignServiceSelection.findMany({
+    where: { workspaceId, campaignId, serviceVersion: { status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], service: { isArchived: false } } },
+    orderBy: [{ isPreferred: 'desc' }, { createdAt: 'asc' }],
+    include: { serviceVersion: { include: { service: { select: { id: true, name: true } }, proof: { where: { status: 'APPROVED_FOR_USE', permittedUse: true, OR: [{ reviewDueAt: null }, { reviewDueAt: { gt: new Date() } }] }, select: { id: true, claim: true, description: true, sourceUrl: true, sourceType: true, verificationMethod: true } } } } },
+  });
   return {
     takenAt: new Date().toISOString(),
+    qualityPolicyVersion: QUALITY_POLICY_VERSION,
     knowledge, writing, research, documents, outreachRules, outreachExamples, profile,
+    selectedServices: selectedServices.map((s) => ({ serviceVersionId: s.serviceVersionId, serviceId: s.serviceVersion.service.id, name: s.serviceVersion.service.name, version: s.serviceVersion.version, description: s.serviceVersion.description, targetIndustries: s.serviceVersion.targetIndustries, excludedIndustries: s.serviceVersion.excludedIndustries, targetGeographies: s.serviceVersion.targetGeographies, excludedGeographies: s.serviceVersion.excludedGeographies, minEmployeeCount: s.serviceVersion.minEmployeeCount, maxEmployeeCount: s.serviceVersion.maxEmployeeCount, targetCustomerProfiles: s.serviceVersion.targetCustomerProfiles, customerProblems: s.serviceVersion.customerProblems, desiredOutcomes: s.serviceVersion.desiredOutcomes, deliverables: s.serviceVersion.deliverables, eligibilityCriteria: s.serviceVersion.eligibilityCriteria, exclusions: s.serviceVersion.exclusions, exclusionRules: z.array(StructuredExclusionRuleSchema).parse(s.serviceVersion.exclusionRules), commercialBoundaries: s.serviceVersion.commercialBoundaries, isPreferred: s.isPreferred, proof: s.serviceVersion.proof })),
     campaign: CampaignAiOverridesSchema.parse(c.aiOverrides ?? {}),
     icp: c.icp ? { id: c.icp.id, name: c.icp.name, aiInstructions: c.icp.aiInstructions } : null,
   };
@@ -284,7 +295,19 @@ export async function buildSnapshot(workspaceId: string, campaignId: string): Pr
  */
 export async function effectiveSnapshot(workspaceId: string, campaign: { id: string; status: string; aiConfigSnapshot: unknown }): Promise<{ snapshot: AiSnapshot; frozen: boolean }> {
   if (['APPROVED', 'RUNNING', 'PAUSED'].includes(campaign.status) && campaign.aiConfigSnapshot && typeof campaign.aiConfigSnapshot === 'object') {
-    return { snapshot: campaign.aiConfigSnapshot as AiSnapshot, frozen: true };
+    const snapshot = campaign.aiConfigSnapshot as AiSnapshot;
+    if (snapshot.qualityPolicyVersion !== QUALITY_POLICY_VERSION) throw new AppError('CAMPAIGN_INVALID', 'The approved campaign uses an outdated or missing quality policy version; reapprove it before generating content', 409, { reasonCode: 'QUALITY_POLICY_SNAPSHOT_STALE', expected: QUALITY_POLICY_VERSION, actual: snapshot.qualityPolicyVersion ?? null });
+    const selectedServices = Array.isArray(snapshot.selectedServices) ? snapshot.selectedServices : [];
+    for (const selected of selectedServices) {
+      const live = await db().businessServiceVersion.findFirst({ where: { id: selected.serviceVersionId, workspaceId }, include: { service: { select: { isArchived: true } }, proof: { where: { id: { in: selected.proof.map((p) => p.id) } }, select: { id: true, status: true, permittedUse: true, reviewDueAt: true } } } });
+      if (!live || ['REVOKED', 'EXPIRED'].includes(live.status) || (live.expiresAt && live.expiresAt <= new Date()) || live.service.isArchived) throw new AppError('CAMPAIGN_INVALID', 'A pinned service version is revoked, expired or archived; hold this campaign for manager review', 409, { reasonCode: 'PINNED_SERVICE_INVALID', serviceVersionId: selected.serviceVersionId });
+      const proofById = new Map(live.proof.map((p) => [p.id, p]));
+      for (const pinnedProof of selected.proof) {
+        const proof = proofById.get(pinnedProof.id);
+        if (!proof || proof.status !== 'APPROVED_FOR_USE' || !proof.permittedUse || (proof.reviewDueAt && proof.reviewDueAt <= new Date())) throw new AppError('CAMPAIGN_INVALID', 'Pinned business proof is revoked, expired or requires review', 409, { reasonCode: 'PINNED_PROOF_INVALID', proofId: pinnedProof.id });
+      }
+    }
+    return { snapshot: { ...snapshot, selectedServices }, frozen: true };
   }
   return { snapshot: await buildSnapshot(workspaceId, campaign.id), frozen: false };
 }

@@ -5,9 +5,12 @@
 import type { Writing } from './ai-studio.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail' | 'info';
+/** Bump this when deterministic pass/fail quality policy changes materially. */
+export const QUALITY_POLICY_VERSION = 2;
 export interface QualityCheck { id: string; label: string; status: CheckStatus; detail: string }
 export interface ScoreFactor { factor: string; points: number; max: number; note: string }
 export interface QualityReport {
+  policyVersion: number;
   checks: QualityCheck[];
   passed: boolean;
   score: number;
@@ -92,10 +95,10 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   }
 
   // 3. Evidence validation
-  if (q.invalidClaimIds.length) add('evidence', 'Evidence validation', 'warn', `The writer cited ${q.invalidClaimIds.length} claim id(s) that are not evidence-backed for this lead; they were ignored`);
+  if (q.invalidClaimIds.length) add('evidence', 'Evidence validation', 'fail', `The writer cited ${q.invalidClaimIds.length} claim id(s) that are not evidence-backed for this lead; they were ignored`);
   else if (q.usedClaims.length) add('evidence', 'Evidence validation', 'pass', `${q.usedClaims.length} evidence-backed claim(s) used`);
-  else if (q.availableClaimCount === 0) add('evidence', 'Evidence validation', 'info', 'No research evidence was available; the email must not contain prospect-specific facts');
-  else add('evidence', 'Evidence validation', 'warn', 'Research was available but the email does not use any evidence-backed claim');
+  else if (q.availableClaimCount === 0) add('evidence', 'Evidence validation', 'fail', 'No research evidence was available; personalized campaign email is not sendable');
+  else add('evidence', 'Evidence validation', 'fail', 'Research was available but the email does not use an evidence-backed claim');
 
   // 4. Unsupported-claim detection: forbidden claims list
   const forbidden = q.writing.forbiddenClaims.filter((c) => lower.includes(c.toLowerCase()));
@@ -104,8 +107,8 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   // 5. Generic opening
   const generic = GENERIC_OPENERS.find((r) => r.test(opening));
   const openingOverlap = q.usedClaims.some((c) => { const cw = new Set(contentWords(c.text)); return contentWords(opening).filter((w) => cw.has(w)).length >= 2; });
-  if (generic) add('generic_opening', 'Generic-opening detection', q.writing.personalizationIntensity === 'light' ? 'warn' : 'fail', `Opening "${opening.slice(0, 80)}" is a generic opener`);
-  else if (!openingOverlap && q.usedClaims.length && q.stepOrder === 1) add('generic_opening', 'Generic-opening detection', 'warn', 'The opening line does not reference the evidence-backed observation');
+  if (generic) add('generic_opening', 'Generic-opening detection', 'fail', `Opening "${opening.slice(0, 80)}" is a generic opener`);
+  else if (!openingOverlap && q.stepOrder === 1) add('generic_opening', 'Generic-opening detection', 'fail', 'The opening line does not reference the evidence-backed observation');
   else add('generic_opening', 'Generic-opening detection', 'pass', 'Opening is specific');
 
   // 6. Repetition (previous steps + other leads)
@@ -143,7 +146,7 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   if (q.writing.ctaStyle === 'meeting_request' && !/\b(call|chat|meeting|meet|talk|minutes)\b/i.test(q.body)) ctaIssues.push('no meeting request');
   if (q.writing.ctaStyle === 'booking_link' && !/(https?:\/\/|\{\{bookingLink)/i.test(q.body)) ctaIssues.push('no booking link');
   if (questions > 2) ctaIssues.push(`${questions} questions — more than one ask`);
-  add('cta', 'CTA check', ctaIssues.length ? 'warn' : 'pass', ctaIssues.length ? ctaIssues.join('; ') : `CTA matches "${q.writing.ctaStyle.replace(/_/g, ' ')}"`);
+  add('cta', 'CTA check', ctaIssues.length ? 'fail' : 'pass', ctaIssues.length ? ctaIssues.join('; ') : `CTA matches "${q.writing.ctaStyle.replace(/_/g, ' ')}"`);
 
   // 10. Unsubscribe / compliance
   const comp: string[] = [];
@@ -155,7 +158,7 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   if ((q.subject ?? '').length > 90) comp.push('subject longer than 90 characters');
   add('compliance', 'Unsubscribe/compliance check', compFail ? 'fail' : comp.length ? 'warn' : 'pass', comp.length ? comp.join('; ') : 'Footer with sender address and one-click unsubscribe is appended automatically at send time');
 
-  if (q.insufficientContext) add('context', 'Context availability', 'info', 'The writer reported insufficient context for deep personalization');
+  if (q.insufficientContext) add('context', 'Context availability', 'fail', 'The writer reported insufficient context; the email is not sendable');
 
   // Personalization score (heuristic, explained)
   const uniqueVsBatch = twins === 0;
@@ -168,7 +171,9 @@ export function runQualityChecks(q: QualityInput): QualityReport {
     { factor: 'Clear single call to action', max: 5, points: ctaIssues.length ? 0 : 5, note: ctaIssues.length ? ctaIssues.join('; ') : 'One clear ask' },
   ];
   const score = factors.reduce((s, f) => s + f.points, 0);
+  add('specificity_score', 'Personalization specificity threshold', score < 60 ? 'fail' : 'pass', `Specificity score ${score}/100 (minimum 60)`);
   return {
+    policyVersion: QUALITY_POLICY_VERSION,
     checks,
     passed: !checks.some((c) => c.status === 'fail'),
     score,

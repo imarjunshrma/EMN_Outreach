@@ -31,7 +31,7 @@ export const FactExtractionOutput = z.object({
   claims: z.array(
     z.object({
       text: z.string(),
-      category: z.enum(['service', 'industry', 'audience', 'business_model', 'content', 'signal', 'other']),
+      category: z.enum(['service', 'industry', 'audience', 'business_model', 'content', 'signal', 'professional_identity', 'other']),
       evidenceId: z.string(),
       quote: z.string(),
       confidence: z.number().min(0).max(1),
@@ -46,6 +46,11 @@ export const QualificationOutput = z.object({
     z.object({ criterion: z.string(), met: z.boolean(), explanation: z.string(), claimIds: z.array(z.string()) }),
   ),
   risks: z.array(z.string()),
+  identityAssessment: z.object({
+    status: z.enum(['VERIFIED', 'AMBIGUOUS', 'MISMATCH', 'UNKNOWN']).default('UNKNOWN'),
+    evidenceClaimIds: z.array(z.string()).default([]),
+    reason: z.string().default(''),
+  }).default({ status: 'UNKNOWN', evidenceClaimIds: [], reason: '' }),
 });
 
 export const EmailWritingOutput = z.object({
@@ -110,10 +115,12 @@ export const PersonalizationOutput = z.object({
     unknowns: z.array(z.string()).max(10),
     opportunity: z.string().nullable(),
     serviceFit: z.string().nullable(),
+    serviceVersionId: z.string().uuid().nullable().default(null),
+    serviceMatchClaimIds: z.array(z.string()).default([]),
     confidence: z.number().min(0).max(1),
     missingInformation: z.array(z.string()).max(10),
     recommendedApproach: z.string().nullable(),
-  }).default({ qualification: 'INSUFFICIENT_INFORMATION', businessModel: { statement: null, basis: 'UNKNOWN', claimIds: [] }, facts: [], inferences: [], unknowns: [], opportunity: null, serviceFit: null, confidence: 0, missingInformation: [], recommendedApproach: null }),
+  }).default({ qualification: 'INSUFFICIENT_INFORMATION', businessModel: { statement: null, basis: 'UNKNOWN', claimIds: [] }, facts: [], inferences: [], unknowns: [], opportunity: null, serviceFit: null, serviceVersionId: null, serviceMatchClaimIds: [], confidence: 0, missingInformation: [], recommendedApproach: null }),
 });
 export type Personalization = z.infer<typeof PersonalizationOutput>;
 

@@ -20,6 +20,7 @@ import { emitEvent } from './automation.js';
 import { variantSeedFor, contentHashOf, WAITING_MARKER } from './personalization.js';
 import { buildSnapshot } from './ai-studio.js';
 import { CampaignAiOverridesSchema } from '../../../shared/src/ai-studio.js';
+import { captureCampaignTaskExecution } from './ai.js';
 
 // =====================================================================================
 // Campaign management
@@ -172,6 +173,7 @@ export async function getCampaign(workspaceId: string, id: string) {
       sequence: { include: { steps: { orderBy: { order: 'asc' }, include: { variants: { orderBy: { label: 'asc' } } } } } },
       lists: { include: { list: { select: { id: true, name: true, _count: { select: { members: true } } } } } },
       accounts: { include: { emailAccount: { select: { id: true, emailAddress: true, status: true, provider: true } } } },
+      serviceSelections: { include: { serviceVersion: { include: { service: { select: { id: true, name: true } } } } } },
     },
   });
   if (!c) throw NotFound('Campaign');
@@ -197,6 +199,7 @@ export function contentHash(c: FullCampaign): string {
     ai: [c.aiProfileId, c.icpId, c.aiOverrides, c.maxAiCostPerLeadUsd?.toString() ?? null, c.usePregeneratedAi, c.scheduledStartAt?.toISOString() ?? null],
     lists: c.lists.map((l) => l.listId).sort(),
     accounts: c.accounts.map((a) => a.emailAccountId).sort(),
+    services: c.serviceSelections.map((s) => [s.serviceVersionId, s.isPreferred]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   };
   return sha256(JSON.stringify(payload));
 }
@@ -208,6 +211,10 @@ export async function validateCampaign(workspaceId: string, id: string) {
   const warnings: string[] = [];
   const steps = c.sequence?.steps ?? [];
   if (!steps.length) blocking.push('Sequence has no steps');
+  if (steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY')) {
+    const approvedServiceCount = await db().campaignServiceSelection.count({ where: { workspaceId, campaignId: id, serviceVersion: { status: 'APPROVED', service: { isArchived: false } } } });
+    if (!approvedServiceCount) blocking.push('AI-personalized campaigns need at least one approved EMN service selected under AI personalization.');
+  }
   for (const s of steps) {
     for (const v of s.variants) {
       if ((s.order === 1 || s.threadMode === 'NEW_THREAD') && !v.subject.trim()) blocking.push(`Step ${s.order} variant ${v.label} needs a subject`);
@@ -231,7 +238,7 @@ export async function validateCampaign(workspaceId: string, id: string) {
     if (!avail.ok) blocking.push(avail.problem ?? 'AI personalization is used but no AI source is ready');
   }
   if (c.trackOpens || c.trackClicks) warnings.push('Open/click tracking is enabled: tracking pixels and rewritten links can reduce deliverability and require a privacy notice. Open data is an estimate (image blocking, privacy proxies).');
-  if (c.reviewMode === 'NONE' && steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY')) warnings.push('AI-written emails will be sent without human review (fact-check still applies)');
+  if (c.reviewMode === 'NONE' && steps.some((s) => s.personalizationMode !== 'TEMPLATE_ONLY')) blocking.push('AI-written emails require explicit human approval after evidence, fact-check and quality review; review mode NONE is not allowed for AI-personalized campaigns.');
 
   // Recipient eligibility preview (sampled)
   const members = await db().leadListMember.findMany({ where: { workspaceId, listId: { in: c.lists.map((l) => l.listId) } }, include: { lead: true }, take: 2000, distinct: ['leadId'] });
@@ -267,14 +274,21 @@ export async function approveCampaign(workspaceId: string, id: string, actor: Ac
   const hash = contentHash(full);
   // Freeze the AI configuration: later edits to AI Studio settings or prompt profiles never silently
   // change what this approved campaign generates.
-  const snapshot = await buildSnapshot(workspaceId, id);
+  const built = await buildSnapshot(workspaceId, id);
+  const usesAi = full.sequence?.steps.some((step) => step.personalizationMode !== 'TEMPLATE_ONLY') ?? false;
+  const taskExecution = usesAi ? await captureCampaignTaskExecution(workspaceId, ['PERSONALIZATION', 'FACT_CHECK'], id) : {};
+  const executionSnapshotId = randomUUID();
+  const snapshot = { ...built, taskExecution, executionSnapshotId };
   const last = await db().sequenceVersion.findFirst({ where: { campaignId: id }, orderBy: { version: 'desc' } });
   const version = (last?.version ?? 0) + 1;
+  const stale = usesAi ? await db().leadPersonalization.count({ where: { campaignId: id, status: { in: ['GENERATED', 'APPROVED'] } } }) : 0;
   await db().$transaction([
     db().campaign.update({ where: { id }, data: { status: 'APPROVED', approvedContentHash: hash, approvedAt: new Date(), approvedById: actor.userId ?? null, pauseReason: null, aiConfigSnapshot: snapshot as unknown as Prisma.InputJsonValue, aiSnapshotAt: new Date() } }),
-    db().sequenceVersion.create({ data: { workspaceId, campaignId: id, version, contentHash: hash, approvedById: actor.userId ?? null, snapshot: { settings: campaignSettingsOf(full), steps: stepsOf(full), lists: full.lists.map((l) => l.listId), accounts: full.accounts.map((a) => a.emailAccountId), ai: { aiProfileId: full.aiProfileId, icpId: full.icpId, aiOverrides: full.aiOverrides, maxAiCostPerLeadUsd: full.maxAiCostPerLeadUsd?.toString() ?? null, usePregeneratedAi: full.usePregeneratedAi, profileVersion: snapshot.profile?.version ?? null, writingVersion: snapshot.writing.version, researchVersion: snapshot.research.version, knowledgeVersion: snapshot.knowledge.version } } as Prisma.InputJsonValue } }),
+    // Existing AI drafts were generated under the prior live configuration. Preserve their text,
+    // but hold them until they are regenerated and explicitly reviewed against this snapshot.
+    ...(usesAi ? [db().leadPersonalization.updateMany({ where: { campaignId: id, status: { in: ['GENERATED', 'APPROVED'] } }, data: { status: 'BLOCKED', error: 'Campaign configuration was frozen after this draft was generated. Regenerate and review it against the approved snapshot.', qualityPassed: false, approvedById: null, approvedAt: null, approvedContentHash: null } })] : []),
+    db().sequenceVersion.create({ data: { id: executionSnapshotId, workspaceId, campaignId: id, version, contentHash: hash, approvedById: actor.userId ?? null, snapshot: { settings: campaignSettingsOf(full), steps: stepsOf(full), lists: full.lists.map((l) => l.listId), accounts: full.accounts.map((a) => a.emailAccountId), aiConfigSnapshot: snapshot, serviceVersions: snapshot.selectedServices.map((s) => ({ serviceVersionId: s.serviceVersionId, version: s.version, name: s.name })), ai: { aiProfileId: full.aiProfileId, icpId: full.icpId, aiOverrides: full.aiOverrides, maxAiCostPerLeadUsd: full.maxAiCostPerLeadUsd?.toString() ?? null, usePregeneratedAi: full.usePregeneratedAi, profileVersion: snapshot.profile?.version ?? null, writingVersion: snapshot.writing.version, researchVersion: snapshot.research.version, knowledgeVersion: snapshot.knowledge.version } } as unknown as Prisma.InputJsonValue } }),
   ]);
-  const stale = await db().leadPersonalization.count({ where: { campaignId: id, status: 'APPROVED' } });
   await audit(workspaceId, actor, 'campaign.approved', { type: 'campaign', id }, { contentHash: hash, sequenceVersion: version, approvedPersonalizations: stale });
   return { approved: true, contentHash: hash, sequenceVersion: version };
 }
@@ -363,6 +377,7 @@ export async function reviewOutbound(workspaceId: string, id: string, input: { d
   const o = await db().outboundEmail.findFirst({ where: { id, workspaceId }, include: { campaign: true, enrollment: true } });
   if (!o) throw NotFound('Outbound email');
   if (o.status !== 'AWAITING_APPROVAL') throw new AppError('CONFLICT', `This email is ${o.status}`, 409);
+  if (o.lastError?.includes('needs revalidation under the current evidence and quality policy')) throw new AppError('QUALITY_CHECK_FAILED', 'Regenerate and approve this content in the campaign personalization review before sending.', 409);
   if (o.lastError === WAITING_MARKER || !o.bodyText) throw new AppError('CONFLICT', 'This email is waiting for its personalized content. Review and approve it in the campaign\'s AI personalization tab.', 409);
   if (input.decision === 'reject') {
     await db().outboundEmail.update({ where: { id }, data: { status: 'CANCELLED', approvalStatus: 'REJECTED', lastError: input.reason ?? 'rejected by reviewer' } });
@@ -376,12 +391,7 @@ export async function reviewOutbound(workspaceId: string, id: string, input: { d
   const subject = input.subject ?? o.subject;
   const bodyText = input.bodyText ?? o.bodyText;
   if (/\{\{[^}]+\}\}/.test(`${subject}\n${bodyText}`)) throw BadRequest('UNRESOLVED_VARIABLES', 'Email still contains {{variables}}');
-  if (edited && o.campaign.requireFactCheck && o.aiGenerated) {
-    const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-    const fc = await factCheck(workspaceId, o.enrollment.leadId, `${subject}\n${bodyText}`, readSettings(ws.settings).offerFacts);
-    factCheckStatus = fc.passed ? 'PASSED' : 'FAILED';
-    factCheckReport = fc.sentences as unknown as Prisma.JsonValue;
-  }
+  if (edited && o.aiGenerated) throw new AppError('QUALITY_CHECK_FAILED', 'Edit AI-generated content in the campaign personalization editor so evidence, fact-check and quality gates run again.', 409);
   if (factCheckStatus === 'FAILED') {
     await db().outboundEmail.update({ where: { id }, data: { subject, bodyText, factCheckStatus, factCheckReport: factCheckReport as Prisma.InputJsonValue } });
     throw new AppError('FACT_CHECK_FAILED', 'The email contains statements the fact-checker could not verify. Edit them out before approving.', 400, factCheckReport);
@@ -633,10 +643,20 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
   let aiGenerated = false;
   let preApproved = false;
   const allowAiForStep = o.step.order === 1 || settings.aiFollowupGeneration;
+  // The legacy send-time generator has no structured prospect-fit/service-match decision. Do not
+  // allow it to bypass the campaign personalization quality gate when pre-generation is disabled.
+  if (allowAiForStep && o.step.personalizationMode !== 'TEMPLATE_ONLY' && !o.campaign.usePregeneratedAi) {
+    return fail('AI send-time generation is on hold because it cannot satisfy the campaign evidence and service-match gates. Enable pre-generated AI personalization, review the prospect brief, and approve the generated content.');
+  }
   if (allowAiForStep && o.step.personalizationMode !== 'TEMPLATE_ONLY' && o.campaign.usePregeneratedAi) {
     // Pre-generated, individually approved personalization. The engine never calls AI here, so an AI
     // failure can only delay this email — never produce an unreviewed or duplicate send.
     const p = await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId: o.campaignId, leadId: lead.id, stepId: o.stepId } } });
+    if (p?.status === 'APPROVED' && (p.quality as { policyVersion?: number } | null)?.policyVersion !== 2) {
+      await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'AWAITING_APPROVAL', approvalStatus: 'PENDING', lastError: 'Previously approved personalization needs revalidation under the current evidence and quality policy.' } });
+      await publish(workspaceId, 'review.pending', { outboundId: o.id, campaignId: o.campaignId, personalization: true, revalidationRequired: true });
+      return { status: 'AWAITING_REVALIDATION' };
+    }
     if (!p || p.status !== 'APPROVED' || !p.body || p.approvedContentHash !== contentHashOf(p)) {
       if (!p || ['FAILED', 'QUEUED', 'REJECTED'].includes(p.status) && !p.manuallyEdited) {
         await enqueue(QUEUES.personalize, 'personalize.single', { workspaceId, campaignId: o.campaignId, leadId: lead.id, stepId: o.stepId }, { jobId: `pz-single-${o.id}-${p?.revision ?? 0}-${p?.status ?? 'new'}-${Math.floor(Date.now() / 3_600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import { db, Prisma } from '../core/db.js';
 import { adapters } from '../core/container.js';
 import { AppError, NotFound } from '../core/errors.js';
@@ -117,6 +118,42 @@ async function ensurePrompt(workspaceId: string, task: AiTaskName) {
 
 interface Candidate { provider: ProviderName; model: string; fallback: boolean }
 
+export interface FrozenTaskExecution {
+  task: AiTaskName; promptTemplateId: string | null; promptVersion: number | null;
+  systemPrompt: string; userPromptTemplate: string; schemaHash: string;
+  candidates: Array<{ provider: ProviderName; model: string; fallback: boolean; baseUrl: string | null }>;
+  maxOutputTokens: number; maxInputTokens: number | null; temperature: number | null; monthlyBudgetUsd: number | null;
+}
+
+/** Capture the exact prompt and provider route used by a campaign approval. Secrets are never copied. */
+export async function captureCampaignTaskExecution(workspaceId: string, tasks: AiTaskName[], campaignId?: string): Promise<Record<string, FrozenTaskExecution>> {
+  if (campaignId) {
+    const source = await (await import('./ai-source.js')).resolveAiSource(workspaceId, campaignId);
+    if (source.mode !== 'api') throw new AppError('CAMPAIGN_INVALID', 'Campaign approval cannot freeze subscription-based AI execution yet. Select API-key routing before approval; no provider route was changed.', 409, { reasonCode: 'UNSUPPORTED_SNAPSHOT_SOURCE', mode: source.mode });
+  }
+  const captured: Record<string, FrozenTaskExecution> = {};
+  for (const task of [...new Set(tasks)]) {
+    const [prompt, route, resolved, providers] = await Promise.all([
+      ensurePrompt(workspaceId, task),
+      db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } }),
+      resolveCandidates(workspaceId, task),
+      db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, select: { provider: true, baseUrl: true } }),
+    ]);
+    if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for campaign task ${task}`, 400);
+    const providerConfig = new Map(providers.map((p) => [p.provider, p.baseUrl]));
+    const limits = await routeLimits(workspaceId, task);
+    const schemaHash = createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex');
+    captured[task] = {
+      task, promptTemplateId: prompt.id, promptVersion: prompt.version, systemPrompt: prompt.systemPrompt,
+      userPromptTemplate: prompt.userPromptTemplate, schemaHash,
+      candidates: resolved.candidates.map((candidate) => ({ ...candidate, baseUrl: providerConfig.get(candidate.provider) ?? null })),
+      maxOutputTokens: resolved.maxOutputTokens, maxInputTokens: limits.maxInputTokens, temperature: resolved.temperature ?? null, monthlyBudgetUsd: resolved.budget,
+    };
+    if (!captured[task].candidates.length) throw new AppError('PROVIDER_NOT_CONFIGURED', `No configured provider route for campaign task ${task}`, 400);
+  }
+  return captured;
+}
+
 async function resolveCandidates(workspaceId: string, task: AiTaskName): Promise<{ candidates: Candidate[]; maxOutputTokens: number; temperature?: number; budget: number | null }> {
   const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true } });
   if (providers.length === 0) throw new AppError('PROVIDER_NOT_CONFIGURED', 'No AI provider is configured. Add a provider in AI settings.', 400);
@@ -151,10 +188,18 @@ export async function runAi<T = unknown>(
     maxLeadCostUsd?: number | null;
   } = {},
 ): Promise<AiRunResult<T>> {
+  const frozenCampaign = opts.attribution?.campaignId ? await db().campaign.findFirst({ where: { id: opts.attribution.campaignId, workspaceId }, select: { status: true, aiConfigSnapshot: true } }) : null;
+  const frozenSnapshot = frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && frozenCampaign.aiConfigSnapshot && typeof frozenCampaign.aiConfigSnapshot === 'object'
+    ? frozenCampaign.aiConfigSnapshot as Record<string, unknown> : null;
+  const rawFrozenTask = frozenSnapshot?.taskExecution && typeof frozenSnapshot.taskExecution === 'object' ? (frozenSnapshot.taskExecution as Record<string, unknown>)[task] : null;
+  if (frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && !rawFrozenTask) throw new AppError('CAMPAIGN_INVALID', `Approved campaign has no frozen ${task} execution configuration; reapprove it before generation`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_MISSING', task });
+  const frozenTask = rawFrozenTask as FrozenTaskExecution | null;
+  const campaignSnapshotId = frozenSnapshot && typeof frozenSnapshot.executionSnapshotId === 'string' ? frozenSnapshot.executionSnapshotId : null;
+  if (frozenTask && (frozenTask.task !== task || frozenTask.schemaHash !== createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex'))) throw new AppError('CAMPAIGN_INVALID', `Frozen ${task} prompt configuration or output schema is invalid; reapprove the campaign`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_INVALID', task });
   // AI source (Settings → AI providers → "AI source", or the campaign's own choice): a personal subscription runs the
   // call instead of the API keys. No silent fallback to paid API calls unless an admin allowed it.
   const { resolveAiSource, AI_SOURCE_LABEL } = await import('./ai-source.js');
-  const source = await resolveAiSource(workspaceId, opts.attribution?.campaignId ?? null);
+  const source = frozenTask ? { mode: 'api' as const, ownerUserId: null, fallbackToApi: false, from: 'campaign' as const } : await resolveAiSource(workspaceId, opts.attribution?.campaignId ?? null);
   if (source.mode !== 'api') {
     try { return await runAiOnSubscription<T>(workspaceId, task, vars, opts, source); }
     catch (e) {
@@ -162,7 +207,11 @@ export async function runAi<T = unknown>(
       logger.warn({ task, err: (e as Error).message }, 'AI subscription failed; falling back to API keys as allowed in AI settings');
     }
   }
-  const { candidates, maxOutputTokens, temperature, budget } = await resolveCandidates(workspaceId, task);
+  const liveRoute = frozenTask ? null : await resolveCandidates(workspaceId, task);
+  const candidates: Candidate[] = frozenTask ? frozenTask.candidates.map(({ provider, model, fallback }) => ({ provider, model, fallback })) : liveRoute!.candidates;
+  const maxOutputTokens = frozenTask?.maxOutputTokens ?? liveRoute!.maxOutputTokens;
+  const temperature = frozenTask ? frozenTask.temperature ?? undefined : liveRoute!.temperature;
+  const budget = frozenTask ? frozenTask.monthlyBudgetUsd : liveRoute!.budget;
   if (budget !== null && !opts.critical && (await monthSpend(workspaceId, task)) >= budget) {
     throw new AppError('AI_BUDGET_EXCEEDED', `Monthly AI budget for ${task} is used up`, 402);
   }
@@ -178,12 +227,13 @@ export async function runAi<T = unknown>(
       throw (e as { code?: string }).code === 'QUOTA_EXCEEDED' ? new AppError('AI_BUDGET_EXCEEDED', (e as Error).message, 402) : e;
     }
   }
-  const prompt = await ensurePrompt(workspaceId, task);
+  const activePrompt = frozenTask ? null : await ensurePrompt(workspaceId, task);
+  const prompt = frozenTask ? { id: frozenTask.promptTemplateId, version: frozenTask.promptVersion, systemPrompt: frozenTask.systemPrompt, userPromptTemplate: frozenTask.userPromptTemplate } : activePrompt;
   if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
   const schema = AI_OUTPUT_SCHEMAS[task];
   const jsonSchema = jsonSchemaFor(task);
   let userPrompt = renderPrompt(prompt.userPromptTemplate, vars);
-  const limits = await routeLimits(workspaceId, task);
+  const limits = { maxInputTokens: frozenTask ? frozenTask.maxInputTokens : (await routeLimits(workspaceId, task)).maxInputTokens, maxOutputTokens };
   if (limits.maxInputTokens && userPrompt.length > limits.maxInputTokens * 4) {
     userPrompt = `${userPrompt.slice(0, limits.maxInputTokens * 4)}\n[input truncated to the ${limits.maxInputTokens}-token limit for ${task}]`;
   }
@@ -201,14 +251,15 @@ export async function runAi<T = unknown>(
 
   for (const cand of candidates) {
     const prov = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: cand.provider } } });
-    if (!prov) continue;
+    if (!prov || !prov.isEnabled) continue;
     const apiKey = decryptSecret(prov.encryptedApiKey);
     const adapter = adapters().ai[cand.provider];
     if (!adapter) { lastError = `AI adapter ${cand.provider} is not installed`; continue; }
     let user = userPrompt;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const res = await adapter.generateStructured(apiKey, { model: cand.model, system: prompt.systemPrompt, user, jsonSchema, schemaName: task.toLowerCase(), maxOutputTokens, temperature }, { baseUrl: prov.baseUrl });
+        const frozenBaseUrl = frozenTask?.candidates.find((c) => c.provider === cand.provider && c.model === cand.model)?.baseUrl;
+        const res = await adapter.generateStructured(apiKey, { model: cand.model, system: prompt.systemPrompt, user, jsonSchema, schemaName: task.toLowerCase(), maxOutputTokens, temperature: temperature ?? undefined }, { baseUrl: frozenTask ? frozenBaseUrl ?? undefined : prov.baseUrl });
         const price = await priceFor(cand.provider, cand.model);
         const { cost, priced } = computeCost(price, res.usage);
         const parsed = schema.safeParse(res.data);
@@ -218,7 +269,7 @@ export async function runAi<T = unknown>(
             status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: cand.fallback, generationMode: res.generationMode ?? 'structured',
             inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens, cachedTokens: res.usage.cachedTokens,
             costUsd: cost, costIsEstimate: !priced, latencyMs: res.latencyMs,
-            entityType: opts.entity?.type, entityId: opts.entity?.id, ...att,
+            entityType: opts.entity?.type, entityId: opts.entity?.id, campaignSnapshotId, ...att,
             inputPreview: preview,
             output: (res.data ?? null) as Prisma.InputJsonValue,
             errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
@@ -237,7 +288,7 @@ export async function runAi<T = unknown>(
         lastError = (e as Error).message;
         lastProviderError = e instanceof ProviderError ? e : null;
         await db().aiExecution.create({
-          data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: preview },
+          data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, campaignSnapshotId, ...att, inputPreview: preview },
         });
         logger.warn({ task, provider: cand.provider, err: lastError }, 'AI call failed');
         if (e instanceof ProviderError && !e.retryable && e.status && e.status < 500 && e.status !== 429) break; // bad key/model → try fallback

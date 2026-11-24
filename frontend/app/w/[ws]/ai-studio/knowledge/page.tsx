@@ -6,12 +6,14 @@ import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate } from '@/lib/format';
 import { Badge, Button, Card, ConfirmButton, Field, Input, Modal, Notice, PageHeader, QueryView, Table, Textarea } from '@/components/ui';
 import { ConfigEditor, LinesField, ObjList } from '@/components/ai-studio';
+import { BusinessServices } from '@/components/business-services';
 
 export default function Knowledge() {
   return (
     <>
       <PageHeader title="Business knowledge" subtitle="Trusted facts about YOUR company. The AI may only state facts about you that appear here." />
       <div className="space-y-4">
+        <BusinessServices />
         <ConfigEditor kind="knowledge" title="Company knowledge">
           {(d, set) => {
             const s = (k: string, v: any) => set({ ...d, [k]: v });

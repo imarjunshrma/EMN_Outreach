@@ -12,6 +12,9 @@ import { instructionText, knowledgeText, KnowledgeSchema, type ResolvedConfig } 
 import { runQualityChecks, type QualityReport, type FactCheckSentence } from '../../../shared/src/quality.js';
 import type { Personalization } from '../../../shared/src/ai-schemas.js';
 import { checkRuleTriggerTerms, renderOutreachRules, renderRelevantExamples, retrieveRelevantExamples, type OutreachExampleLike } from '../../../shared/src/outreach-brain.js';
+import { filterEligibleServices } from '../../../shared/src/service-eligibility.js';
+import { identityFromScoreReason } from '../../../shared/src/identity.js';
+import { evaluatePersonalizationGates } from '../../../shared/src/personalization-gates.js';
 import { runAi, estimateCallCost, routeLimits } from './ai.js';
 import { effectiveSnapshot, resolveFromSnapshot, renderProfilePrompt, configHash, type AiSnapshot } from './ai-studio.js';
 import { factCheck } from './intelligence.js';
@@ -53,6 +56,22 @@ function pickVariant<T extends { label: string; weight: number }>(variants: T[],
 
 export function contentHashOf(p: { subject: string | null; openingLine: string | null; body: string | null; cta: string | null }) {
   return sha256(JSON.stringify([p.subject ?? '', p.openingLine ?? '', p.body ?? '', p.cta ?? '']));
+}
+
+function applyCommercialRelevanceGate(quality: QualityReport, analysis: Personalization['opportunityAnalysis'], selectedServices: AiSnapshot['selectedServices']) {
+  const qualified = analysis.qualification === 'STRONG_FIT' || analysis.qualification === 'POSSIBLE_FIT';
+  const hasReason = !!analysis.opportunity?.trim() || !!analysis.recommendedApproach?.trim();
+  const hasServiceMatch = !!analysis.serviceFit?.trim();
+  const evidenceLinked = analysis.facts.some((f) => !!f.claimId) || analysis.inferences.some((i) => i.claimIds.length > 0);
+  const allowedService = selectedServices.find((s) => s.serviceVersionId === analysis.serviceVersionId);
+  const serviceIsAllowed = selectedServices.length > 0 && !!allowedService && hasServiceMatch && analysis.serviceMatchClaimIds.length > 0;
+  const ok = qualified && hasReason && evidenceLinked && serviceIsAllowed;
+  quality.checks.push({
+    id: 'commercial_relevance', label: 'ICP, opportunity and service relevance', status: ok ? 'pass' : 'fail',
+    detail: ok ? `Model assessment: ${analysis.qualification}; matched approved service ${allowedService!.name} v${allowedService!.version} and evidence-linked rationale` : selectedServices.length ? 'No adequate fit, evidence-linked rationale and exact match to a campaign-selected approved service were established' : 'No approved EMN service version is selected for this campaign; service matching is held',
+  });
+  quality.passed = !quality.checks.some((c) => c.status === 'fail');
+  return quality;
 }
 
 function stripFooter(body: string | null) { return (body ?? '').split('\n\n--\n')[0].trim(); }
@@ -126,6 +145,12 @@ export interface BuiltContext {
   profilePrompt: { text: string; missing: string[] };
   hash: string;
   knowledge: string;
+  allowedServices: AiSnapshot['selectedServices'];
+  serviceEligibilityExcluded: Array<{ serviceVersionId: string; eligible: boolean; reason: string }>;
+  retrievedKnowledgeIds: string[];
+  retrievedExampleIds: string[];
+  qualification: { qualified: boolean; reason: string };
+  identity: { verified: boolean; reason: string; claimIds: string[] };
 }
 
 export async function buildContext(workspaceId: string, campaign: Awaited<ReturnType<typeof loadCampaign>>, lead: LeadWithCompany, stepId: string): Promise<BuiltContext> {
@@ -136,8 +161,29 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const { snapshot, frozen } = await effectiveSnapshot(workspaceId, campaign);
   const resolved = resolveFromSnapshot(snapshot, step, variant, lead);
   const ev = await evidenceForLead(workspaceId, lead, resolved.research);
+  const latestScore = await db().leadScore.findFirst({ where: { workspaceId, leadId: lead.id }, orderBy: { createdAt: 'desc' }, select: { qualified: true, reasons: true } });
+  const scoreReasons = Array.isArray(latestScore?.reasons) ? latestScore.reasons as Array<Record<string, unknown>> : [];
+  const identityReason = scoreReasons.find((r) => r.criterion === 'professional_identity');
+  const identity = identityFromScoreReason(
+    { firstName: lead.firstName, lastName: lead.lastName, companyName: lead.company?.name },
+    identityReason as { met?: boolean; identityStatus?: string; claimIds?: unknown } | undefined,
+    ev.claims.map((c) => ({ id: c.id, text: c.text, category: c.category, sourceType: c.evidence.sourceType })),
+  );
+  const qualification = {
+    qualified: !!latestScore?.qualified,
+    reason: !latestScore ? 'No lead qualification score exists; run research and qualification first.' : !latestScore.qualified ? 'The latest ICP qualification decision is not QUALIFIED.' : 'The latest ICP qualification decision is QUALIFIED.',
+  };
   const report = ev.reportIds.length ? await db().researchReport.findFirst({ where: { id: { in: ev.reportIds } }, orderBy: { completedAt: 'desc' } }) : null;
-  const knowledge = knowledgeText(KnowledgeSchema.parse(snapshot.knowledge.data), snapshot.documents);
+  const selectedServices = snapshot.selectedServices ?? [];
+  const companyCustom = lead.company?.customFields && typeof lead.company.customFields === 'object' ? lead.company.customFields as Record<string, unknown> : {};
+  const leadCustom = lead.customFields && typeof lead.customFields === 'object' ? lead.customFields as Record<string, unknown> : {};
+  const asFact = (value: unknown) => typeof value === 'string' ? value : null;
+  const businessCategories = Array.isArray(companyCustom.businessCategories) ? companyCustom.businessCategories.filter((x): x is string => typeof x === 'string') : [];
+  const serviceEligibility = filterEligibleServices(selectedServices, { industry: lead.company?.industry, country: lead.country ?? lead.company?.country, employeeCount: lead.company?.employeeCount, companyType: asFact(companyCustom.companyType), role: lead.title, seniority: asFact(leadCustom.seniority), businessCategories });
+  const allowedServices = serviceEligibility.eligible;
+  const serviceKnowledge = allowedServices.map((s) => `SERVICE ${s.name} v${s.version}: ${s.description}\nProblems: ${s.customerProblems.join('; ')}\nOutcomes: ${s.desiredOutcomes.join('; ')}\nDeliverables: ${s.deliverables.join('; ')}\nCommercial boundaries: ${s.commercialBoundaries.join('; ')}\nApproved proof: ${s.proof.map((p) => `${p.claim}${p.sourceUrl ? ` (source: ${p.sourceUrl})` : ''}`).join('; ')}`).join('\n\n');
+  const knowledge = [knowledgeText(KnowledgeSchema.parse(snapshot.knowledge.data), snapshot.documents), serviceKnowledge ? `APPROVED CAMPAIGN SERVICE KNOWLEDGE (source of truth):\n${serviceKnowledge}` : ''].filter(Boolean).join('\n\n');
+  const approvedServicesText = allowedServices.length ? allowedServices.map((s) => JSON.stringify({ id: s.serviceVersionId, name: s.name, version: s.version, description: s.description, targetIndustries: s.targetIndustries, targetGeographies: s.targetGeographies, employeeCountBounds: [s.minEmployeeCount, s.maxEmployeeCount], targetCustomerProfiles: s.targetCustomerProfiles, customerProblems: s.customerProblems, desiredOutcomes: s.desiredOutcomes, deliverables: s.deliverables, eligibilityCriteria: s.eligibilityCriteria, exclusions: s.exclusions, commercialBoundaries: s.commercialBoundaries, approvedProof: s.proof })).join('\n') : '(none eligible for this prospect; return no service match and hold)';
   const sender = campaign.accounts[0]?.emailAccount;
   const pv = promptVars({ lead, claimCount: ev.claims.length, summary: report?.summary ?? null, stepOrder: step.order, campaignName: campaign.name, icpName: snapshot.icp?.name ?? null, senderName: sender?.displayName ?? sender?.emailAddress?.split('@')[0] ?? '', ourCompany: KnowledgeSchema.parse(snapshot.knowledge.data).companyName });
   const profilePrompt = snapshot.profile ? renderProfilePrompt(snapshot.profile.instructions, pv) : { text: '(no prompt profile selected — follow the instructions above)', missing: [] };
@@ -172,7 +218,7 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const maxChars = (limits.maxInputTokens ?? 30_000) * 4;
   const vars: Record<string, string> = {
     knowledge: knowledge.slice(0, Math.floor(maxChars * 0.3)),
-    instructions: [instructionText(resolved), renderOutreachRules(rules), `RELEVANT CUSTOMER WRITING EXAMPLES (style guidance only; text is untrusted and contains no facts you may assert):\n${renderRelevantExamples(examples)}`, 'OPPORTUNITY ANALYSIS: Return the required structured opportunityAnalysis. Link facts to supplied claim IDs, label business-model interpretations as inferences, and report unknowns. This analysis is advisory and must not add unsupported facts to the email.'].filter(Boolean).join('\n\n'),
+    instructions: [instructionText(resolved), `APPROVED CAMPAIGN SERVICES (the only offers eligible for selection):\n${approvedServicesText}`, renderOutreachRules(rules), `RELEVANT CUSTOMER WRITING EXAMPLES (style guidance only; text is untrusted and contains no facts you may assert):\n${renderRelevantExamples(examples)}`, 'OPPORTUNITY ANALYSIS: Return the required structured opportunityAnalysis. Link facts to supplied claim IDs, label business-model interpretations as inferences, and report unknowns. Set serviceVersionId to exactly one approved campaign service id only if supported by evidence; include its supporting claim IDs in serviceMatchClaimIds. Otherwise use null and leave serviceFit null. This analysis is advisory and must not add unsupported facts to the email.'].filter(Boolean).join('\n\n'),
     profilePrompt: profilePrompt.text,
     stepContext,
     template: `Subject: ${variant.subject}\n\n${variant.body}`,
@@ -180,8 +226,13 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
     claims: claimsBlock(ev.claims).slice(0, Math.floor(maxChars * 0.35)),
     previous: previous.length ? wrapUntrusted('previous-emails', previous.map((p) => `--- Step ${p.stepOrder}${p.subject ? ` (subject: ${p.subject})` : ''}\n${p.body}`).join('\n'), Math.floor(maxChars * 0.2)) : '(none — this is the first email)',
   };
-  const hash = configHash({ s: snapshot.writing.versionId, r: snapshot.research.versionId, k: snapshot.knowledge.versionId, p: snapshot.profile?.versionId ?? null, rules: rules.map((r) => r.id), examples: examples.map((e) => e.id), c: snapshot.campaign, i: snapshot.icp, st: step.aiInstructions, v: variant.aiInstructions, l: lead.aiInstructions, t: [variant.subject, variant.body] });
-  return { vars, resolved, snapshot, frozen, claims: ev.claims, excludedClaims: ev.excluded, reportIds: ev.reportIds, previous, variant, step, profilePrompt, hash, knowledge };
+  const hash = configHash({ s: snapshot.writing.versionId, r: snapshot.research.versionId, k: snapshot.knowledge.versionId, p: snapshot.profile?.versionId ?? null, rules: rules.map((r) => r.id), examples: examples.map((e) => e.id), services: allowedServices.map((s) => [s.serviceVersionId, s.proof.map((p) => p.id)]), serviceEligibility: serviceEligibility.excluded, c: snapshot.campaign, i: snapshot.icp, st: step.aiInstructions, v: variant.aiInstructions, l: lead.aiInstructions, t: [variant.subject, variant.body] });
+  const retrievedKnowledgeIds = [...new Set([
+    snapshot.knowledge.versionId, snapshot.writing.versionId, snapshot.research.versionId, snapshot.profile?.versionId,
+    ...snapshot.documents.map((d) => d.id), ...snapshot.outreachRules.map((r) => r.id),
+    ...allowedServices.flatMap((s) => [s.serviceVersionId, ...s.proof.map((p) => p.id)]),
+  ].filter((id): id is string => !!id))];
+  return { vars, resolved, snapshot, frozen, claims: ev.claims, excludedClaims: ev.excluded, reportIds: ev.reportIds, previous, variant, step, profilePrompt, hash, knowledge, allowedServices, serviceEligibilityExcluded: serviceEligibility.excluded, retrievedKnowledgeIds, retrievedExampleIds: examples.map((e) => e.id).filter((id): id is string => !!id), qualification, identity };
 }
 
 async function engagementState(campaignId: string, leadId: string) {
@@ -238,7 +289,7 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     const stop = await stopReason(workspaceId, campaign, lead);
     if (stop) {
       const row = await save({ status: 'SKIPPED', error: `Not generated: ${stop}. Automated follow-ups never continue after a reply, opt-out or other stop condition.`, batchId: opts.batchId ?? undefined });
-      return { status: 'SKIPPED' as const, id: row?.id ?? null, reason: stop };
+      return { status: 'SKIPPED' as const, id: row?.id ?? null, reason: stop, gateStatus: { contactability: 'BLOCKED' as const } };
     }
 
     const ctx = await buildContext(workspaceId, campaign, lead, stepId);
@@ -246,15 +297,40 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
       // Missing variables in the PROMPT are allowed (they render empty) but are reported in quality.
       logger.debug({ missing: ctx.profilePrompt.missing }, 'prompt profile variables missing for lead');
     }
-    if (ctx.claims.length < ctx.resolved.research.minClaims) {
-      const mode = ctx.resolved.research.onMissing;
-      if (mode === 'hold_for_research' || mode === 'skip_lead') {
+    const mode = ctx.resolved.research.onMissing;
+    const researchSatisfied = ctx.claims.length >= ctx.resolved.research.minClaims || mode === 'use_role_and_company_only';
+    const gates = evaluatePersonalizationGates({
+      contactable: true,
+      researchSatisfied,
+      identityVerified: ctx.identity.verified,
+      qualified: ctx.qualification.qualified,
+      serviceEligible: ctx.allowedServices.length > 0,
+    });
+    if (gates.gates.research === 'BLOCKED') {
+      {
         const status = mode === 'skip_lead' ? 'SKIPPED' : 'NEEDS_RESEARCH';
         const msg = `${ctx.claims.length} evidence-backed claim(s) available; ${ctx.resolved.research.minClaims} required. ${mode === 'skip_lead' ? 'Lead skipped by research rules.' : 'Run research for this lead, then generate again.'}${ctx.excludedClaims ? ` (${ctx.excludedClaims} claim(s) excluded by source/age rules.)` : ''}`;
         const row = await save({ status, error: msg, researchReportIds: ctx.reportIds, configHash: ctx.hash, batchId: opts.batchId ?? undefined });
-        return { status, id: row?.id ?? null, reason: msg };
+        return { status, id: row?.id ?? null, reason: msg, gateStatus: gates.gates };
       }
-      // use_role_and_company_only: proceed with no prospect facts (the prompt says so explicitly).
+    }
+
+    if (gates.gates.identity === 'BLOCKED' || gates.gates.qualification === 'BLOCKED') {
+      const failures = [
+        ...(gates.gates.identity === 'BLOCKED' ? [{ id: 'verified_identity', label: 'Verified professional identity', detail: ctx.identity.reason }] : []),
+        ...(gates.gates.qualification === 'BLOCKED' ? [{ id: 'icp_qualification', label: 'ICP qualification', detail: ctx.qualification.reason }] : []),
+      ];
+      const reason = `Personalization held: ${failures.map((f) => `${f.label}: ${f.detail}`).join('; ')}`;
+      const report = { passed: false, score: 0, checks: failures.map((f) => ({ ...f, status: 'fail' })) };
+      const row = await save({ status: 'BLOCKED', error: reason, quality: report as unknown as Prisma.InputJsonValue, qualityPassed: false, researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.snapshot.selectedServices.map((s) => s.serviceVersionId), configHash: ctx.hash, batchId: opts.batchId ?? undefined });
+      return { status: 'BLOCKED' as const, id: row?.id ?? null, ...(opts.preview ? { preview: true } : {}), reason, quality: report, gateStatus: gates.gates };
+    }
+
+    if (gates.gates.serviceEligibility === 'BLOCKED') {
+      const reason = ctx.snapshot.selectedServices?.length ? `No selected approved EMN service is eligible for this prospect: ${ctx.serviceEligibilityExcluded.map((x) => x.reason).join('; ')}` : 'No approved EMN service is selected for this campaign. Select an approved service version before generating outreach.';
+      const report = { passed: false, score: 0, checks: [{ id: 'approved_service', label: 'Approved service selection', status: 'fail', detail: reason }] };
+      const row = await save({ status: 'BLOCKED', error: reason, quality: report as unknown as Prisma.InputJsonValue, qualityPassed: false, researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.snapshot.selectedServices.map((s) => s.serviceVersionId), configHash: ctx.hash, batchId: opts.batchId ?? undefined });
+      return { status: 'BLOCKED' as const, id: row?.id ?? null, ...(opts.preview ? { preview: true } : {}), reason, quality: report, gateStatus: gates.gates };
     }
 
     await save({ status: 'GENERATING', error: null, batchId: opts.batchId ?? undefined });
@@ -283,6 +359,8 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     const supportedIds = new Set(ctx.claims.map((c) => c.id));
     const opportunityAnalysis = {
       ...opp,
+      serviceVersionId: ctx.allowedServices.some((s) => s.serviceVersionId === opp.serviceVersionId) ? opp.serviceVersionId : null,
+      serviceMatchClaimIds: opp.serviceMatchClaimIds.filter((id) => supportedIds.has(id)),
       businessModel: opp.businessModel.basis === 'UNKNOWN' || !opp.businessModel.claimIds.length || !opp.businessModel.claimIds.every((id) => supportedIds.has(id))
         ? { statement: null, basis: 'UNKNOWN' as const, claimIds: [] }
         : opp.businessModel,
@@ -290,13 +368,16 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
       inferences: opp.inferences.filter((i) => i.claimIds.length > 0 && i.claimIds.every((id) => supportedIds.has(id))),
       ...(ctx.claims.length ? {} : { qualification: 'INSUFFICIENT_INFORMATION' as const, confidence: 0, opportunity: null, serviceFit: null, recommendedApproach: null, unknowns: [...new Set([...opp.unknowns, 'No evidence-backed prospect claims were available.'])] }),
     };
+    if (!opportunityAnalysis.serviceVersionId || !opportunityAnalysis.serviceMatchClaimIds.length) opportunityAnalysis.serviceFit = null;
     const subject = ctx.step.threadMode === 'REPLY_IN_THREAD' && ctx.step.order > 1 ? null : (out.subject?.trim() || null);
     const body = out.body.trim();
     const openingLine = out.openingLine?.trim() || null;
 
     // Independent fact-check (separate AI call, same evidence + our knowledge).
     let fcSentences: FactCheckSentence[] | null = null;
-    const factCheckRequired = campaign.requireFactCheck;
+    // AI-generated campaign content must always pass factual validation. Keep the legacy
+    // setting for compatibility, but it cannot disable this minimum safety gate.
+    const factCheckRequired = true;
     try {
       const fc = await factCheck(workspaceId, leadId, `${subject ?? ''}\n${body}`, ctx.knowledge, { claims: ctx.claims, attribution, maxLeadCostUsd: maxLead });
       executionIds.push(fc.executionId);
@@ -313,13 +394,15 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
       previousEmails: ctx.previous, otherLeadOpenings: others.map((o) => o.openingLine!),
       factCheck: fcSentences, factCheckRequired, postalAddressConfigured: !!ws.postalAddress?.trim(), insufficientContext: out.insufficientContext,
     });
+    applyCommercialRelevanceGate(quality, opportunityAnalysis, ctx.allowedServices);
     const ruleChecks = checkRuleTriggerTerms(ctx.snapshot.outreachRules ?? [], `${subject ?? ''}\n${openingLine ?? ''}\n${body}\n${out.cta ?? ''}`);
     quality.checks.push(...ruleChecks);
     if (ruleChecks.some((c) => c.status === 'fail')) quality.passed = false;
     const costAgg = await db().aiExecution.aggregate({ where: { id: { in: executionIds } }, _sum: { costUsd: true } });
     const unpriced = await db().aiExecution.count({ where: { id: { in: executionIds }, costIsEstimate: true } });
     const cost = Number(costAgg._sum.costUsd ?? 0);
-    const explanation = { factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, basis: out.personalizationBasis, opportunityAnalysis, factCheck: fcSentences, model: null as string | null, frozenConfig: ctx.frozen, missingPromptVariables: ctx.profilePrompt.missing };
+    const provenance = { retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, researchEvidenceIds: [...new Set(ctx.claims.map((c) => c.evidence.id))], selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId) };
+    const explanation = { factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, basis: out.personalizationBasis, opportunityAnalysis, factCheck: fcSentences, provenance, model: null as string | null, frozenConfig: ctx.frozen, missingPromptVariables: ctx.profilePrompt.missing };
 
     if (opts.preview) {
       return { status: quality.passed ? 'GENERATED' : 'BLOCKED', preview: true, subject, subjectAlternatives: out.subjectAlternatives, openingLine, body, cta: out.cta, usedClaims: usedClaims.map((c) => ({ id: c.id, text: c.text, url: c.evidence.url, fetchedAt: c.evidence.fetchedAt })), opportunityAnalysis, quality, costUsd: cost, costIsEstimate: unpriced > 0, prompt: { profile: ctx.profilePrompt.text, instructions: ctx.vars.instructions }, explanation };
@@ -327,24 +410,24 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
 
     const prev = await db().leadPersonalization.findUniqueOrThrow({ where: { campaignId_leadId_stepId: { campaignId, leadId, stepId } } });
     const revision = prev.revision + 1;
-    const autoApprove = quality.passed && campaign.reviewMode === 'NONE';
+    // Model output is never its own approval. Passing quality checks is necessary but not
+    // sufficient; a human must explicitly approve this revision before send preparation.
     const content = { subject, openingLine, body, cta: out.cta?.trim() || null };
     const row = await db().$transaction(async (tx) => {
       const r = await tx.leadPersonalization.update({
         where: { id: prev.id },
         data: {
-          ...content, variantId: ctx.variant.id, subjectAlternatives: out.subjectAlternatives.slice(0, 5), usedClaimIds: usedClaims.map((c) => c.id), researchReportIds: ctx.reportIds,
+          ...content, variantId: ctx.variant.id, subjectAlternatives: out.subjectAlternatives.slice(0, 5), usedClaimIds: usedClaims.map((c) => c.id), researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId),
           quality: quality as unknown as Prisma.InputJsonValue, qualityPassed: quality.passed, score: quality.score, scoreExplanation: explanation as unknown as Prisma.InputJsonValue,
-          costUsd: { increment: cost }, costIsEstimate: unpriced > 0, status: autoApprove ? 'APPROVED' : quality.passed ? 'GENERATED' : 'BLOCKED',
+          costUsd: { increment: cost }, costIsEstimate: unpriced > 0, status: quality.passed ? 'GENERATED' : 'BLOCKED',
           manuallyEdited: false, editedById: null, editedAt: null,
-          approvedById: null, approvedAt: autoApprove ? new Date() : null, approvedContentHash: autoApprove ? contentHashOf(content) : null,
+          approvedById: null, approvedAt: null, approvedContentHash: null,
           configHash: ctx.hash, profileVersionId: ctx.snapshot.profile?.versionId ?? null, revision, error: null, generatedAt: new Date(),
         },
       });
-      await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: r.id, revision, source: 'AI', ...content, usedClaimIds: r.usedClaimIds, quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, costUsd: cost, executionIds, createdById: actor.userId ?? null } });
+      await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: r.id, revision, source: 'AI', ...content, usedClaimIds: r.usedClaimIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId), quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, costUsd: cost, executionIds, createdById: actor.userId ?? null } });
       return r;
     });
-    if (autoApprove) await releaseWaitingOutbound(workspaceId, campaignId, leadId, stepId);
     await publish(workspaceId, 'personalization.updated', { campaignId, leadId, stepId, status: row.status });
     return { status: row.status, id: row.id, revision, quality, costUsd: cost };
   } finally {
@@ -407,7 +490,7 @@ export async function editPersonalization(workspaceId: string, id: string, input
   const ctx = await buildContext(workspaceId, campaign, p.lead, p.stepId);
   let fc: FactCheckSentence[] | null = null;
   const executionIds: string[] = [];
-  if (input.rerunFactCheck) {
+  {
     try {
       const ws0 = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
       const maxLead = p.campaign.maxAiCostPerLeadUsd !== null ? Number(p.campaign.maxAiCostPerLeadUsd) : readSettings(ws0.settings).aiMaxCostPerLeadUsd;
@@ -422,8 +505,14 @@ export async function editPersonalization(workspaceId: string, id: string, input
   const quality = runQualityChecks({
     ...content, stepOrder: p.step.order, newThread: p.step.threadMode === 'NEW_THREAD' || p.step.order === 1, writing: ctx.resolved.writing,
     usedClaims, invalidClaimIds: [], availableClaimCount: ctx.claims.length, previousEmails: ctx.previous, otherLeadOpenings: others.map((o) => o.openingLine!),
-    factCheck: fc, factCheckRequired: p.campaign.requireFactCheck, postalAddressConfigured: !!ws.postalAddress?.trim(),
+    factCheck: fc, factCheckRequired: true, postalAddressConfigured: !!ws.postalAddress?.trim(),
   });
+  const priorAnalysis = (p.scoreExplanation as { opportunityAnalysis?: Personalization['opportunityAnalysis'] } | null)?.opportunityAnalysis;
+  if (priorAnalysis) applyCommercialRelevanceGate(quality, priorAnalysis, ctx.allowedServices);
+  else {
+    quality.checks.push({ id: 'commercial_relevance', label: 'ICP, opportunity and service relevance', status: 'fail', detail: 'Opportunity and service match must be regenerated and reviewed before this email can be approved' });
+    quality.passed = false;
+  }
   const ruleChecks = checkRuleTriggerTerms(ctx.snapshot.outreachRules ?? [], `${content.subject ?? ''}\n${content.openingLine ?? ''}\n${content.body}\n${content.cta ?? ''}`);
   quality.checks.push(...ruleChecks);
   if (ruleChecks.some((c) => c.status === 'fail')) quality.passed = false;
@@ -434,7 +523,7 @@ export async function editPersonalization(workspaceId: string, id: string, input
       where: { id: p.id },
       data: { ...content, manuallyEdited: true, editedById: actor.userId ?? null, editedAt: new Date(), quality: quality as unknown as Prisma.InputJsonValue, qualityPassed: quality.passed, score: quality.score, scoreExplanation: { ...prevExplanation, factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, factCheck: fc } as unknown as Prisma.InputJsonValue, status: quality.passed ? 'GENERATED' : 'BLOCKED', approvedById: null, approvedAt: null, approvedContentHash: null, revision },
     });
-    await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: p.id, revision, source: 'MANUAL', ...content, usedClaimIds: p.usedClaimIds, quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, executionIds, createdById: actor.userId ?? null } });
+    await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: p.id, revision, source: 'MANUAL', ...content, usedClaimIds: p.usedClaimIds, retrievedKnowledgeIds: p.retrievedKnowledgeIds, retrievedExampleIds: p.retrievedExampleIds, selectedServiceVersionIds: p.selectedServiceVersionIds, quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, executionIds, createdById: actor.userId ?? null } });
     return r;
   });
   await audit(workspaceId, actor, 'personalization.edited', { type: 'personalization', id }, { revision, wasApproved: p.status === 'APPROVED' });
@@ -451,6 +540,9 @@ export async function approvePersonalizations(workspaceId: string, ids: string[]
     if (r.status === 'APPROVED') { approved.push(r.id); continue; }
     if (!['GENERATED', 'BLOCKED'].includes(r.status) || !r.body) { refused.push({ id: r.id, reason: `status ${r.status}` }); continue; }
     if (!r.qualityPassed) { refused.push({ id: r.id, reason: 'failing quality checks — edit or regenerate first' }); continue; }
+    if ((r.quality as { policyVersion?: number } | null)?.policyVersion !== 2) {
+      refused.push({ id: r.id, reason: 'quality policy changed — regenerate or revalidate this email before approval' }); continue;
+    }
     await db().leadPersonalization.update({ where: { id: r.id }, data: { status: 'APPROVED', approvedById: actor.userId ?? null, approvedAt: new Date(), approvedContentHash: contentHashOf(r) } });
     await outreachBrain.recordFeedback(workspaceId, r.id, 'APPROVED', { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, actor).catch((e) => logger.warn({ err: (e as Error).message }, 'could not save AI approval feedback'));
     await releaseWaitingOutbound(workspaceId, r.campaignId, r.leadId, r.stepId);
@@ -461,11 +553,11 @@ export async function approvePersonalizations(workspaceId: string, ids: string[]
   return { approved: approved.length, refused };
 }
 
-export async function rejectPersonalization(workspaceId: string, id: string, reason: string, actor: Actor) {
+export async function rejectPersonalization(workspaceId: string, id: string, reason: string, actor: Actor, reasonCode: import('./outreach-brain.js').FeedbackReasonCode = 'OTHER') {
   const r = await db().leadPersonalization.findFirst({ where: { id, workspaceId } });
   if (!r) throw NotFound('Personalization');
   await db().leadPersonalization.update({ where: { id }, data: { status: 'REJECTED', error: reason.slice(0, 500), approvedById: null, approvedAt: null, approvedContentHash: null } });
-  await outreachBrain.recordFeedback(workspaceId, id, 'REJECTED', { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, actor, reason).catch((e) => logger.warn({ err: (e as Error).message }, 'could not save AI rejection feedback'));
+  await outreachBrain.recordFeedback(workspaceId, id, 'REJECTED', { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, { subject: r.subject, openingLine: r.openingLine, body: r.body, cta: r.cta }, actor, reason, 'CAMPAIGN', reasonCode).catch((e) => logger.warn({ err: (e as Error).message }, 'could not save AI rejection feedback'));
   await audit(workspaceId, actor, 'personalization.rejected', { type: 'personalization', id }, { reason });
 }
 
@@ -552,12 +644,12 @@ export async function estimateBatch(workspaceId: string, campaignId: string, inp
     chars = Object.values(ctx.vars).reduce((s, v) => s + v.length, 0) + 3000;
   } catch { /* fall back to the default size */ }
   const gen = await estimateCallCost(workspaceId, 'PERSONALIZATION', chars, 900);
-  const fc = campaign.requireFactCheck ? await estimateCallCost(workspaceId, 'FACT_CHECK', 6000, 700) : { usd: 0, priced: true };
+  const fc = await estimateCallCost(workspaceId, 'FACT_CHECK', 6000, 700);
   const per = gen.usd + fc.usd;
   return {
     leads: leads.length, steps: steps.length, generations: pairs.length, preserved,
     perGenerationUsd: per, estimatedUsd: per * pairs.length, priced: gen.priced && fc.priced, model: gen.model,
-    note: `Estimate assumes ~${Math.round(chars / 4)} input tokens and up to 900 output tokens per email plus ${campaign.requireFactCheck ? 'one fact-check call' : 'no fact-check'}. Actual cost is recorded per call.${gen.priced ? '' : ' The model has no price configured, so this estimate is $0 — add a price in AI settings.'}`,
+    note: `Estimate assumes ~${Math.round(chars / 4)} input tokens and up to 900 output tokens per email plus one mandatory fact-check call. Actual cost is recorded per call.${gen.priced ? '' : ' The model has no price configured, so this estimate is $0 — add a price in AI settings.'}`,
   };
 }
 

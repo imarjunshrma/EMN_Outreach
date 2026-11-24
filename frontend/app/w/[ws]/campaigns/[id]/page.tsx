@@ -122,7 +122,7 @@ function SequenceBuilder({ campaign }: { campaign: any }) {
 
 function SettingsForm({ campaign }: { campaign: any }) {
   const [f, setF] = useState<any>(null);
-  useEffect(() => setF({ name: campaign.name, timezone: campaign.timezone, useLeadTimezone: campaign.useLeadTimezone, sendingWindow: campaign.sendingWindow, dailyNewLeadLimit: campaign.dailyNewLeadLimit, dailySendLimit: campaign.dailySendLimit, stopOnReply: campaign.stopOnReply, stopOnAutoReply: campaign.stopOnAutoReply, reviewMode: campaign.reviewMode, requireFactCheck: campaign.requireFactCheck, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, requireVerifiedEmail: campaign.requireVerifiedEmail, minLeadScore: campaign.minLeadScore, maxBounceRatePct: campaign.maxBounceRatePct, maxComplaints: campaign.maxComplaints, usePregeneratedAi: campaign.usePregeneratedAi, scheduledStartAt: campaign.scheduledStartAt }), [campaign]);
+  useEffect(() => setF({ name: campaign.name, timezone: campaign.timezone, useLeadTimezone: campaign.useLeadTimezone, sendingWindow: campaign.sendingWindow, dailyNewLeadLimit: campaign.dailyNewLeadLimit, dailySendLimit: campaign.dailySendLimit, stopOnReply: campaign.stopOnReply, stopOnAutoReply: campaign.stopOnAutoReply, reviewMode: campaign.reviewMode, requireFactCheck: true, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, requireVerifiedEmail: campaign.requireVerifiedEmail, minLeadScore: campaign.minLeadScore, maxBounceRatePct: campaign.maxBounceRatePct, maxComplaints: campaign.maxComplaints, usePregeneratedAi: true, scheduledStartAt: campaign.scheduledStartAt }), [campaign]);
   const save = useWsMutation(() => ({ path: `/campaigns/${campaign.id}`, method: 'PATCH', body: f }), { success: 'Settings saved' });
   if (!f) return null;
   const w = f.sendingWindow;
@@ -146,8 +146,8 @@ function SettingsForm({ campaign }: { campaign: any }) {
       <div className="mt-4 grid gap-2 md:grid-cols-2">
         <Checkbox label="Stop sequence when the prospect replies" checked={f.stopOnReply} onChange={(v) => setF({ ...f, stopOnReply: v })} />
         <Checkbox label="Also stop on auto-replies (out of office)" checked={f.stopOnAutoReply} onChange={(v) => setF({ ...f, stopOnAutoReply: v })} />
-        <Checkbox label="Block AI emails that fail the fact-check" checked={f.requireFactCheck} onChange={(v) => setF({ ...f, requireFactCheck: v })} />
-        <Checkbox label="AI steps send only pre-generated, approved personalization" hint="Recommended. Off = write at send time and review in the queue" checked={f.usePregeneratedAi} onChange={(v) => setF({ ...f, usePregeneratedAi: v })} />
+        <Checkbox label="Mandatory fact-check for AI-generated emails" hint="Required evidence and quality protection; cannot be disabled for campaign AI content" checked disabled onChange={() => undefined} />
+        <Checkbox label="Pre-generate AI personalization before sending" hint="Required so research, service-fit, quality and approval gates run before a message is queued" checked disabled onChange={() => undefined} />
         <Checkbox label="Only email verified addresses (VALID / catch-all)" checked={f.requireVerifiedEmail} onChange={(v) => setF({ ...f, requireVerifiedEmail: v })} />
         <Checkbox label="Open tracking (optional)" hint="Adds a pixel; reduces deliverability; opens are estimates" checked={f.trackOpens} onChange={(v) => setF({ ...f, trackOpens: v })} />
         <Checkbox label="Click tracking (optional)" hint="Rewrites links through your server" checked={f.trackClicks} onChange={(v) => setF({ ...f, trackClicks: v })} />
