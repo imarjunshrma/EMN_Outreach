@@ -9,9 +9,26 @@ import { DEFAULT_PROMPTS } from '../../../shared/src/prompts.js';
 import { redactForLog } from '../../../integrations/src/ai/guard.js';
 import { AI_PROVIDER_NAMES, type AiProviderName } from '../../../integrations/src/ai/types.js';
 import { ProviderError } from '../../../integrations/src/http.js';
+import { isInstructionCapabilityError } from '../../../integrations/src/ai/prompt-compat.js';
 import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
 
 type ProviderName = AiProviderName;
+
+async function workspaceDefaultProvider(workspaceId: string): Promise<ProviderName | null> {
+  const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const value = (ws?.settings as Record<string, unknown> | null)?.aiDefaultProvider;
+  return typeof value === 'string' && AI_PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null;
+}
+
+export async function getDefaultProvider(workspaceId: string): Promise<ProviderName | null> {
+  return workspaceDefaultProvider(workspaceId);
+}
+
+async function persistWorkspaceDefaultProvider(workspaceId: string, provider: ProviderName | null) {
+  const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+  const settings = (ws.settings && typeof ws.settings === 'object' ? ws.settings : {}) as Record<string, unknown>;
+  await db().workspace.update({ where: { id: workspaceId }, data: { settings: { ...settings, aiDefaultProvider: provider } as Prisma.InputJsonValue } });
+}
 
 export const SUGGESTED_MODELS: Record<ProviderName, { fast: string; quality: string }> = {
   ANTHROPIC: { fast: 'claude-haiku-5-5', quality: 'claude-sonnet-5-5' },
@@ -47,6 +64,18 @@ export function computeCost(p: { inputPerMTokUsd: Prisma.Decimal; outputPerMTokU
 
 function monthStart() { const start = new Date(); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0); return start; }
 
+/** Convert provider failures into actionable, secret-safe API errors after fallback candidates are exhausted. */
+export function aiProviderFailure(error: ProviderError): AppError {
+  if (isInstructionCapabilityError(error)) return new AppError('AI_MODEL_UNSUPPORTED', `The selected ${error.provider} model does not support the required instruction format. Choose a compatible model or contact support.`, 400);
+  if (error.code === 'json_validate_failed' || /failed to generate JSON|invalid JSON/i.test(error.message)) return new AppError('AI_INVALID_RESPONSE', `${error.provider} could not produce valid JSON for this request. The task output was rejected; retry or select a model with supported JSON Schema output.`, 502);
+  if (error.code === 'model_not_found' || error.status === 404) return new AppError('AI_MODEL_NOT_FOUND', `The ${error.provider} provider could not find the selected model. Check the exact API model ID and account access.`, 400);
+  if (error.status === 401 || error.status === 403) return new AppError('AI_PROVIDER_AUTH', `The ${error.provider} provider rejected its API key or model access. Check the key and account permissions.`, 502);
+  if (error.status === 429) return new AppError('AI_RATE_LIMITED', `The ${error.provider} provider rate limit was reached. Wait or configure a fallback route.`, 429);
+  if (error.status !== undefined && error.status >= 500) return new AppError('AI_PROVIDER_UNAVAILABLE', `The ${error.provider} provider is temporarily unavailable. Retry later or use a configured fallback.`, 503);
+  if (/empty output|not valid JSON|invalid JSON|no tool_use block/i.test(error.message)) return new AppError('AI_INVALID_RESPONSE', `The ${error.provider} model returned an empty or invalid structured response. Check this model's structured-output support.`, 502);
+  return new AppError('AI_PROVIDER_REQUEST_FAILED', `The ${error.provider} request failed${error.status ? ` (HTTP ${error.status})` : ''}. Check its configuration and retry.`, 502);
+}
+
 async function monthSpend(workspaceId: string, task?: AiTaskName) {
   const r = await db().aiExecution.aggregate({ where: { workspaceId, ...(task ? { task } : {}), createdAt: { gte: monthStart() } }, _sum: { costUsd: true } });
   return Number(r._sum.costUsd ?? 0);
@@ -61,9 +90,11 @@ export async function leadSpend(workspaceId: string, campaignId: string, leadId:
 /** Upper-bound cost estimate for one call (input chars/4 tokens + full output budget). */
 export async function estimateCallCost(workspaceId: string, task: AiTaskName, inputChars: number, outputTokens?: number) {
   const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
-  const provider = await db().aiProvider.findFirst({ where: { workspaceId, isEnabled: true, ...(route ? { provider: route.provider } : {}) } });
+  const inheritedDefault = !route || route.useWorkspaceDefault ? await workspaceDefaultProvider(workspaceId) : null;
+  const providerName = inheritedDefault ?? route?.provider;
+  const provider = await db().aiProvider.findFirst({ where: { workspaceId, isEnabled: true, ...(providerName ? { provider: providerName } : {}) }, orderBy: { provider: 'asc' } });
   if (!provider) return { usd: 0, priced: false, model: null as string | null };
-  const model = route?.model ?? provider.defaultModel;
+  const model = inheritedDefault ? provider.defaultModel : route?.model ?? provider.defaultModel;
   const price = await priceFor(provider.provider, model);
   const inputTokens = Math.ceil(inputChars / 4) + 600; // + system prompt
   const out = outputTokens ?? route?.maxOutputTokens ?? 1500;
@@ -90,10 +121,13 @@ async function resolveCandidates(workspaceId: string, task: AiTaskName): Promise
   const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true } });
   if (providers.length === 0) throw new AppError('PROVIDER_NOT_CONFIGURED', 'No AI provider is configured. Add a provider in AI settings.', 400);
   const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
-  const enabled = new Set(providers.map((p) => p.provider));
+  const defaultProviderName = !route || route.useWorkspaceDefault ? await workspaceDefaultProvider(workspaceId) : null;
+  const defaultProvider = defaultProviderName ? providers.find((p) => p.provider === defaultProviderName) : undefined;
+  const primary = defaultProvider ?? (route ? providers.find((p) => p.provider === route.provider) : undefined);
   const candidates: Candidate[] = [];
-  if (route && enabled.has(route.provider)) candidates.push({ provider: route.provider, model: route.model, fallback: false });
-  if (route?.fallbackProvider && route.fallbackModel && enabled.has(route.fallbackProvider)) candidates.push({ provider: route.fallbackProvider, model: route.fallbackModel, fallback: true });
+  if (primary) candidates.push({ provider: primary.provider, model: defaultProvider ? primary.defaultModel : route?.model ?? primary.defaultModel, fallback: false });
+  const fallback = route?.fallbackProvider ? providers.find((p) => p.provider === route.fallbackProvider) : undefined;
+  if (fallback && route?.fallbackModel && fallback.provider !== primary?.provider) candidates.push({ provider: fallback.provider, model: route.fallbackModel, fallback: true });
   if (candidates.length === 0) for (const p of providers) candidates.push({ provider: p.provider, model: p.defaultModel, fallback: candidates.length > 0 });
   return { candidates, maxOutputTokens: route?.maxOutputTokens ?? 1500, temperature: route?.temperature ?? undefined, budget: route?.monthlyBudgetUsd ? Number(route.monthlyBudgetUsd) : null };
 }
@@ -163,6 +197,7 @@ export async function runAi<T = unknown>(
   }
   const preview = redactForLog(userPrompt).slice(0, 1500);
   let lastError = 'unknown error';
+  let lastProviderError: ProviderError | null = null;
 
   for (const cand of candidates) {
     const prov = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: cand.provider } } });
@@ -180,7 +215,7 @@ export async function runAi<T = unknown>(
         const exec = await db().aiExecution.create({
           data: {
             workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id,
-            status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: cand.fallback,
+            status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: cand.fallback, generationMode: res.generationMode ?? 'structured',
             inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens, cachedTokens: res.usage.cachedTokens,
             costUsd: cost, costIsEstimate: !priced, latencyMs: res.latencyMs,
             entityType: opts.entity?.type, entityId: opts.entity?.id, ...att,
@@ -189,15 +224,18 @@ export async function runAi<T = unknown>(
             errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
           },
         });
+        logger.info({ executionId: exec.id, task, provider: cand.provider, model: cand.model, generationMode: res.generationMode ?? 'structured', schemaValid: parsed.success }, 'AI generation completed');
         const usage = await import('./usage.js');
         usage.meter({ workspaceId, metric: 'ai_requests', quantity: 1, key: `ai:${exec.id}` });
         usage.meter({ workspaceId, metric: 'ai_tokens', quantity: (res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0), key: `ai-tok:${exec.id}` });
         usage.meter({ workspaceId, metric: 'ai_cost_micro_usd', quantity: Math.round(Number(cost ?? 0) * 1_000_000), key: `ai-cost:${exec.id}` });
         if (parsed.success) return { data: parsed.data as T, executionId: exec.id, provider: cand.provider, model: cand.model };
         lastError = `schema invalid: ${exec.errorMessage}`;
-        user = `${userPrompt}\n\nYour previous answer failed validation (${exec.errorMessage}). Return output that matches the schema exactly.`;
+        lastProviderError = null;
+        user = `${userPrompt}\n\nCONTROLLED SCHEMA REPAIR (one retry only): Your previous JSON response failed validation: ${exec.errorMessage}. Return a corrected complete JSON object. Include every required property exactly as named; never omit a property. Use null for nullable string fields when there is no value, and an empty array when no IDs apply. Follow the JSON Schema supplied with this request and output JSON only.`;
       } catch (e) {
         lastError = (e as Error).message;
+        lastProviderError = e instanceof ProviderError ? e : null;
         await db().aiExecution.create({
           data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: preview },
         });
@@ -207,6 +245,7 @@ export async function runAi<T = unknown>(
       }
     }
   }
+  if (lastProviderError) throw aiProviderFailure(lastProviderError);
   throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed: ${lastError}`, 502);
 }
 
@@ -261,6 +300,25 @@ export async function listProviders(workspaceId: string) {
   return ps.map(({ encryptedApiKey: _k, ...p }) => p);
 }
 
+export const SetDefaultProviderSchema = z.object({
+  provider: z.enum(AI_PROVIDER_NAMES).nullable(),
+  applyToAll: z.boolean().default(false),
+});
+
+export async function setDefaultProvider(workspaceId: string, input: z.infer<typeof SetDefaultProviderSchema>, actor: Actor) {
+  if (input.applyToAll && !input.provider) throw new AppError('VALIDATION_FAILED', 'Choose an enabled provider before applying a default to all tasks', 400);
+  if (input.provider) {
+    const provider = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: input.provider } } });
+    if (!provider?.isEnabled) throw new AppError('VALIDATION_FAILED', 'The workspace default must be an enabled, configured AI provider', 400);
+  }
+  await persistWorkspaceDefaultProvider(workspaceId, input.provider);
+  if (input.applyToAll) await db().aiModelRoute.updateMany({ where: { workspaceId }, data: { useWorkspaceDefault: true } });
+  if (!input.provider) await db().aiModelRoute.updateMany({ where: { workspaceId }, data: { useWorkspaceDefault: false } });
+  await ensureDefaultRoutes(workspaceId);
+  await audit(workspaceId, actor, 'ai.default_provider.updated', undefined, { provider: input.provider, appliedToAllTasks: input.applyToAll });
+  return { defaultProvider: input.provider, appliedToAll: input.applyToAll };
+}
+
 function validateBaseUrl(provider: ProviderName, raw?: string | null) {
   if (!raw?.trim()) {
     if (provider === 'CUSTOM_OPENAI') throw new AppError('VALIDATION_FAILED', 'A base URL is required for a custom OpenAI-compatible endpoint', 400);
@@ -281,6 +339,9 @@ function validateBaseUrl(provider: ProviderName, raw?: string | null) {
 
 export async function upsertProvider(workspaceId: string, input: { provider: ProviderName; apiKey?: string; defaultModel: string; baseUrl?: string | null; isEnabled?: boolean }, actor: Actor) {
   const baseUrl = validateBaseUrl(input.provider, input.baseUrl);
+  if (input.isEnabled === false && await workspaceDefaultProvider(workspaceId) === input.provider) {
+    throw new AppError('VALIDATION_FAILED', 'Choose a different workspace default before disabling this provider', 400);
+  }
   const existing = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: input.provider } } });
   const keyOptional = input.provider === 'OLLAMA' || input.provider === 'CUSTOM_OPENAI';
   if (!existing && !input.apiKey && !keyOptional) throw new AppError('VALIDATION_FAILED', 'API key is required', 400);
@@ -300,9 +361,14 @@ export async function upsertProvider(workspaceId: string, input: { provider: Pro
 }
 
 export async function deleteProvider(workspaceId: string, provider: ProviderName, actor: Actor) {
+  const wasDefault = await workspaceDefaultProvider(workspaceId) === provider;
   await db().aiProvider.deleteMany({ where: { workspaceId, provider } });
   await db().aiModelRoute.deleteMany({ where: { workspaceId, provider } });
   await db().aiModelRoute.updateMany({ where: { workspaceId, fallbackProvider: provider }, data: { fallbackProvider: null, fallbackModel: null } });
+  if (wasDefault) {
+    await persistWorkspaceDefaultProvider(workspaceId, null);
+    await db().aiModelRoute.updateMany({ where: { workspaceId }, data: { useWorkspaceDefault: false } });
+  }
   await ensureDefaultRoutes(workspaceId);
   await audit(workspaceId, actor, 'ai_provider.removed', undefined, { provider });
 }
@@ -330,13 +396,14 @@ export async function providerModels(workspaceId: string, provider: ProviderName
 export async function ensureDefaultRoutes(workspaceId: string) {
   const providers = await db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, orderBy: { provider: 'asc' } });
   if (providers.length === 0) return;
-  const primary = providers.find((p) => p.provider === 'ANTHROPIC') ?? providers[0];
+  const defaultName = await workspaceDefaultProvider(workspaceId);
+  const primary = providers.find((p) => p.provider === defaultName) ?? providers.find((p) => p.provider === 'ANTHROPIC') ?? providers[0];
   const secondary = providers.find((p) => p.provider !== primary.provider) ?? null;
   for (const task of AI_TASKS) {
     const existing = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
     const model = primary.provider === 'ANTHROPIC' && FAST_TASKS.includes(task) ? SUGGESTED_MODELS.ANTHROPIC.fast : primary.defaultModel;
     if (!existing) {
-      await db().aiModelRoute.create({ data: { workspaceId, task, provider: primary.provider, model, fallbackProvider: secondary?.provider ?? null, fallbackModel: secondary?.defaultModel ?? null } });
+      await db().aiModelRoute.create({ data: { workspaceId, task, provider: primary.provider, model, useWorkspaceDefault: !!defaultName, fallbackProvider: secondary?.provider ?? null, fallbackModel: secondary?.defaultModel ?? null } });
     } else if (!existing.fallbackProvider && secondary && secondary.provider !== existing.provider) {
       await db().aiModelRoute.update({ where: { id: existing.id }, data: { fallbackProvider: secondary.provider, fallbackModel: secondary.defaultModel } });
     }
@@ -347,6 +414,7 @@ export const RouteUpdateSchema = z.object({
   task: z.enum(AI_TASKS as [AiTaskName, ...AiTaskName[]]),
   provider: z.enum(AI_PROVIDER_NAMES),
   model: z.string().min(1),
+  useWorkspaceDefault: z.boolean().optional(),
   fallbackProvider: z.enum(AI_PROVIDER_NAMES).nullable().optional(),
   fallbackModel: z.string().nullable().optional(),
   temperature: z.number().min(0).max(2).nullable().optional(),
@@ -360,8 +428,12 @@ export async function listRoutes(workspaceId: string) {
 }
 
 export async function updateRoute(workspaceId: string, input: z.infer<typeof RouteUpdateSchema>, actor: Actor) {
+  if (input.useWorkspaceDefault && !await workspaceDefaultProvider(workspaceId)) {
+    throw new AppError('VALIDATION_FAILED', 'Set a workspace default provider before switching a task to it', 400);
+  }
   const data = {
     provider: input.provider, model: input.model,
+    useWorkspaceDefault: input.useWorkspaceDefault ?? false,
     fallbackProvider: input.fallbackProvider ?? null, fallbackModel: input.fallbackProvider ? input.fallbackModel ?? null : null,
     temperature: input.temperature ?? null, maxOutputTokens: input.maxOutputTokens ?? 1500,
     maxInputTokens: input.maxInputTokens ?? null,

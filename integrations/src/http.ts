@@ -38,6 +38,20 @@ function parseRetryAfter(h: string | null): number | undefined {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function providerErrorDetails(body: string): { message: string; code?: string } {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown; code?: unknown }; message?: unknown; code?: unknown };
+    const source = parsed.error && typeof parsed.error === 'object' ? parsed.error : parsed;
+    const message = typeof source.message === 'string' ? source.message : 'request rejected';
+    const code = typeof source.code === 'string' ? source.code : undefined;
+    // Provider error payloads can include echoed generations or request data; keep only the
+    // short human-readable message and machine code, and mask credentials if echoed there.
+    return { message: message.slice(0, 240).replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]').replace(/((?:api[_-]?key|token|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]'), code };
+  } catch {
+    return { message: body ? 'request rejected with a non-JSON error response' : 'request rejected' };
+  }
+}
+
 export async function httpRequest(url: string, init: RequestInit, opts: HttpOptions): Promise<Response> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const retries = opts.retries ?? 2;
@@ -50,7 +64,8 @@ export async function httpRequest(url: string, init: RequestInit, opts: HttpOpti
       if (res.ok) return res;
       const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
       const body = await res.text().catch(() => '');
-      const err = new ProviderError(opts.provider, `HTTP ${res.status}: ${body.slice(0, 300)}`, res.status, isRetryableStatus(res.status), retryAfter);
+      const details = providerErrorDetails(body);
+      const err = new ProviderError(opts.provider, `HTTP ${res.status}${details.code ? ` ${details.code}` : ''}: ${details.message}`, res.status, isRetryableStatus(res.status), retryAfter, details.code);
       if (!err.retryable || attempt === retries) throw err;
       lastErr = err;
       await sleep(Math.min(retryAfter ?? 500 * 2 ** attempt, 10_000));

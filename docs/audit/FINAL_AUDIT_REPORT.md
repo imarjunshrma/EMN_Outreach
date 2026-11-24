@@ -1,43 +1,46 @@
-# Final audit report (current stage)
+# Final audit report — current continuation
 
 ## Outcome
 
-**Not complete; product readiness cannot be established.** Source audit and documentation artifacts were created, one tenant-context defect was corrected, and static checks pass. Database-backed tests and runtime workflows are blocked because Docker is unavailable and PostgreSQL is not listening. This report does not claim production readiness.
+The requested full functional acceptance is **not established**. I continued the source-level module review, refreshed stale audit inventory counts, and ran checks that do not require the configured database. No application implementation was changed in this continuation. The test/deployment setup files were left untouched.
 
-## Source inventory
+## Current source inventory
 
-- Version: **1.2.0**.
-- API declarations: **284**.
-- Frontend page files: **65**.
-- Prisma models: **84**; enums: **44**; migrations: **4**.
-- Existing internal test files: **17** (12 integration, 5 unit).
-- Worker queue names: **15**; scheduled definitions are in `worker/src/main.ts`.
+- Version: **1.4.0**.
+- API route declarations: **430** across **12** route modules.
+- Frontend pages: **98** `page.tsx` files.
+- Prisma schema: **111** models, **50** enums, **15** migration directories.
+- Test files: **12** unit, **25** integration, **6** Playwright specs.
+- Worker entry points: `worker/src/main.ts` and centralized handlers in `worker/src/processors.ts`.
 
-## Changes and evidence
+Counts are a filesystem/source inventory only; they do not mean every route or page was executed.
 
-- Mailbox ingestion now verifies account ID and workspace ID together; regression test added.
-- First-owner registration now serializes the initial account decision with a transaction-scoped advisory lock; concurrency regression test added.
-- Compose YAML was restored to separate owner/runtime DB creds, runtime role initialization, protected Redis, migration dependency, healthchecks and isolated project docs.
-- `ruby -e "require 'yaml'; YAML.load_file('docker-compose.yml'); puts 'YAML parse OK'` — PASS.
-- `npm run typecheck` — PASS.
-- `npm run build` — PASS.
-- `npm run lint` — PASS with 8 warnings.
-- Isolated pure unit suites — PASS, 38 tests across adapters/shared/security; DB-backed integration suites remain blocked.
-- `npx prisma validate` — PASS (previous audit command; schema unchanged in this task).
-- `npm test` — blocked at global setup; Postgres connection unavailable, no tests executed.
-- Docker Compose build/runtime — NOT TESTED (`docker` unavailable).
+## Module review evidence
 
-## Feature status
+Static tracing reviewed the system boundaries and representative core paths: auth/tenant provisioning, workspace-scoped lead operations, AI provider selection and fallback, first-party email verification, campaign approval/send guards, mailbox credential encryption, inbound message idempotency/thread matching, reply classification and suppression effects, and worker scheduling/retry setup. Existing audit references map the remaining modules in `FEATURE_INVENTORY.md`, `API_REVIEW.md`, `FRONTEND_REVIEW.md`, `DATABASE_REVIEW.md`, and `INTEGRATIONS_REVIEW.md`.
 
-Feature domains and implementation references are in `FEATURE_INVENTORY.md`. None are marked COMPLETE based only on source existence. Current status is predominantly PARTIAL or BLOCKED. Integrations requiring external services are marked in `INTEGRATIONS_REVIEW.md`.
+This continuation did not inspect each of 430 handlers and 98 pages line by line. It therefore does not certify every module as working. One relevant operational concern was verified in existing test tooling: `scripts/e2e.sh` drops/recreates the fixed `emn_e2e` database and flushes Redis DB 14; integration setup truncates its database tables and flushes the configured Redis DB. Because the user asked not to change setup and an isolated stack was not established, those suites were not run.
+
+## Checks actually executed
+
+| Check | Result | Evidence / limit |
+|---|---|---|
+| `SKIP_TEST_DB=1 npx vitest run tests/unit --exclude tests/unit/smtp-protocol.test.ts --exclude tests/unit/smtp-session.test.ts` | **PASS** | 10 files, 88 tests. The two socket-based SMTP suites were excluded. |
+| `npm run typecheck` | **PASS** | `tsc -p tsconfig.json --noEmit`, exit 0. |
+| `npx eslint backend/src worker/src shared/src integrations/src tests e2e` | **PASS WITH WARNINGS** | 0 errors, 16 `no-explicit-any` warnings. |
+| `npm run build` | **PASS (prior audit run)** | Recorded in prior audit state; not rerun during this continuation. |
+| DB-backed integration suite | **NOT RUN** | Requires isolated PostgreSQL/Redis; no database mutation attempted. |
+| Browser E2E / 98 pages | **NOT RUN** | Requires isolated DB/Redis and browser runtime. |
+| Docker / Compose / EC2 verification | **NOT RUN** | Explicitly outside this continuation's edit scope; no setup files changed. |
+| Live AI, email, billing, search, DNS providers | **NOT RUN** | No credentials used; no external calls or emails sent. |
 
 ## Acceptance status
 
-- Architecture and inventories: source-derived docs created.
-- All 284 APIs / 65 pages behavior-tested: **NO**.
-- Tenant security: one concrete issue fixed; full two-workspace suite **BLOCKED**.
-- Fresh database migration, grants, CRUD, upgrade, backup/restore: **NOT TESTED**.
-- Core browser workflows and worker recovery: **NOT TESTED**.
-- Live providers: deliberately not contacted.
+- Source architecture and feature inventory: **PARTIAL**.
+- Every API route/page behavior verified: **NO**.
+- Fresh DB migration, role permissions, persistence, backup/restore: **NOT TESTED**.
+- Real browser-to-API workflows: **NOT TESTED**.
+- Provider-backed workflows and deliverability: **NOT TESTED**.
+- Cross-tenant security: existing regression suites are present, but a live database-backed pass was **NOT RUN** in this continuation.
 
-See `UNRESOLVED_ISSUES.md` for blockers and required next steps.
+See `UNRESOLVED_ISSUES.md` for blockers and the next safe verification steps. This report makes no claim of production readiness.

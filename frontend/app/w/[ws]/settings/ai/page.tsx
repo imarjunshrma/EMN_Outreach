@@ -68,7 +68,7 @@ function AiSettingsInner() {
 }
 
 function Providers() {
-  const q = useWsQuery<{ providers: any[]; suggestions: Record<string, { fast: string; quality: string }> }>('/ai/providers');
+  const q = useWsQuery<{ providers: any[]; suggestions: Record<string, { fast: string; quality: string }>; defaultProvider: string | null }>('/ai/providers');
   const modelLists = useProviderModels(q.data?.providers);
   const [forms, setForms] = useState<Record<string, { apiKey: string; defaultModel: string; baseUrl: string; isEnabled: boolean }>>({});
   const [customModels, setCustomModels] = useState<Record<string, boolean>>({});
@@ -76,10 +76,23 @@ function Providers() {
   const save = useWsMutation<string>((p) => ({ path: '/ai/providers', method: 'PUT', body: { provider: p, defaultModel: forms[p].defaultModel, baseUrl: forms[p].baseUrl || null, isEnabled: forms[p].isEnabled, ...(forms[p].apiKey ? { apiKey: forms[p].apiKey } : {}) } }), { success: 'Saved', onSuccess: () => setForms((f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, { ...v, apiKey: '' }]))) });
   const test = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}/test`, body: {} }), { success: (r: any) => (r.ok ? 'Connection OK' : `Failed: ${r.error}`) });
   const del = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}`, method: 'DELETE' }), { success: 'Removed' });
+  const setDefault = useWsMutation<{ provider: string | null; applyToAll: boolean }>((body) => ({ path: '/ai/default-provider', method: 'PUT', body }), { success: 'Workspace default saved' });
+  const [defaultChoice, setDefaultChoice] = useState('');
+  const [applyDefault, setApplyDefault] = useState(false);
+  useEffect(() => { if (q.data) setDefaultChoice(q.data.defaultProvider ?? ''); }, [q.data?.defaultProvider]);
   return (
     <QueryView q={q}>
       {(d) => (
         <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="lg:col-span-2" title="Workspace default provider">
+            <p className="mb-3 text-sm text-slate-600">Choose the provider new task routes should inherit. Existing task routes stay as they are unless you apply this default to all of them.</p>
+            <div className="flex flex-wrap items-end gap-3">
+              <Field label="Default AI provider"><Select value={defaultChoice} onChange={(e) => setDefaultChoice(e.target.value)} options={[{ value: '', label: 'No workspace default' }, ...d.providers.filter((p) => p.isEnabled).map((p) => ({ value: p.provider, label: AI_PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider }))]} /></Field>
+              <Checkbox label="Apply to all current task routes" checked={applyDefault} onChange={setApplyDefault} />
+              <Button disabled={!!defaultChoice && !d.providers.some((p) => p.provider === defaultChoice && p.isEnabled)} loading={setDefault.isPending} onClick={() => setDefault.mutate({ provider: defaultChoice || null, applyToAll: applyDefault })}>Save default</Button>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">When enabled, tasks use this provider’s configured default model. Individual tasks can switch back to an explicit provider under Model routing.</p>
+          </Card>
           {AI_PROVIDERS.map(([p, label]) => {
             const cur = d.providers.find((x) => x.provider === p);
             const f = forms[p] ?? { apiKey: '', defaultModel: '', baseUrl: '', isEnabled: true };
@@ -109,7 +122,7 @@ function Providers() {
 
 function Routes() {
   const q = useWsQuery<any[]>('/ai/routes');
-  const providers = useWsQuery<{ providers: any[] }>('/ai/providers');
+  const providers = useWsQuery<{ providers: any[]; defaultProvider: string | null }>('/ai/providers');
   const modelLists = useProviderModels(providers.data?.providers);
   const providerChoices = (providers.data?.providers ?? []).map((p) => ({ value: p.provider, label: AI_PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider }));
   const [edits, setEdits] = useState<Record<string, any>>({});
@@ -118,19 +131,26 @@ function Routes() {
   return (
     <QueryView q={q} isEmpty={(d) => d.length === 0} empty={<Notice>Add an AI provider first; default routes are created automatically.</Notice>}>
       {(rows) => (
-        <div className="card p-2"><Table head={['Task', 'Provider', 'Model', 'Fallback', 'Fallback model', 'Max tokens', 'Monthly budget $', '']}>
+        <>
+        {providers.data?.defaultProvider && rows.some((r) => !r.useWorkspaceDefault) && <Notice>Workspace default is <strong>{providers.data.defaultProvider}</strong>, but {rows.filter((r) => !r.useWorkspaceDefault).length} task route(s) still use their saved provider overrides. In Providers &amp; keys, choose “Apply to all current task routes” to make the default effective for them.</Notice>}
+        <div className="card mt-3 p-2"><Table head={['Task', 'Provider', 'Model', 'Fallback', 'Fallback model', 'Max tokens', 'Monthly budget $', '']}>
           {AI_TASKS.map((t) => {
             const r = rows.find((x) => x.task === t);
-            const e = edits[t] ?? { provider: r?.provider ?? 'ANTHROPIC', model: r?.model ?? '', fallbackProvider: r?.fallbackProvider ?? null, fallbackModel: r?.fallbackModel ?? '', maxOutputTokens: r?.maxOutputTokens ?? 1500, monthlyBudgetUsd: r?.monthlyBudgetUsd ?? '' };
+            const e = edits[t] ?? { provider: r?.provider ?? 'ANTHROPIC', model: r?.model ?? '', useWorkspaceDefault: r?.useWorkspaceDefault ?? false, fallbackProvider: r?.fallbackProvider ?? null, fallbackModel: r?.fallbackModel ?? '', maxOutputTokens: r?.maxOutputTokens ?? 1500, monthlyBudgetUsd: r?.monthlyBudgetUsd ?? '' };
             const models = modelLists[e.provider as keyof typeof modelLists]?.models;
             const fallbackModels = modelLists[e.fallbackProvider as keyof typeof modelLists]?.models;
+            const inheritedProvider = providers.data?.providers.find((p) => p.provider === providers.data?.defaultProvider);
             const set = (k: string, v: unknown) => setEdits({ ...edits, [t]: { ...e, [k]: v } });
             return (
               <tr key={t}><td className="td text-xs font-medium">{t}</td>
-                <td className="td"><Select value={e.provider} onChange={(x) => set('provider', x.target.value)} options={providerChoices} /></td>
-                <td className="td">{models?.length && !customModels[t]
+                <td className="td"><Checkbox label="Use workspace default" checked={e.useWorkspaceDefault} onChange={(v) => set('useWorkspaceDefault', v)} />{e.useWorkspaceDefault
+                  ? <p className="mt-2 text-xs font-medium text-green-700">Effective provider: {providers.data?.defaultProvider ?? 'not set'}</p>
+                  : <><div className="mt-2"><Select value={e.provider} onChange={(x) => set('provider', x.target.value)} options={providerChoices} /></div>{providers.data?.defaultProvider && <p className="mt-1 text-xs text-amber-700">Explicit override; workspace default ({providers.data.defaultProvider}) is not used for this task.</p>}</>}</td>
+                <td className="td">{e.useWorkspaceDefault
+                  ? <span className="text-xs text-green-700">{inheritedProvider?.defaultModel ?? 'Workspace default has no configured model'}</span>
+                  : models?.length && !customModels[t]
                   ? <Select value={e.model} onChange={(x) => { if (x.target.value === '__custom__') setCustomModels({ ...customModels, [t]: true }); else set('model', x.target.value); }} options={modelChoices(models, e.model)} />
-                  : <Input value={e.model} placeholder="Model ID" onChange={(x) => set('model', x.target.value)} />}{customModels[t] && <button className="mt-1 text-xs text-brand-700" onClick={() => setCustomModels({ ...customModels, [t]: false })}>Choose from model list</button>}</td>
+                  : <Input value={e.model} placeholder="Model ID" onChange={(x) => set('model', x.target.value)} />}{!e.useWorkspaceDefault && customModels[t] && <button className="mt-1 text-xs text-brand-700" onClick={() => setCustomModels({ ...customModels, [t]: false })}>Choose from model list</button>}</td>
                 <td className="td"><Select value={e.fallbackProvider ?? ''} onChange={(x) => set('fallbackProvider', x.target.value || null)} options={[{ value: '', label: 'none' }, ...providerChoices]} /></td>
                 <td className="td">{fallbackModels?.length && !customModels[`${t}-fallback`]
                   ? <Select value={e.fallbackModel ?? ''} onChange={(x) => { if (x.target.value === '__custom__') setCustomModels({ ...customModels, [`${t}-fallback`]: true }); else set('fallbackModel', x.target.value); }} options={modelChoices(fallbackModels, e.fallbackModel ?? '')} />
@@ -142,6 +162,7 @@ function Routes() {
             );
           })}
         </Table></div>
+        </>
       )}
     </QueryView>
   );
@@ -190,8 +211,8 @@ function Logs() {
       <QueryView q={q}>
         {(d) => (
           <div className="card p-2">
-            <Table head={['When', 'Task', 'Provider / model', 'Status', 'Tokens in/out', 'Cost', 'Latency', 'Details']}>
-              {d.data.map((e: any) => <tr key={e.id}><td className="td text-xs">{fmtDate(e.createdAt)}</td><td className="td text-xs">{e.task}</td><td className="td text-xs">{e.provider} · {e.model}{e.usedFallback && <Badge color="yellow">fallback</Badge>}</td><td className="td"><Badge>{e.status}</Badge></td><td className="td text-xs">{e.inputTokens}/{e.outputTokens}</td><td className="td text-xs">{fmtUsd(Number(e.costUsd))}{e.costIsEstimate && '*'}</td><td className="td text-xs">{e.latencyMs ?? '—'} ms</td>
+            <Table head={['When', 'Task', 'Provider / model', 'Generation', 'Status', 'Tokens in/out', 'Cost', 'Latency', 'Details']}>
+              {d.data.map((e: any) => <tr key={e.id}><td className="td text-xs">{fmtDate(e.createdAt)}</td><td className="td text-xs">{e.task}</td><td className="td text-xs">{e.provider} · {e.model}{e.usedFallback && <Badge color="yellow">route fallback</Badge>}</td><td className="td text-xs"><Badge color={e.generationMode === 'structured' ? 'green' : 'yellow'}>{e.generationMode ?? 'legacy'}</Badge></td><td className="td"><Badge>{e.status}</Badge></td><td className="td text-xs">{e.inputTokens}/{e.outputTokens}</td><td className="td text-xs">{fmtUsd(Number(e.costUsd))}{e.costIsEstimate && '*'}</td><td className="td text-xs">{e.latencyMs ?? '—'} ms</td>
                 <td className="td text-xs"><details><summary className="cursor-pointer">view</summary>{e.errorMessage && <p className="text-red-600">{e.errorMessage}</p>}<pre className="max-w-md whitespace-pre-wrap">{e.output ? JSON.stringify(e.output, null, 2).slice(0, 3000) : '(output removed by retention or none)'}</pre></details></td></tr>)}
             </Table>
             <Pagination page={d.page} totalPages={d.totalPages} total={d.total} onPage={(p) => setF({ ...f, page: p })} />

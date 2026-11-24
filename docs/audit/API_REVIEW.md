@@ -1,6 +1,6 @@
 # API route review
 
-Current declared route count: **284** across `9` route modules. Prefix is `/api/v1`. Route declarations use Zod schemas where supplied; `mountRoutes()` handles auth, membership, role, API-key scope, rate limit and validation. A complete HTTP-level pass is BLOCKED without DB/Redis.
+Current registered route declaration count: **430** across `12` route modules. Prefix is `/api/v1`. Route declarations use Zod schemas where supplied; `mountRoutes()` handles auth, membership, role, API-key scope, rate limit and validation. This is not a route-by-route runtime pass; database-backed HTTP behavior remains NOT TESTED here.
 
 | Method | Path | Tag | Auth | Declared role / enforcement | Summary | Source |
 |---|---|---|---|---|---|---|

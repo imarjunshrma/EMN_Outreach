@@ -40,7 +40,9 @@ describe('AI orchestrator', () => {
     await addAiProvider(s.workspaceId, 'OPENAI', 'my-openai-model');
     let n = 0;
     fakes.anthropic.on('SUBJECT_LINES', () => (++n === 1 ? { wrong: true } : { subjects: ['fixed'] }));
-    expect((await runAi<{ subjects: string[] }>(s.workspaceId, 'SUBJECT_LINES', { body: 'x', lead: '{}', count: '1' })).data.subjects).toEqual(['fixed']);
+    const repaired = await runAi<{ subjects: string[] }>(s.workspaceId, 'SUBJECT_LINES', { body: 'x', lead: '{}', count: '1' });
+    expect(repaired.data.subjects).toEqual(['fixed']);
+    expect(await db().aiExecution.findUniqueOrThrow({ where: { id: repaired.executionId } })).toMatchObject({ status: 'SUCCEEDED', generationMode: 'structured' });
     fakes.anthropic.failWith = new ProviderError('anthropic', 'HTTP 401 invalid key', 401);
     fakes.openai.on('SUBJECT_LINES', () => ({ subjects: ['from openai'] }));
     const r = await runAi<{ subjects: string[] }>(s.workspaceId, 'SUBJECT_LINES', { body: 'x', lead: '{}', count: '1' });
@@ -48,6 +50,27 @@ describe('AI orchestrator', () => {
     expect((await db().aiExecution.findUniqueOrThrow({ where: { id: r.executionId } })).usedFallback).toBe(true);
     expect(await db().aiExecution.count({ where: { status: 'SCHEMA_INVALID' } })).toBe(1);
     expect(await db().aiExecution.count({ where: { status: 'FAILED' } })).toBe(1);
+  });
+
+  it('never returns schema-invalid AI output after the bounded repair attempt', async () => {
+    const s = await createUserSession('invalid-output@x.com');
+    await addAiProvider(s.workspaceId);
+    fakes.anthropic.on('EMAIL_WRITING', () => ({ subject: 'missing required fields' }));
+    await expect(runAi(s.workspaceId, 'EMAIL_WRITING', { mode: 'full', offer: '', template: '', lead: '{}', claims: '[]', instructions: '' })).rejects.toMatchObject({ code: 'AI_OUTPUT_INVALID' });
+    expect(await db().aiExecution.count({ where: { workspaceId: s.workspaceId, task: 'EMAIL_WRITING', status: 'SCHEMA_INVALID' } })).toBe(2);
+    expect(await db().aiExecution.count({ where: { workspaceId: s.workspaceId, task: 'EMAIL_WRITING', status: 'SUCCEEDED' } })).toBe(0);
+  });
+
+  it('rejects top-level arrays for object-shaped EMAIL_WRITING output after one repair', async () => {
+    const s = await createUserSession('array-output@x.com');
+    await addAiProvider(s.workspaceId);
+    fakes.anthropic.on('EMAIL_WRITING', () => []);
+    await expect(runAi(s.workspaceId, 'EMAIL_WRITING', { mode: 'full', offer: '', template: '', lead: '{}', claims: '[]', instructions: '' }))
+      .rejects.toMatchObject({ code: 'AI_OUTPUT_INVALID' });
+    const rows = await db().aiExecution.findMany({ where: { workspaceId: s.workspaceId, task: 'EMAIL_WRITING' }, orderBy: { createdAt: 'asc' } });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === 'SCHEMA_INVALID')).toBe(true);
+    expect(rows.every((r) => r.errorMessage?.includes('expected object'))).toBe(true);
   });
 
   it('enforces monthly budgets', async () => {

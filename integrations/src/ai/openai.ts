@@ -1,5 +1,6 @@
 import { httpJson, ProviderError, type FetchLike } from '../http.js';
 import type { AiProviderAdapter, StructuredRequest, StructuredResponse } from './types.js';
+import { withPromptCompatibility } from './prompt-compat.js';
 
 // OpenAI Responses API with strict JSON-schema structured output.
 // Requires live verification with a real API key.
@@ -12,7 +13,7 @@ interface OpenAiResponse {
 }
 interface OpenAiModelsResponse { data?: Array<{ id?: string }> }
 
-/** OpenAI strict mode requires every property to be listed in `required` and additionalProperties=false. */
+/** Strict JSON Schema mode requires every object property to be required and objects to be closed. */
 export function toStrictSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(toStrictSchema);
   if (!schema || typeof schema !== 'object') return schema;
@@ -40,24 +41,32 @@ export class OpenAiAdapter implements AiProviderAdapter {
 
   async generateStructured(apiKey: string, req: StructuredRequest): Promise<StructuredResponse> {
     const started = Date.now();
-    const res = await httpJson<OpenAiResponse>(
-      `${this.baseUrl}/v1/responses`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: req.model,
-          max_output_tokens: req.maxOutputTokens,
-          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-          input: [
-            { role: 'system', content: req.system },
-            { role: 'user', content: req.user },
-          ],
-          text: { format: { type: 'json_schema', name: req.schemaName, strict: true, schema: toStrictSchema(req.jsonSchema) } },
-        }),
+    let generationMode: StructuredResponse['generationMode'] = 'structured';
+    const res = await withPromptCompatibility({
+      provider: 'OPENAI', model: req.model, endpoint: this.baseUrl, system: `${req.system}\n\nReturn JSON matching this schema:\n${JSON.stringify(req.jsonSchema)}`, user: req.user,
+      send: (prompt) => {
+        generationMode = prompt.generationMode;
+        return httpJson<OpenAiResponse>(
+        `${this.baseUrl}/v1/responses`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model: req.model,
+            max_output_tokens: req.maxOutputTokens,
+            ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+            input: prompt.system !== null
+              ? [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }]
+              : [{ role: 'user', content: prompt.user }],
+            text: { format: prompt.structuredOutput
+              ? { type: 'json_schema', name: req.schemaName, strict: true, schema: toStrictSchema(req.jsonSchema) }
+              : { type: 'json_object' } },
+          }),
+        },
+        { provider: 'openai', fetchImpl: this.fetchImpl, timeoutMs: 90_000, retries: 2 },
+        );
       },
-      { provider: 'openai', fetchImpl: this.fetchImpl, timeoutMs: 90_000, retries: 2 },
-    );
+    });
     const text =
       res.output_text ??
       res.output?.flatMap((o) => o.content ?? []).find((c) => c.type === 'output_text')?.text;
@@ -76,6 +85,7 @@ export class OpenAiAdapter implements AiProviderAdapter {
         cachedTokens: res.usage?.input_tokens_details?.cached_tokens ?? 0,
       },
       latencyMs: Date.now() - started,
+      generationMode,
     };
   }
 

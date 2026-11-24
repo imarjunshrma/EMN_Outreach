@@ -1,5 +1,6 @@
 import { httpJson, ProviderError, type FetchLike } from '../http.js';
 import type { AiProviderAdapter, StructuredRequest, StructuredResponse } from './types.js';
+import { withPromptCompatibility } from './prompt-compat.js';
 
 // Anthropic Messages API. Structured output is obtained by forcing a single tool whose
 // input_schema is the task's JSON schema; the tool input is the structured result.
@@ -23,34 +24,49 @@ export class AnthropicAdapter implements AiProviderAdapter {
 
   async generateStructured(apiKey: string, req: StructuredRequest): Promise<StructuredResponse> {
     const started = Date.now();
-    const body = {
-      model: req.model,
-      max_tokens: req.maxOutputTokens,
-      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-      system: [{ type: 'text', text: req.system, cache_control: { type: 'ephemeral' } }],
-      messages: [{ role: 'user', content: req.user }],
-      tools: [{ name: req.schemaName, description: 'Return the structured result.', input_schema: req.jsonSchema }],
-      tool_choice: { type: 'tool', name: req.schemaName },
-    };
-    const res = await httpJson<AnthropicResponse>(
-      `${this.baseUrl}/v1/messages`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify(body),
+    let generationMode: StructuredResponse['generationMode'] = 'structured';
+    const res = await withPromptCompatibility({
+      provider: 'ANTHROPIC', model: req.model, endpoint: this.baseUrl, system: req.system, user: req.user,
+      send: (prompt) => {
+        generationMode = prompt.generationMode;
+        return httpJson<AnthropicResponse>(
+        `${this.baseUrl}/v1/messages`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({
+            model: req.model,
+            max_tokens: req.maxOutputTokens,
+            ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+            ...(prompt.system !== null ? { system: [{ type: 'text', text: prompt.system, cache_control: { type: 'ephemeral' } }] } : {}),
+            messages: [{ role: 'user', content: prompt.structuredOutput ? prompt.user : `${prompt.user}\n\nReturn JSON matching this schema:\n${JSON.stringify(req.jsonSchema)}` }],
+            ...(prompt.structuredOutput ? {
+              tools: [{ name: req.schemaName, description: 'Return the structured result.', input_schema: req.jsonSchema }],
+              tool_choice: { type: 'tool', name: req.schemaName },
+            } : {}),
+          }),
+        },
+        { provider: 'anthropic', fetchImpl: this.fetchImpl, timeoutMs: 90_000, retries: 2 },
+        );
       },
-      { provider: 'anthropic', fetchImpl: this.fetchImpl, timeoutMs: 90_000, retries: 2 },
-    );
+    });
     const tool = res.content?.find((c) => c.type === 'tool_use');
-    if (!tool) throw new ProviderError('anthropic', `no tool_use block in response (stop_reason=${res.stop_reason})`);
+    let data: unknown;
+    if (tool) data = tool.input;
+    else {
+      const text = res.content?.filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
+      if (!text) throw new ProviderError('anthropic', `no structured or text output in response (stop_reason=${res.stop_reason})`);
+      try { data = JSON.parse(text); } catch { throw new ProviderError('anthropic', 'output was not valid JSON'); }
+    }
     return {
-      data: tool.input,
+      data,
       usage: {
         inputTokens: res.usage?.input_tokens ?? 0,
         outputTokens: res.usage?.output_tokens ?? 0,
         cachedTokens: res.usage?.cache_read_input_tokens ?? 0,
       },
       latencyMs: Date.now() - started,
+      generationMode,
     };
   }
 

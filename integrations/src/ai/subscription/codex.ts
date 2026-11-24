@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SubscriptionError, parseJsonReply, scrubSecrets, type SubscriptionRunRequest, type SubscriptionRunResult, type SubscriptionRunner } from './types.js';
 
 // Codex — My ChatGPT Subscription, through the official @openai/codex-sdk, which drives the official
@@ -23,9 +24,13 @@ export function codexEnv(codexHome: string): Record<string, string> {
 /** Path of the codex binary: CODEX_PATH, else the one shipped with @openai/codex (dependency of @openai/codex-sdk). */
 export function resolveCodexBinary(override?: string | null): string {
   if (override) return override;
-  const req = createRequire(import.meta.url);
   try {
-    const pkg = req.resolve('@openai/codex/package.json', { paths: [dirname(req.resolve('@openai/codex-sdk'))] });
+    // The SDK is ESM-only, so createRequire(import.meta.url).resolve('@openai/codex-sdk')
+    // fails with ERR_PACKAGE_PATH_NOT_EXPORTED. Resolve its ESM entry first, then
+    // use a require rooted there to find the CLI dependency shipped beside it.
+    const sdkEntry = fileURLToPath(import.meta.resolve('@openai/codex-sdk'));
+    const req = createRequire(sdkEntry);
+    const pkg = req.resolve('@openai/codex/package.json');
     const bin = join(dirname(pkg), 'bin', 'codex.js');
     if (existsSync(bin)) return bin;
   } catch { /* fall back to PATH */ }

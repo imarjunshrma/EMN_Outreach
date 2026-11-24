@@ -1,6 +1,6 @@
 # Master feature inventory
 
-Version: **1.2.0**. Source counts at audit: **284 API route declarations**, **65 frontend page files**, **84 Prisma models**, **44 enums**, **17 test files**. Status is evidence-qualified; code presence is not runtime proof.
+Version: **1.4.0**. Current source counts: **430 registered API route declarations** in 12 route modules, **98 frontend page files**, **111 Prisma models**, **50 enums**, and **43 test files** (12 unit, 25 integration, 6 browser specs). Status is evidence-qualified; code presence is not runtime proof.
 
 | Feature | Included capabilities | Implementation references / data | Dependencies | Status / verification |
 |---|---|---|---|

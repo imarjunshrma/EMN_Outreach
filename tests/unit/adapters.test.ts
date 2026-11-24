@@ -4,10 +4,18 @@ import { GmailProvider, GoogleOAuthClient } from '../../integrations/src/email/g
 import { MicrosoftGraphProvider } from '../../integrations/src/email/microsoft.js';
 import { AnthropicAdapter } from '../../integrations/src/ai/anthropic.js';
 import { OpenAiAdapter, toStrictSchema } from '../../integrations/src/ai/openai.js';
+import { GoogleAiAdapter, toGeminiSchema } from '../../integrations/src/ai/google.js';
+import { OpenAiCompatibleAdapter, groqSupportsStrictJsonSchema } from '../../integrations/src/ai/openai-compatible.js';
+import { resetPromptCompatibilityForTests } from '../../integrations/src/ai/prompt-compat.js';
+import { AI_OUTPUT_SCHEMAS, AI_TASKS } from '../../shared/src/ai-schemas.js';
+import { DEFAULT_PROMPTS } from '../../shared/src/prompts.js';
+import { DEFAULT_OUTPUT_FORMAT, OUTPUT_JSON_SCHEMAS, SAFETY_RULES, TASK_INSTRUCTIONS, TASK_TYPES } from '../../shared/src/ai-workflows.js';
+import { z } from 'zod';
 import { ApolloProvider, MillionVerifierProvider } from '../../integrations/src/providers/index.js';
 import { checkDomain } from '../../integrations/src/research/dns.js';
 import { httpRequest, ProviderError } from '../../integrations/src/http.js';
 import { smtpError } from '../../integrations/src/email/smtp-imap.js';
+import { aiProviderFailure } from '../../backend/src/services/ai.js';
 
 type Call = { url: string; init?: RequestInit };
 function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
@@ -141,10 +149,294 @@ describe('AI adapters (mocked HTTP — requires live verification)', () => {
     expect(body.text.format.schema.required).toEqual(['a']);
     expect(toStrictSchema({ type: 'object', properties: { b: { type: 'object', properties: { c: { type: 'number' } } } } })).toMatchObject({ additionalProperties: false, properties: { b: { required: ['c'] } } });
   });
+  it('Gemini retries once without systemInstruction when the selected model rejects that capability, then remembers it', async () => {
+    resetPromptCompatibilityForTests();
+    let attempts = 0;
+    const { f, calls } = mockFetch((_url) => {
+      attempts++;
+      if (attempts === 1) return json({ error: { message: 'Developer instruction is not enabled for this model' } }, 400);
+      return json({ candidates: [{ content: { parts: [{ text: '{"a":"ok"}' }] } }] });
+    });
+    const adapter = new GoogleAiAdapter(f);
+    await adapter.generateStructured('key', { ...req, model: 'unsupported-system-model' });
+    const result = await adapter.generateStructured('key', { ...req, model: 'unsupported-system-model' });
+    expect(result.generationMode).toBe('instruction_fallback');
+    expect(calls).toHaveLength(3);
+    // First request uses native instructions; fallback and later request place them in the user message.
+    const firstBody = JSON.parse(String(calls[0].init?.body));
+    const fallbackBody = JSON.parse(String(calls[1].init?.body));
+    const rememberedBody = JSON.parse(String(calls[2].init?.body));
+    expect(firstBody.systemInstruction.parts[0].text).toBe('sys');
+    expect(fallbackBody.systemInstruction).toBeUndefined();
+    expect(fallbackBody.contents[0].parts[0].text).toContain('Instructions for this task');
+    expect(fallbackBody.contents[0].parts[0].text).toContain('Return JSON matching this schema');
+    expect(rememberedBody.systemInstruction).toBeUndefined();
+  });
+  it('Gemini falls back from both unsupported instructions and JSON schema without changing models', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.systemInstruction) return json({ error: { message: 'Developer instruction is not enabled for this model' } }, 400);
+      if (body.generationConfig.responseJsonSchema) return json({ error: { message: 'responseJsonSchema is not supported for this model' } }, 400);
+      return json({ candidates: [{ content: { parts: [{ text: '{"a":"ok"}' }] } }] });
+    });
+    const result = await new GoogleAiAdapter(f).generateStructured('key', { ...req, model: 'fallback-both-capabilities' });
+    expect(result.data).toEqual({ a: 'ok' });
+    expect(result.generationMode).toBe('prompt_fallback');
+    expect(calls).toHaveLength(3);
+    for (const call of calls) expect(call.url).toContain('fallback-both-capabilities');
+    const finalBody = JSON.parse(String(calls[2].init?.body));
+    expect(finalBody.systemInstruction).toBeUndefined();
+    expect(finalBody.generationConfig.responseJsonSchema).toBeUndefined();
+    expect(finalBody.contents[0].parts[0].text).toContain('Instructions for this task');
+    expect(finalBody.contents[0].parts[0].text).toContain('Return JSON matching this schema');
+  });
+  it('drops unsupported JSON mode for a model but retains schema instructions and JSON parsing', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.generationConfig.responseMimeType) return json({ error: { message: 'responseMimeType is not supported for this model' } }, 400);
+      return json({ candidates: [{ content: { parts: [{ text: '{"a":"ok"}' }] } }] });
+    });
+    const result = await new GoogleAiAdapter(f).generateStructured('key', { ...req, model: 'unsupported-json-mode' });
+    expect(result.data).toEqual({ a: 'ok' });
+    expect(result.generationMode).toBe('schema_fallback');
+    expect(calls).toHaveLength(2);
+    const fallback = JSON.parse(String(calls[1].init?.body));
+    expect(fallback.generationConfig.responseMimeType).toBeUndefined();
+    expect(fallback.generationConfig.responseJsonSchema).toBeUndefined();
+    expect(fallback.contents[0].parts[0].text).toContain(JSON.stringify(req.jsonSchema));
+  });
+  it('Groq, OpenRouter, and xAI-compatible requests preserve system instructions and JSON output requirements', async () => {
+    const cases = [
+      { name: 'GROQ' as const, base: 'https://api.groq.com/openai/v1', expectedTokenField: 'max_completion_tokens' },
+      { name: 'OPENROUTER' as const, base: 'https://openrouter.ai/api/v1', expectedTokenField: 'max_tokens' },
+      { name: 'CUSTOM_OPENAI' as const, base: 'https://api.x.ai/v1', expectedTokenField: 'max_tokens' },
+    ];
+    for (const c of cases) {
+      const { f, calls } = mockFetch(() => json({ choices: [{ message: { content: '{"a":"ok"}' } }] }));
+      const adapter = new OpenAiCompatibleAdapter(c.name, c.base, f);
+      const result = await adapter.generateStructured('key', req);
+      expect(result.generationMode).toBe('json_object');
+      const body = JSON.parse(String(calls[0].init?.body));
+      expect(body.messages[0]).toMatchObject({ role: 'system', content: expect.stringContaining('sys') });
+      expect(body.messages[0].content).toContain('Return only JSON matching this schema');
+      expect(body[c.expectedTokenField]).toBe(100);
+      expect(body.response_format).toEqual({ type: 'json_object' });
+      expect(calls[0].url).toBe(`${c.base}/chat/completions`);
+    }
+  });
+  it('retries OpenAI-compatible models without response_format when explicitly unsupported', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.response_format) return json({ error: { message: 'response_format is not supported for this model' } }, 400);
+      return json({ choices: [{ message: { content: '{"a":"ok"}' } }] });
+    });
+    const result = await new OpenAiCompatibleAdapter('OPENROUTER', 'https://openrouter.ai/api/v1', f).generateStructured('key', { ...req, model: 'unsupported-json-mode' });
+    expect(result.data).toEqual({ a: 'ok' });
+    expect(result.generationMode).toBe('schema_fallback');
+    expect(calls).toHaveLength(2);
+    const fallback = JSON.parse(String(calls[1].init?.body));
+    expect(fallback.response_format).toBeUndefined();
+    expect(fallback.messages[0].content).toContain(JSON.stringify(req.jsonSchema));
+  });
+  it('sends Groq JSON Object Mode and falls back only when that parameter is rejected', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.response_format) return json({ error: { message: 'response_format json_object is not supported for this model' } }, 400);
+      return json({ choices: [{ message: { content: '{"a":"ok"}' } }] });
+    });
+    const adapter = new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f);
+    const result = await adapter.generateStructured('key', { ...req, model: 'groq-json-fallback-test' });
+    expect(result.data).toEqual({ a: 'ok' });
+    expect(result.generationMode).toBe('schema_fallback');
+    expect(calls).toHaveLength(2);
+    const initial = JSON.parse(String(calls[0].init?.body));
+    const fallback = JSON.parse(String(calls[1].init?.body));
+    expect(initial.messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user']);
+    expect(initial.max_completion_tokens).toBe(req.maxOutputTokens);
+    expect(initial.response_format).toEqual({ type: 'json_object' });
+    expect(fallback.response_format).toBeUndefined();
+    expect(fallback.messages[0].content).toContain(JSON.stringify(req.jsonSchema));
+  });
+  it('sends Groq strict JSON Schema only for documented compatible model IDs', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch(() => json({ choices: [{ message: { content: '{"a":"ok"}' } }] }));
+    await new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', { ...req, model: 'allam-2-7b' });
+    expect(groqSupportsStrictJsonSchema('allam-2-7b')).toBe(false);
+    expect(JSON.parse(String(calls[0].init?.body)).response_format).toEqual({ type: 'json_object' });
+  });
+  it('sends Groq native strict JSON Schema for compatible models, preserving nested arrays and nullable required fields', async () => {
+    resetPromptCompatibilityForTests();
+    const emailSchema = z.toJSONSchema(AI_OUTPUT_SCHEMAS.EMAIL_WRITING, { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+    delete emailSchema.$schema;
+    const expected = { subject: null, firstLine: 'Hi Alex,', body: 'A brief synthetic test email.', usedClaimIds: [] };
+    const { f, calls } = mockFetch(() => json({ choices: [{ message: { content: JSON.stringify(expected) } }] }));
+    const result = await new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', {
+      model: 'openai/gpt-oss-120b', system: 'Write a concise email.', user: 'Synthetic prospect only.', jsonSchema: emailSchema,
+      schemaName: 'email_writing', maxOutputTokens: 300,
+    });
+    expect(groqSupportsStrictJsonSchema('openai/gpt-oss-120b')).toBe(true);
+    expect(groqSupportsStrictJsonSchema('allam-2-7b')).toBe(false);
+    expect(AI_OUTPUT_SCHEMAS.EMAIL_WRITING.safeParse(result.data).success).toBe(true);
+    expect(result.generationMode).toBe('structured');
+    const body = JSON.parse(String(calls[0].init?.body));
+    expect(body.response_format).toMatchObject({ type: 'json_schema', json_schema: { name: 'email_writing', strict: true } });
+    const sentSchema = body.response_format.json_schema.schema;
+    expect(sentSchema.required).toEqual(['subject', 'firstLine', 'body', 'usedClaimIds']);
+    expect(sentSchema.additionalProperties).toBe(false);
+    expect(sentSchema.properties.subject.type).toEqual(['string', 'null']);
+    expect(sentSchema.properties.usedClaimIds).toMatchObject({ type: 'array', items: { type: 'string' } });
+  });
+  it('falls back from rejected Groq JSON Schema to JSON Object Mode on the same model', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.response_format?.type === 'json_schema') return json({ error: { message: 'json_schema response_format is not supported for this model' } }, 400);
+      return json({ choices: [{ message: { content: '{"sentences":[]}' } }] });
+    });
+    const schema = z.toJSONSchema(AI_OUTPUT_SCHEMAS.FACT_CHECK, { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+    delete schema.$schema;
+    const result = await new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', {
+      model: 'openai/gpt-oss-120b', system: 'Fact check.', user: 'Synthetic email.', jsonSchema: schema, schemaName: 'fact_check', maxOutputTokens: 300,
+    });
+    expect(result.data).toEqual({ sentences: [] });
+    expect(result.generationMode).toBe('schema_fallback');
+    expect(calls).toHaveLength(2);
+    const strictSchema = JSON.parse(String(calls[0].init?.body)).response_format.json_schema.schema;
+    expect(strictSchema.required).toEqual(['sentences']);
+    expect(strictSchema.additionalProperties).toBe(false);
+    expect(strictSchema.properties.sentences.items.required).toEqual(['text', 'verdict', 'claimId', 'reason']);
+    expect(strictSchema.properties.sentences.items.properties.claimId.type).toEqual(['string', 'null']);
+    expect(JSON.parse(String(calls[1].init?.body)).response_format).toEqual({ type: 'json_object' });
+    expect(AI_OUTPUT_SCHEMAS.FACT_CHECK.safeParse(result.data).success).toBe(true);
+  });
+  it('rejects malformed JSON from Groq rather than returning it', async () => {
+    const { f } = mockFetch(() => json({ choices: [{ message: { content: '{not json' } }] }));
+    await expect(new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', req))
+      .rejects.toMatchObject({ name: 'ProviderError', message: expect.stringContaining('output was not valid JSON') });
+  });
+  it('leaves array and missing-field responses for the task Zod schema to reject', async () => {
+    for (const raw of ['[]', '{"subject":"Only a subject"}']) {
+      const { f } = mockFetch(() => json({ choices: [{ message: { content: raw } }] }));
+      const result = await new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', {
+        ...req, model: 'allam-2-7b', jsonSchema: z.toJSONSchema(AI_OUTPUT_SCHEMAS.EMAIL_WRITING, { target: 'draft-7', io: 'output' }) as Record<string, unknown>,
+      });
+      expect(AI_OUTPUT_SCHEMAS.EMAIL_WRITING.safeParse(result.data).success).toBe(false);
+    }
+  });
+  it('normalizes every registered AI task schema for Groq strict mode', async () => {
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (!value || typeof value !== 'object') return;
+      const node = value as Record<string, unknown>;
+      if (node.type === 'object' && node.properties && typeof node.properties === 'object') {
+        const keys = Object.keys(node.properties as Record<string, unknown>);
+        expect(node.required).toEqual(keys);
+        expect(node.additionalProperties).toBe(false);
+      }
+      for (const child of Object.values(node)) visit(child);
+    };
+    for (const task of AI_TASKS) {
+      resetPromptCompatibilityForTests();
+      const schema = z.toJSONSchema(AI_OUTPUT_SCHEMAS[task], { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+      delete schema.$schema;
+      const { f, calls } = mockFetch(() => json({ choices: [{ message: { content: '{}' } }] }));
+      await new OpenAiCompatibleAdapter('GROQ', 'https://api.groq.com/openai/v1', f).generateStructured('key', {
+        model: 'openai/gpt-oss-120b', system: 'Task instructions.', user: 'Synthetic input.', jsonSchema: schema,
+        schemaName: task.toLowerCase(), maxOutputTokens: 300,
+      });
+      const body = JSON.parse(String(calls[0].init?.body));
+      expect(body.response_format.type).toBe('json_schema');
+      expect(body.response_format.json_schema.name).toBe(task.toLowerCase());
+      visit(body.response_format.json_schema.schema);
+    }
+  });
+  it('runs every registered AI task through the shared Gemini prompt path with instructions and JSON schema', async () => {
+    for (const task of AI_TASKS) {
+      resetPromptCompatibilityForTests();
+      const { f, calls } = mockFetch(() => json({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }));
+      const schema = z.toJSONSchema(AI_OUTPUT_SCHEMAS[task], { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+      delete schema.$schema;
+      await new GoogleAiAdapter(f).generateStructured('key', {
+        model: `test-${task.toLowerCase()}`, system: DEFAULT_PROMPTS[task].system, user: DEFAULT_PROMPTS[task].user,
+        jsonSchema: schema, schemaName: task.toLowerCase(), maxOutputTokens: 200,
+      });
+      const body = JSON.parse(String(calls[0].init?.body));
+      expect(body.systemInstruction.parts[0].text).toBe(DEFAULT_PROMPTS[task].system);
+      expect(body.generationConfig.responseJsonSchema).toEqual(toGeminiSchema(schema));
+      expect(body.contents[0].parts[0].text).toContain(DEFAULT_PROMPTS[task].user);
+      expect(body.contents[0].parts[0].text).toContain('Return JSON matching this schema');
+    }
+  });
+  it('sends the required EMAIL_WRITING keys to Gemini and parses its structured response', async () => {
+    resetPromptCompatibilityForTests();
+    const { f, calls } = mockFetch(() => json({ candidates: [{ content: { parts: [{ text: '{"subject":null,"firstLine":"Hi there,","body":"A short honest note.","usedClaimIds":[]}' }] } }] }));
+    const schema = z.toJSONSchema(AI_OUTPUT_SCHEMAS.EMAIL_WRITING, { target: 'draft-7', io: 'output' }) as Record<string, unknown>;
+    delete schema.$schema;
+    const result = await new GoogleAiAdapter(f).generateStructured('key', {
+      model: 'email-writing-model', system: DEFAULT_PROMPTS.EMAIL_WRITING.system, user: 'Write an email.', jsonSchema: schema,
+      schemaName: 'email_writing', maxOutputTokens: 300,
+    });
+    expect(AI_OUTPUT_SCHEMAS.EMAIL_WRITING.safeParse(result.data).success).toBe(true);
+    expect(result.generationMode).toBe('structured');
+    const body = JSON.parse(String(calls[0].init?.body));
+    expect(body.generationConfig.responseJsonSchema.required).toEqual(['subject', 'firstLine', 'body', 'usedClaimIds']);
+    expect(body.generationConfig.responseJsonSchema.properties).toMatchObject({
+      subject: { type: 'string', nullable: true }, firstLine: { type: 'string', nullable: true }, body: { type: 'string', nullable: true }, usedClaimIds: { type: 'array' },
+    });
+  });
+  it('runs every workflow-builder task through the same Gemini prompt path', async () => {
+    for (const task of TASK_TYPES) {
+      resetPromptCompatibilityForTests();
+      const { f, calls } = mockFetch(() => json({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }));
+      const schema = OUTPUT_JSON_SCHEMAS[DEFAULT_OUTPUT_FORMAT[task]];
+      const system = `${SAFETY_RULES}\n\n${TASK_INSTRUCTIONS[task]}`;
+      await new GoogleAiAdapter(f).generateStructured('key', {
+        model: `workflow-${task.toLowerCase()}`, system, user: 'workflow input', jsonSchema: schema,
+        schemaName: task.toLowerCase(), maxOutputTokens: 300,
+      });
+      const body = JSON.parse(String(calls[0].init?.body));
+      expect(body.systemInstruction.parts[0].text).toBe(system);
+      expect(body.generationConfig.responseJsonSchema).toEqual(toGeminiSchema(schema));
+      expect(body.contents[0].parts[0].text).toContain('workflow input');
+      expect(body.contents[0].parts[0].text).toContain(JSON.stringify(schema));
+    }
+  });
+  it('converts nullable JSON Schema fields to Gemini nullable fields', () => {
+    expect(toGeminiSchema({
+      type: 'object', additionalProperties: false,
+      properties: { subject: { type: ['string', 'null'], default: null }, body: { type: 'string' } },
+      required: ['subject', 'body'],
+    })).toEqual({
+      type: 'object',
+      properties: { subject: { type: 'string', nullable: true }, body: { type: 'string' } },
+      required: ['subject', 'body'],
+    });
+  });
   it('surfaces non-retryable errors without retrying', async () => {
     const { f, calls } = mockFetch(() => json({ error: 'bad key' }, 401));
     await expect(new AnthropicAdapter(f).generateStructured('bad', req)).rejects.toBeInstanceOf(ProviderError);
     expect(calls).toHaveLength(1);
+  });
+  it('extracts provider error code without persisting echoed failed-generation text', async () => {
+    const { f } = mockFetch(() => json({ error: { message: 'Failed to generate JSON. Adjust the prompt.', code: 'json_validate_failed', failed_generation: 'Bearer hidden-test-key' } }, 400));
+    let error: ProviderError | undefined;
+    try { await httpRequest('https://x', { headers: { authorization: 'Bearer hidden-test-key' } }, { provider: 'groq', fetchImpl: f, retries: 0 }); }
+    catch (e) { error = e as ProviderError; }
+    expect(error).toBeInstanceOf(ProviderError);
+    if (!error) throw new Error('expected provider failure');
+    expect(error).toMatchObject({ status: 400, code: 'json_validate_failed' });
+    expect(error.message).toContain('Failed to generate JSON');
+    expect(error.message).not.toContain('failed_generation');
+    expect(error.message).not.toContain('hidden-test-key');
+    expect(aiProviderFailure(error)).toMatchObject({ code: 'AI_INVALID_RESPONSE', status: 502 });
+    expect(aiProviderFailure(new ProviderError('groq', 'model not found', 404, false, undefined, 'model_not_found')))
+      .toMatchObject({ code: 'AI_MODEL_NOT_FOUND' });
+    expect(aiProviderFailure(new ProviderError('groq', 'invalid key', 401))).toMatchObject({ code: 'AI_PROVIDER_AUTH' });
+    expect(aiProviderFailure(new ProviderError('groq', 'rate limited', 429, true))).toMatchObject({ code: 'AI_RATE_LIMITED' });
   });
   it('retries transient errors honoring Retry-After', async () => {
     let n = 0;

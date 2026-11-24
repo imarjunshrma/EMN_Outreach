@@ -2,12 +2,12 @@
 
 ## Version and stack
 
-The checkout identifies itself as **1.2.0** in `package.json`, `frontend/package.json`, and README. Backend is TypeScript/Express 5 on Node 22; frontend is Next.js 15 App Router with React 19; persistence is PostgreSQL through Prisma 7 and `@prisma/adapter-pg`; jobs use BullMQ 6 over Redis 7.
+The checkout identifies itself as **1.4.0** in `package.json` and `frontend/package.json`. Backend is TypeScript/Express 5 on Node 22; frontend is Next.js 15 App Router with React 19; persistence is PostgreSQL through Prisma 7 and `@prisma/adapter-pg`; jobs use BullMQ 6 over Redis 7.
 
 ## Services and entry points
 
 - API: `backend/src/main.ts` constructs `createApp()` from `backend/src/app.ts`, binds `API_HOST:API_PORT`, validates `backend/src/core/config.ts` and encryption keyring, and installs graceful shutdown.
-- Worker: `worker/src/main.ts` registers BullMQ processors from `worker/src/processors.ts`, schedules periodic work, and closes workers/queues/Redis/DB on SIGTERM/SIGINT.
+- Worker: `worker/src/main.ts` registers BullMQ processors centralized in `worker/src/processors.ts`, schedules periodic work, and closes workers/queues/Redis/DB on SIGTERM/SIGINT.
 - Web: `frontend/app` contains App Router pages; `frontend/lib/api.ts` sends relative `/api/v1...` requests with same-origin cookies and CSRF header. `frontend/next.config.mjs` rewrites `/api/:path*` to `EMN_API_INTERNAL_URL` (host default localhost; Docker build arg internal API name). This rewrite is server-side.
 - Composition root: `backend/src/core/container.ts` wires email, AI, lead, verifier, search, DNS, fetch and storage adapters; tests override them via `setAdapters()`.
 
@@ -41,4 +41,6 @@ Compose: `docker-compose.yml`, API/worker image `deployment/docker/Dockerfile`, 
 
 ## Scope/evidence limit
 
-This is source-derived architecture, not a runtime trace. Docker is absent and Postgres is unavailable in the current environment. End-to-end behaviors that depend on those services remain `BLOCKED`/`NOT TESTED`; see `FINAL_AUDIT_REPORT.md`.
+Current source inventory: 12 route modules, 430 registered API route declarations, 98 frontend page files, 111 Prisma models, 50 enums, 15 migration directories, 12 unit test files, 25 integration test files and 6 Playwright specs. These are source counts, not verified behavior counts.
+
+This is source-derived architecture, not a runtime trace. No Docker/database-backed workflow was run in this continuation. End-to-end behaviors that depend on those services remain `BLOCKED`/`NOT TESTED`; see `FINAL_AUDIT_REPORT.md`.

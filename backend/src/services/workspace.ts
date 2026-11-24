@@ -53,7 +53,7 @@ export const WorkspaceSettingsSchema = z.object({
 });
 
 // Server-managed keys kept in the same JSON column but never exposed or overwritten by settings edits.
-const INTERNAL_SETTINGS_KEYS = ['workflowTokens'] as const;
+const INTERNAL_SETTINGS_KEYS = ['workflowTokens', 'aiDefaultProvider'] as const;
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 
 export function slugify(s: string) {

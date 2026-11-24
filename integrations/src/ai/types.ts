@@ -21,6 +21,7 @@ export interface StructuredResponse {
   data: unknown;
   usage: AiUsage;
   latencyMs: number;
+  generationMode?: 'structured' | 'json_object' | 'instruction_fallback' | 'schema_fallback' | 'prompt_fallback';
 }
 
 export interface AiProviderAdapter {

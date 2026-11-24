@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { ClaudeSubscriptionRunner, looksLikeClaudeOAuthToken } from '../../integrations/src/ai/subscription/claude-agent.js';
-import { CodexSubscriptionRunner, classifyCodexError, codexCli, type CodexCli } from '../../integrations/src/ai/subscription/codex.js';
+import { CodexSubscriptionRunner, classifyCodexError, codexCli, resolveCodexBinary, type CodexCli } from '../../integrations/src/ai/subscription/codex.js';
 import { SubscriptionError, parseJsonReply, scrubSecrets } from '../../integrations/src/ai/subscription/types.js';
 
 // Adapter behaviour against scripted SDK event streams. Event shapes mirror what the official SDKs emit
@@ -82,6 +82,10 @@ function codexWith(events: Array<Record<string, unknown>>, method: string | null
 }
 
 describe('Codex subscription runner (Codex SDK / CLI)', () => {
+  it('resolves the packaged CLI when the ESM-only SDK is installed', () => {
+    expect(resolveCodexBinary()).toMatch(/[\\/]node_modules[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js$/);
+  });
+
   it('runs read-only with a ChatGPT sign-in, no API key, and returns the structured answer', async () => {
     process.env.OPENAI_API_KEY = 'sk-should-not-pass-0000000000000';
     let threadOpts: Record<string, unknown> = {};

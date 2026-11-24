@@ -1,6 +1,8 @@
 # Frontend review
 
-Current route page count: **65** `page.tsx` files under `frontend/app`. Browser interactions are implemented mainly in each page with `frontend/lib/api.ts`, TanStack Query hooks in `frontend/lib/hooks.ts`, and shared components in `frontend/components`.
+Static inventory only: 98 source pages. This does not imply each page/action was exercised in a browser; browser behavior remains NOT TESTED in this continuation.
+
+Current route page count: **98** `page.tsx` files under `frontend/app`. Browser interactions are implemented mainly in each page with `frontend/lib/api.ts`, TanStack Query hooks in `frontend/lib/hooks.ts`, and shared components in `frontend/components`.
 
 | Page file | Verification status |
 |---|---|

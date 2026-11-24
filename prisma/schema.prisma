@@ -742,6 +742,7 @@ model AiModelRoute {
   task             AiTask
   provider         AiProviderType
   model            String
+  useWorkspaceDefault Boolean       @default(false)
   fallbackProvider AiProviderType?
   fallbackModel    String?
   temperature      Float?
@@ -795,6 +796,7 @@ model AiExecution {
   promptTemplateId String?           @db.Uuid
   status           AiExecutionStatus
   usedFallback     Boolean           @default(false)
+  generationMode   String?
   inputTokens      Int               @default(0)
   outputTokens     Int               @default(0)
   cachedTokens     Int               @default(0)

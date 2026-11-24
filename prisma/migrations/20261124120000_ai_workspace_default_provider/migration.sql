@@ -1,0 +1,2 @@
+ALTER TABLE "AiModelRoute"
+ADD COLUMN "useWorkspaceDefault" BOOLEAN NOT NULL DEFAULT FALSE;
