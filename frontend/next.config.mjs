@@ -15,8 +15,8 @@ const nextConfig = {
     return [{ source: '/:path*', headers: [
       // Next.js App Router injects inline bootstrap scripts, so 'unsafe-inline' is required for scripts
       // without a nonce pipeline; everything else is locked to this origin.
-      { key: 'Content-Security-Policy', value: `default-src 'self'; script-src 'self' 'unsafe-inline'${DEV_EVAL}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'` },
-      { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+      { key: 'Content-Security-Policy', value: `default-src 'self'; script-src 'self' 'unsafe-inline'${DEV_EVAL}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://api.openai.com/v1/realtime/calls; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'` },
+      { key: 'Permissions-Policy', value: 'camera=(), microphone=(self), geolocation=()' },
       { key: 'X-Frame-Options', value: 'DENY' },
       { key: 'X-Content-Type-Options', value: 'nosniff' },
       { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },

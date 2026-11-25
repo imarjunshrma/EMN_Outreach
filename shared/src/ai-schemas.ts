@@ -124,7 +124,7 @@ export const PersonalizationOutput = z.object({
 });
 export type Personalization = z.infer<typeof PersonalizationOutput>;
 
-export const COPILOT_ACTION_TYPES = ['create_campaign_draft', 'draft_sequence', 'queue_research', 'generate_reply_drafts', 'pause_campaign', 'add_memory'] as const;
+export const COPILOT_ACTION_TYPES = ['create_campaign_draft', 'draft_sequence', 'queue_research', 'generate_reply_drafts', 'pause_campaign', 'add_memory', 'create_service_draft', 'update_prospect_title', 'queue_personalization_drafts'] as const;
 export const CopilotOutput = z.object({
   answer: z.string(),
   recommendations: z.array(z.object({ title: z.string(), detail: z.string() })).max(10),

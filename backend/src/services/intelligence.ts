@@ -199,8 +199,8 @@ export async function queueResearch(workspaceId: string, target: { leadId?: stri
     const { campaignAudience } = await import('./personalization.js');
     if (!target.leadId || !(await campaignAudience(workspaceId, target.campaignId, [target.leadId])).includes(target.leadId)) throw NotFound('Campaign prospect');
   }
-  await enqueue(QUEUES.research, target.leadId ? 'research.lead' : 'research.company', { workspaceId, ...target, thenScore: !!opts.thenScore, refresh: !!opts.refresh, retryMissing: !!opts.retryMissing, retryReportId: opts.retryReportId });
-  return { queued: true };
+  const job = await enqueue(QUEUES.research, target.leadId ? 'research.lead' : 'research.company', { workspaceId, ...target, thenScore: !!opts.thenScore, refresh: !!opts.refresh, retryMissing: !!opts.retryMissing, retryReportId: opts.retryReportId });
+  return { queued: true, jobId: job.id };
 }
 
 type ResearchTarget = { leadId?: string; companyId?: string; campaignId?: string; depth?: 'INITIAL' | 'DEEP'; refresh?: boolean; sourceUrl?: string; retryMissing?: boolean; retryReportId?: string };
@@ -558,13 +558,21 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
   const documents = fetchedEvidence.map((e) => `<document evidenceId="${e.id}" url="${neutralizeTags(e.url)}"${e.publishedAt ? ` publishedAt="${e.publishedAt.toISOString()}"` : ''}>\n${wrapUntrusted('web', e.content, 12_000)}\n</document>`).join('\n');
   const subject = [lead && `${lead.firstName ?? ''} ${lead.lastName ?? ''} (${lead.title ?? 'unknown title'})`, company && `${company.name} (${domain ?? 'no domain'})`].filter(Boolean).join(' at ')
     + `\nResearch focus (from the workspace's research instructions — extract facts about these topics only when the documents state them):\n${researchFocusText(rules)}\nResearch policy: return at most eight concise, distinct claims; prefer original sources, record only explicitly documented facts, distinguish publication and event dates, and require explicit name and employer evidence before attributing any activity. A video title is not a transcript. Keep opportunity suggestions separate from factual claims. Use categories professional_identity, professional_background, service, business_model, audience, content, interview, signal and opportunity where appropriate. Prioritize signals from the last ${signalWindows[0]} days, falling back to ${signalWindows[1]} days.`;
-  let extraction: FactExtraction;
-  try {
-    extraction = (await runAi<FactExtraction>(workspaceId, 'FACT_EXTRACTION', { subject, documents }, {
+  const extract = async (extractionSubject: string, input: string) =>
+    (await runAi<FactExtraction>(workspaceId, 'FACT_EXTRACTION', { subject: extractionSubject, documents: input }, {
       entity: { type: 'research_report', id: report.id },
       attribution: { campaignId: target.campaignId ?? null, leadId: lead?.id ?? null },
       maxLeadCostUsd: researchCostLimit,
     })).data;
+
+  let extraction: FactExtraction;
+  try {
+    extraction = await extract(subject, documents).catch((error: unknown) => {
+      if (!(error instanceof AppError) || error.code !== 'AI_OUTPUT_LIMIT') throw error;
+      const compactDocuments = fetchedEvidence.map((e) =>
+        `<document evidenceId="${e.id}" url="${neutralizeTags(e.url)}">\n${wrapUntrusted('web', e.content, 3500)}\n</document>`).join('\n');
+      return extract(subject.replace('at most eight concise', 'at most two concise') + ' Keep the summary to one sentence and leave optional fields empty unless directly supported.', compactDocuments);
+    });
   } catch (e) {
     await db().researchReport.update({ where: { id: report.id }, data: { status: previous?.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED', coverage: reportCoverage(true), pageCount: (previous?.pageCount ?? 0) + pageCount, searchCount: (previous?.searchCount ?? 0) + searchCount, error: `Evidence saved but AI extraction failed: ${(e as Error).message}`.slice(0, 1000), completedAt: previous?.status === 'COMPLETED' ? previous.completedAt : new Date() } });
     if (previous) await publish(workspaceId, 'research.completed', { reportId: report.id, leadId: lead?.id });

@@ -6,7 +6,7 @@ import { AppError, NotFound } from '../core/errors.js';
 import { audit, type Actor } from '../core/audit.js';
 import { logger } from '../core/logger.js';
 import { AI_OUTPUT_SCHEMAS, AI_TASKS, type AiTaskName } from '../../../shared/src/ai-schemas.js';
-import { DEFAULT_PROMPTS } from '../../../shared/src/prompts.js';
+import { correctCopilotPrompt, DEFAULT_PROMPTS } from '../../../shared/src/prompts.js';
 import { redactForLog } from '../../../integrations/src/ai/guard.js';
 import { AI_PROVIDER_NAMES, type AiProviderName } from '../../../integrations/src/ai/types.js';
 import { ProviderError } from '../../../integrations/src/http.js';
@@ -119,7 +119,7 @@ export async function routeLimits(workspaceId: string, task: AiTaskName) {
 
 async function ensurePrompt(workspaceId: string, task: AiTaskName) {
   const p = await db().promptTemplate.findFirst({ where: { workspaceId, task, isActive: true }, orderBy: { version: 'desc' } });
-  if (p) return p;
+  if (p) return task === 'COPILOT' ? correctCopilotPrompt(p) : p;
   const d = DEFAULT_PROMPTS[task];
   if (!d || (await db().promptTemplate.count({ where: { workspaceId, task } }))) return null; // user deactivated everything on purpose
   return db().promptTemplate.upsert({ where: { workspaceId_task_version: { workspaceId, task, version: 1 } }, update: {}, create: { workspaceId, task, version: 1, systemPrompt: d.system, userPromptTemplate: d.user, isActive: true, changeNote: 'Built-in default' } });

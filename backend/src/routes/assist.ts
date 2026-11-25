@@ -18,11 +18,21 @@ route({ method: 'delete', path: '/w/:workspaceId/reply-templates/:id', tag: 'Rep
 // ---------------------------------------------------------------- AI Copilot
 route({ method: 'get', path: '/w/:workspaceId/copilot/threads', tag: 'Copilot', summary: 'My Copilot conversations', auth: 'workspace', role: 'VIEWER', handler: (c) => copilot.listThreads(c.workspaceId, c.userId) });
 route({ method: 'get', path: '/w/:workspaceId/copilot/threads/:id', tag: 'Copilot', summary: 'Conversation with messages and proposed actions', auth: 'workspace', role: 'VIEWER', handler: (c) => copilot.getThread(c.workspaceId, c.userId, c.params.id) });
-route({ method: 'post', path: '/w/:workspaceId/copilot/ask', tag: 'Copilot', summary: 'Ask the Copilot (answers + recommendations + proposed actions; nothing is executed)', auth: 'workspace', role: 'VIEWER', status: 200, rateLimit: { limit: 120, windowSec: 3600, key: 'user' },
-  body: z.object({ threadId: z.string().uuid().nullable().optional(), question: z.string().min(1).max(4000), leadId: z.uuid().optional(), campaignId: z.uuid().optional() }), handler: (c) => copilot.ask(c.workspaceId, c.userId, c.role, c.body.threadId ?? null, c.body.question, c.body) });
+route({ method: 'post', path: '/w/:workspaceId/copilot/ask', tag: 'Copilot', summary: 'Ask Copilot or queue research for a matched saved prospect', auth: 'workspace', role: 'VIEWER', status: 200, rateLimit: { limit: 120, windowSec: 3600, key: 'user' },
+  body: z.object({ threadId: z.string().uuid().nullable().optional(), question: z.string().min(1).max(4000), leadId: z.uuid().optional(), campaignId: z.uuid().optional() }), handler: (c) => copilot.ask(c.workspaceId, c.userId, c.role, c.body.threadId ?? null, c.body.question, c.body, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/copilot/actions/:id/execute', tag: 'Copilot', summary: 'Confirm and run a proposed action (role-checked, runs once)', auth: 'workspace', role: 'MEMBER', status: 200, handler: (c) => copilot.executeAction(c.workspaceId, c.params.id, c.role, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/copilot/actions/:id/reject', tag: 'Copilot', summary: 'Reject a proposed action', auth: 'workspace', role: 'VIEWER', status: 200, handler: async (c) => { await copilot.rejectAction(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
 route({ method: 'get', path: '/w/:workspaceId/copilot/repetition', tag: 'Copilot', summary: 'Find repetitive wording across generated emails', auth: 'workspace', role: 'VIEWER', query: z.object({ campaignId: z.string().uuid().optional() }), handler: (c) => copilot.repetitiveWording(c.workspaceId, c.query.campaignId) });
 route({ method: 'get', path: '/w/:workspaceId/copilot/memory', tag: 'Copilot', summary: 'Business memory', auth: 'workspace', role: 'VIEWER', handler: (c) => copilot.listMemory(c.workspaceId) });
 route({ method: 'post', path: '/w/:workspaceId/copilot/memory', tag: 'Copilot', summary: 'Add business memory', auth: 'workspace', role: 'ADMIN', body: z.object({ content: z.string().min(1).max(2000) }), handler: (c) => copilot.addMemory(c.workspaceId, c.body.content, c.actor) });
 route({ method: 'delete', path: '/w/:workspaceId/copilot/memory/:id', tag: 'Copilot', summary: 'Delete business memory', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await copilot.deleteMemory(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
+route({ method: 'post', path: '/w/:workspaceId/copilot/voice/session', tag: 'Copilot', summary: 'Create a short-lived OpenAI Realtime credential', auth: 'workspace', role: 'VIEWER', status: 200,
+  rateLimit: { limit: 12, windowSec: 3600, key: 'workspace' },
+  body: z.object({ threadId: z.uuid().nullable() }),
+  handler: async (c) => (await import('../services/copilot-voice.js')).createVoiceSession(c.workspaceId, c.userId, c.body.threadId, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/copilot/voice/session/:id/end', tag: 'Copilot', summary: 'Record the end of a voice session', auth: 'workspace', role: 'VIEWER', status: 200,
+  rateLimit: { limit: 60, windowSec: 3600, key: 'user' },
+  body: z.object({ outcome: z.enum(['ended', 'failed']) }),
+  handler: async (c) => (await import('../services/copilot-voice.js')).endVoiceSession(c.workspaceId, c.userId, z.uuid().parse(c.params.id), c.body.outcome, c.actor) });
+route({ method: 'get', path: '/w/:workspaceId/copilot/actions/:id/research', tag: 'Copilot', summary: 'Research job progress and report links for a Copilot action', auth: 'workspace', role: 'VIEWER',
+  handler: (c) => copilot.researchActionStatus(c.workspaceId, c.userId, z.uuid().parse(c.params.id)) });

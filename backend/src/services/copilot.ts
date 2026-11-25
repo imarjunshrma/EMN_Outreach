@@ -1,22 +1,20 @@
 import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
+import { queue, QUEUES } from '../core/queues.js';
 import { AppError, Forbidden, NotFound } from '../core/errors.js';
 import { audit, type Actor } from '../core/audit.js';
 import { hasRole, type Role } from '../../../shared/src/permissions.js';
-import { COPILOT_ACTION_TYPES, type CopilotReply } from '../../../shared/src/ai-schemas.js';
+import { type CopilotReply } from '../../../shared/src/ai-schemas.js';
 import { similarity, firstSentence } from '../../../shared/src/quality.js';
-import { neutralizeTags } from '../../../integrations/src/ai/guard.js';
+import { neutralizeTags, wrapUntrusted } from '../../../integrations/src/ai/guard.js';
 import { runAi } from './ai.js';
 import { getConfig } from './ai-studio.js';
+import { actionRegistry, actionType } from './copilot-tools.js';
 
 // AI Copilot. Reads a bounded, workspace-scoped snapshot of REAL data (no cross-tenant access, no raw
 // secrets), answers + recommends, and PROPOSES actions from a fixed allow-list. Proposed actions only run
 // when a user whose role permits them confirms. The Copilot cannot send email, start campaigns or change
 // providers, billing or security.
-
-const ACTION_ROLES: Record<(typeof COPILOT_ACTION_TYPES)[number], Role> = {
-  create_campaign_draft: 'MEMBER', draft_sequence: 'MEMBER', queue_research: 'MEMBER', generate_reply_drafts: 'MEMBER', pause_campaign: 'MANAGER', add_memory: 'ADMIN',
-};
 
 /** Deterministic analysis the Copilot can cite: repeated openings/phrases across generated emails. */
 export async function repetitiveWording(workspaceId: string, campaignId?: string) {
@@ -127,7 +125,9 @@ export async function resolveResearchRequest(workspaceId: string, question: stri
   const named = query.replace(/^(?:the prospect|prospect)\s+/i, '').match(/^(.+?)\s+(?:at|from)\s+(.+)$/i);
   const name = (named?.[1] ?? query).replace(/https?:\/\/[^\s<>]+/gi, '').trim().split(/\s+/);
   const [first, ...rest] = name;
-  const identityFilter: Prisma.LeadWhereInput | undefined = selection.leadId ? { id: selection.leadId }
+  const refersToSelection = !query || /^(?:(?:the |this )?(?:selected )?prospect|them|him|her)(?:\s+https?:\/\/\S+)?$/i.test(query);
+  const selectedId = refersToSelection ? selection.leadId : undefined;
+  const identityFilter: Prisma.LeadWhereInput | undefined = selectedId ? { id: selectedId }
     : email ? { emailNormalized: email }
     : name.length > 1 ? {
       firstName: { equals: first, mode: 'insensitive' },
@@ -140,7 +140,7 @@ export async function resolveResearchRequest(workspaceId: string, question: stri
     select: { id: true, firstName: true, lastName: true, website: true, linkedinUrl: true, customFields: true,
       company: { select: { name: true, website: true, domain: true } } },
   });
-  if (selection.leadId && !matches.length) throw NotFound('Prospect');
+  if (selectedId && !matches.length) throw NotFound('Prospect');
   if (matches.length !== 1) return { answer: matches.length ? 'I found multiple matching prospects. Select the prospect or specify their company.' : 'I could not match a saved prospect. Select their record or provide their full name and company.' };
   const lead = matches[0];
   if (selection.campaignId) {
@@ -154,115 +154,106 @@ export async function resolveResearchRequest(workspaceId: string, question: stri
       params: [{ key: 'leadIds', value: lead.id }, ...(selection.campaignId ? [{ key: 'campaignId', value: selection.campaignId }] : []), ...(sourceUrl.success ? [{ key: 'sourceUrl', value: sourceUrl.data }] : [])] } };
 }
 
-export async function ask(workspaceId: string, userId: string, role: Role, threadId: string | null, question: string, selection: { leadId?: string; campaignId?: string } = {}) {
+async function prospectContext(workspaceId: string, leadId?: string) {
+  if (!leadId) return null;
+  const lead = await db().lead.findFirst({
+    where: { id: leadId, workspaceId },
+    select: { id: true, firstName: true, lastName: true, title: true, company: { select: { name: true } } },
+  });
+  if (!lead) return null;
+  const intel = await import('./intelligence.js');
+  const [report, claims] = await Promise.all([
+    db().researchReport.findFirst({
+      where: { workspaceId, leadId }, orderBy: { createdAt: 'desc' },
+      select: { id: true, status: true, coverage: true, pageCount: true },
+    }),
+    intel.supportedClaims(workspaceId, leadId),
+  ]);
+  return { ...lead, report, supportedClaims: claims.slice(0, 12).map(({ text, category }) => ({ text, category })) };
+}
+
+export function serializeCopilotSnapshot(snapshot: object) {
+  const json = JSON.stringify(snapshot);
+  return wrapUntrusted('workspace_snapshot', json, json.length);
+}
+
+export async function ask(workspaceId: string, userId: string, role: Role, threadId: string | null, question: string, selection: { leadId?: string; campaignId?: string } = {}, actor?: Actor) {
   await (await import('./billing.js')).assertEntitled(workspaceId, 'feature:copilot');
-  const research = await resolveResearchRequest(workspaceId, question, selection);
   const thread = threadId ? await getThread(workspaceId, userId, threadId) : await db().copilotThread.create({ data: { workspaceId, userId, title: question.slice(0, 80) }, include: { messages: true, actions: true } });
+  const previousResearch = [...thread.actions].reverse().find(a => a.type === 'queue_research');
+  const previousLead = z.object({ leadIds: z.uuid(), campaignId: z.uuid().optional() }).safeParse(previousResearch?.params);
+  const selectedLead = selection.leadId ? selection : /^\s*(?:research|investigate|look up)\s+(?:this prospect|the prospect|them|him|her)[.!?]?\s*$/i.test(question) && previousLead.success
+    ? { leadId: previousLead.data.leadIds, campaignId: previousLead.data.campaignId }
+    : selection;
+  const research = await resolveResearchRequest(workspaceId, question, selectedLead);
+  const contextLeadId = selection.leadId ?? (previousLead.success ? previousLead.data.leadIds : undefined);
+  const autoResearch = !!(actor && research?.action && hasRole(role, actionRegistry.queue_research.role));
+  if (research?.action && !hasRole(role, actionRegistry.queue_research.role)) research.answer = 'I found the saved prospect. Starting research requires the Member role.';
   await db().copilotMessage.create({ data: { workspaceId, threadId: thread.id, role: 'USER', content: question } });
   const reply: CopilotReply = research
-    ? { answer: research.answer, recommendations: [], proposedActions: research.action ? [research.action] : [] }
+    ? { answer: research.answer, recommendations: [], proposedActions: research.action && hasRole(role, actionRegistry.queue_research.role) ? [research.action] : [] }
     : await (async () => {
-      const [snapshot, memory] = await Promise.all([buildSnapshot(workspaceId), db().copilotMemory.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' }, take: 50 })]);
+      const [snapshot, memory, selectedProspect] = await Promise.all([
+        buildSnapshot(workspaceId),
+        db().copilotMemory.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' }, take: 50 }),
+        prospectContext(workspaceId, contextLeadId),
+      ]);
       const history = thread.messages.slice(-10).map((m) => `${m.role}: ${m.content.slice(0, 1500)}`).join('\n') || '(new conversation)';
       return (await runAi<CopilotReply>(workspaceId, 'COPILOT', {
-        memory: memory.map((m) => `- ${m.content}`).join('\n') || '(none)', snapshot: JSON.stringify(snapshot), generatedAt: new Date().toISOString(),
-        history: neutralizeTags(history), role, question: neutralizeTags(question),
+        memory: wrapUntrusted('workspace_memory', memory.map((m) => `- ${m.content}`).join('\n') || '(none)'), snapshot: serializeCopilotSnapshot({
+          ...snapshot,
+          selectedProspect,
+          availableActions: Object.entries(actionRegistry).filter(([, tool]) => hasRole(role, tool.role))
+            .map(([name, tool]) => ({ name, input: z.toJSONSchema(tool.input), confirmationRequired: true })),
+        }), generatedAt: new Date().toISOString(),
+        history: wrapUntrusted('conversation_history', history), role, question: neutralizeTags(question),
       }, { entity: { type: 'copilot_thread', id: thread.id } })).data;
     })();
-  const msg = await db().copilotMessage.create({ data: { workspaceId, threadId: thread.id, role: 'ASSISTANT', content: reply.answer, data: { recommendations: reply.recommendations } as Prisma.InputJsonValue } });
   const actions = [];
   for (const a of reply.proposedActions) {
+    const tool = actionRegistry[a.type];
     const params = Object.fromEntries(a.params.map((p) => [p.key, p.value]));
-    actions.push(await db().copilotAction.create({ data: { workspaceId, threadId: thread.id, type: a.type, params, summary: a.summary.slice(0, 500), requiredRole: ACTION_ROLES[a.type] } }));
+    if (!tool.input.safeParse(params).success) continue;
+    actions.push(await db().copilotAction.create({ data: { workspaceId, threadId: thread.id, type: a.type, params, summary: a.summary.slice(0, 500), requiredRole: actionRegistry[a.type].role } }));
   }
+  if (autoResearch && actor && actions[0]) {
+    try {
+      await executeAction(workspaceId, actions[0].id, role, actor);
+      actions[0] = await db().copilotAction.findUniqueOrThrow({ where: { id: actions[0].id } });
+      reply.answer = 'Research was queued for the saved prospect. Results will appear in Research once the worker finishes.';
+    } catch {
+      actions[0] = await db().copilotAction.findUniqueOrThrow({ where: { id: actions[0].id } });
+      reply.answer = 'Research could not be queued. Check the action status and retry.';
+    }
+  }
+  const msg = await db().copilotMessage.create({ data: { workspaceId, threadId: thread.id, role: 'ASSISTANT', content: reply.answer, data: { recommendations: reply.recommendations } as Prisma.InputJsonValue } });
   await db().copilotThread.update({ where: { id: thread.id }, data: { updatedAt: new Date() } });
   return { threadId: thread.id, messageId: msg.id, answer: reply.answer, recommendations: reply.recommendations, proposedActions: actions.map((a) => ({ ...a, youCanExecute: hasRole(role, a.requiredRole as Role) })) };
 }
 
-const P = {
-  create_campaign_draft: z.object({ name: z.string().min(1).max(150), audienceContext: z.string().max(5000).default(''), customInstructions: z.string().max(5000).default('') }),
-  draft_sequence: z.object({ campaignId: z.string().uuid(), step1: z.string().max(2000).optional(), step2: z.string().max(2000).optional(), step3: z.string().max(2000).optional(), step4: z.string().max(2000).optional() }),
-  queue_research: z.object({ leadIds: z.string().max(20000), campaignId: z.uuid().optional(), sourceUrl: z.url({ protocol: /^https?$/ }).max(2000).optional() }),
-  generate_reply_drafts: z.object({ conversationIds: z.string().max(20000) }),
-  pause_campaign: z.object({ campaignId: z.string().uuid(), reason: z.string().max(300).default('Paused via Copilot') }),
-  add_memory: z.object({ content: z.string().min(1).max(2000) }),
-};
-const ids = (s: string) => [...new Set(s.split(/[\s,]+/).filter((x) => /^[0-9a-f-]{36}$/i.test(x)))].slice(0, 200);
-
 /** Execute a proposed action after explicit user confirmation. Atomic claim → never runs twice. */
 export async function executeAction(workspaceId: string, actionId: string, role: Role, actor: Actor) {
-  const a = await db().copilotAction.findFirst({ where: { id: actionId, workspaceId } });
+  const a = await db().copilotAction.findFirst({ where: { id: actionId, workspaceId, ...(actor.userId ? { thread: { userId: actor.userId } } : {}) } });
   if (!a) throw NotFound('Copilot action');
-  if (!hasRole(role, a.requiredRole as Role)) throw Forbidden(`This action needs the ${a.requiredRole} role`);
-  const claimed = await db().copilotAction.updateMany({ where: { id: actionId, status: 'PROPOSED' }, data: { status: 'EXECUTED', executedById: actor.userId ?? null, executedAt: new Date() } });
-  if (!claimed.count) throw new AppError('CONFLICT', `Action is already ${a.status}`, 409);
+  if (!actionType(a.type)) throw NotFound('Copilot tool');
+  const tool = actionRegistry[a.type];
+  if (!hasRole(role, tool.role)) throw Forbidden(`This action needs the ${a.requiredRole} role`);
+  const claimed = await db().copilotAction.updateMany({ where: { id: actionId, workspaceId, status: 'PROPOSED', executedAt: null }, data: { executedById: actor.userId ?? null, executedAt: new Date() } });
+  if (!claimed.count) throw new AppError('CONFLICT', `Action is already ${a.status === 'PROPOSED' ? 'running' : a.status.toLowerCase()}`, 409);
   try {
-    const result = await run(workspaceId, a.type as keyof typeof P, a.params as Record<string, string>, actor);
-    await db().copilotAction.update({ where: { id: actionId }, data: { result: result as Prisma.InputJsonValue } });
+    const result = await tool.run(workspaceId, a.params, actor);
+    await db().copilotAction.update({ where: { id: actionId }, data: { status: 'EXECUTED', result: result as Prisma.InputJsonValue } });
     await audit(workspaceId, actor, 'copilot.action_executed', { type: 'copilot_action', id: actionId }, { type: a.type });
     return { status: 'EXECUTED', result };
   } catch (e) {
     await db().copilotAction.update({ where: { id: actionId }, data: { status: 'FAILED', result: { error: (e as Error).message } } });
+    await audit(workspaceId, actor, 'copilot.action_failed', { type: 'copilot_action', id: actionId }, { type: a.type });
     throw e;
   }
 }
 
-async function run(workspaceId: string, type: keyof typeof P, raw: Record<string, string>, actor: Actor) {
-  const engine = await import('./engine.js');
-  switch (type) {
-    case 'create_campaign_draft': {
-      const p = P.create_campaign_draft.parse(raw);
-      const c = await engine.createCampaign(workspaceId, engine.CampaignSettingsSchema.parse({ name: p.name }), actor);
-      await engine.updateCampaignAi(workspaceId, c.id, { aiOverrides: { writing: {}, research: {}, audienceContext: p.audienceContext, offerContext: '', customInstructions: p.customInstructions, aiSource: 'workspace' } }, actor);
-      return { campaignId: c.id, status: 'DRAFT', note: 'Draft only — add lists and mailboxes, review and approve it yourself.' };
-    }
-    case 'draft_sequence': {
-      const p = P.draft_sequence.parse(raw);
-      const c = await engine.getCampaign(workspaceId, p.campaignId);
-      if (!['DRAFT', 'PENDING_APPROVAL'].includes(c.status)) throw new AppError('CAMPAIGN_STATE', 'Copilot only edits draft campaigns', 409);
-      const instr = [p.step1, p.step2, p.step3, p.step4].filter((x): x is string => !!x?.trim());
-      if (!instr.length) throw new AppError('VALIDATION_FAILED', 'No step instructions proposed', 400);
-      await engine.saveSequence(workspaceId, c.id, engine.SequenceSchema.parse({ steps: instr.map((t, i) => ({ delayDays: i === 0 ? 0 : 3, threadMode: i === 0 ? 'NEW_THREAD' : 'REPLY_IN_THREAD', personalizationMode: 'AI_FULL', aiInstructions: t, variants: [{ label: 'A', subject: i === 0 ? 'Quick idea for {{company.name|you}}' : '', body: 'Hi {{firstName|there}},\n\n(AI writes this step for each lead)\n\n{{sender.name}}' }] })) }), actor);
-      return { campaignId: c.id, steps: instr.length };
-    }
-    case 'queue_research': {
-      const p = P.queue_research.parse(raw);
-      const leads = await db().lead.findMany({ where: { workspaceId, id: { in: ids(p.leadIds) } }, select: { id: true } });
-      const intel = await import('./intelligence.js');
-      for (const l of leads) await intel.queueResearch(workspaceId, { leadId: l.id, campaignId: p.campaignId, sourceUrl: p.sourceUrl }, { thenScore: true });
-      return { queued: leads.length };
-    }
-    case 'generate_reply_drafts': {
-      const p = P.generate_reply_drafts.parse(raw);
-      const convs = await db().conversation.findMany({ where: { workspaceId, id: { in: ids(p.conversationIds) } }, include: { messages: { where: { direction: 'INBOUND' }, orderBy: { sentAt: 'desc' }, take: 1 } } });
-      const ra = await import('./reply-assist.js');
-      let drafted = 0;
-      for (const c of convs) {
-        const m = c.messages[0];
-        if (!m) continue;
-        const existing = await db().replySuggestion.findUnique({ where: { messageId_mode: { messageId: m.id, mode: 'DRAFT' } } });
-        if (existing) continue;
-        const inbox = await import('./inbox.js');
-        const d = await inbox.draftReply(workspaceId, c.id);
-        await db().replySuggestion.create({ data: { workspaceId, conversationId: c.id, messageId: m.id, mode: 'DRAFT', category: m.category, body: d.body, reason: ra.commitmentFlags(d.body) } });
-        drafted++;
-      }
-      return { drafted, note: 'Drafts are in the approval queue; nothing was sent.' };
-    }
-    case 'pause_campaign': {
-      const p = P.pause_campaign.parse(raw);
-      return engine.pauseCampaign(workspaceId, p.campaignId, p.reason, actor);
-    }
-    case 'add_memory': {
-      const p = P.add_memory.parse(raw);
-      const m = await db().copilotMemory.create({ data: { workspaceId, content: p.content, createdById: actor.userId ?? null } });
-      return { memoryId: m.id };
-    }
-  }
-}
-
 export async function rejectAction(workspaceId: string, actionId: string, actor: Actor) {
-  const r = await db().copilotAction.updateMany({ where: { id: actionId, workspaceId, status: 'PROPOSED' }, data: { status: 'REJECTED', executedById: actor.userId ?? null, executedAt: new Date() } });
+  const r = await db().copilotAction.updateMany({ where: { id: actionId, workspaceId, status: 'PROPOSED', executedAt: null, ...(actor.userId ? { thread: { userId: actor.userId } } : {}) }, data: { status: 'REJECTED', executedById: actor.userId ?? null, executedAt: new Date() } });
   if (!r.count) throw NotFound('Proposed action');
 }
 
@@ -276,4 +267,23 @@ export async function deleteMemory(workspaceId: string, id: string, actor: Actor
   const r = await db().copilotMemory.deleteMany({ where: { id, workspaceId } });
   if (!r.count) throw NotFound('Memory');
   await audit(workspaceId, actor, 'copilot.memory_deleted', { type: 'copilot_memory', id });
+}
+
+export async function researchActionStatus(workspaceId: string, userId: string, actionId: string) {
+  const action = await db().copilotAction.findFirst({
+    where: { id: actionId, workspaceId, thread: { userId }, type: 'queue_research' },
+    select: { result: true },
+  });
+  if (!action) throw NotFound('Copilot research action');
+  const result = z.object({ jobs: z.array(z.string()).max(200) }).safeParse(action.result);
+  if (!result.success) return [];
+  return Promise.all(result.data.jobs.map(async id => {
+    const job = await queue(QUEUES.research).getJob(id);
+    if (!job || job.data.workspaceId !== workspaceId) return { id, state: 'unknown', reportId: null, reportStatus: null };
+    const reportId = z.uuid().safeParse((job.returnvalue as { reportId?: string } | null)?.reportId);
+    const report = reportId.success ? await db().researchReport.findFirst({
+      where: { id: reportId.data, workspaceId }, select: { id: true, status: true },
+    }) : null;
+    return { id, state: await job.getState(), reportId: report?.id ?? null, reportStatus: report?.status ?? null };
+  }));
 }

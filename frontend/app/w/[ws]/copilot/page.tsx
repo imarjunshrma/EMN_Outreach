@@ -1,14 +1,31 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { useWsMutation, useWsQuery } from '@/lib/hooks';
+import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { CopilotVoice } from './voice';
 import { fmtDate } from '@/lib/format';
 import { Badge, Button, Card, ConfirmButton, Empty, Notice, PageHeader, QueryView, Textarea } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const EXAMPLES = ['Which campaigns are underperforming this month and why?', 'Which positive replies still have no response?', 'Draft a campaign for US dentists who post on Instagram', 'Where is AI spend going this month?'];
 
+function ResearchProgress({ id, workspace }: { id: string; workspace: string }) {
+  const jobs = useWsQuery<Array<{ id: string; state: string; reportId: string | null; reportStatus: string | null }>>(
+    `/copilot/actions/${id}/research`, { refetchInterval: 8000 },
+  );
+  return <ul className="w-full text-xs text-slate-600">{jobs.data?.map(job => <li key={job.id}>
+    {job.reportId
+      ? <Link className="text-brand-700 underline" href={`/w/${workspace}/research/${job.reportId}`}>Open research report · {job.reportStatus?.toLowerCase()}</Link>
+      : <span>Research job · {job.state}</span>}
+  </li>)}</ul>;
+}
+
 export default function Copilot() {
+  const workspace = useWs();
+  const queryClient = useQueryClient();
+  const [voiceKey, resetVoice] = useState(0);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [question, setQuestion] = useState('');
   const [selection, setSelection] = useState<{ leadId?: string; campaignId?: string }>({});
@@ -32,11 +49,11 @@ export default function Copilot() {
   const delMem = useWsMutation<string>((id) => ({ path: `/copilot/memory/${id}`, method: 'DELETE' }), { success: 'Removed' });
   return (
     <>
-      <PageHeader title="AI Copilot" subtitle="Ask about your campaigns, replies, pipeline and costs. Answers use your workspace data. The Copilot can propose actions, but nothing happens until you confirm, and it can never send email or start a campaign." actions={<Button variant="secondary" onClick={() => setThreadId(null)}>New conversation</Button>} />
+      <PageHeader title="AI Copilot" subtitle="Ask about your campaigns, replies, pipeline and costs. Answers use your workspace data. Copilot can queue prospect research and request confirmation for other actions." actions={<Button variant="secondary" onClick={() => { resetVoice(key => key + 1); setThreadId(null); }}>New conversation</Button>} />
       <div className="grid gap-4 lg:grid-cols-4">
         <Card title="Conversations">
           <QueryView q={threads} isEmpty={(d) => d.length === 0} empty={<p className="text-xs text-slate-500">None yet.</p>}>
-            {(ts) => <ul className="space-y-1">{ts.map((t) => <li key={t.id}><button className={`w-full truncate rounded px-2 py-1 text-left text-sm ${threadId === t.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-slate-50'}`} onClick={() => setThreadId(t.id)}>{t.title}</button></li>)}</ul>}
+            {(ts) => <ul className="space-y-1">{ts.map((t) => <li key={t.id}><button className={`w-full truncate rounded px-2 py-1 text-left text-sm ${threadId === t.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-slate-50'}`} onClick={() => { resetVoice(key => key + 1); setThreadId(t.id); }}>{t.title}</button></li>)}</ul>}
           </QueryView>
         </Card>
         <div className="space-y-3 lg:col-span-2">
@@ -54,7 +71,14 @@ export default function Copilot() {
                 <ul className="space-y-2">{t.actions.map((a: any) => (
                   <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-200 p-2 text-sm" data-testid="copilot-action">
                     <span><Badge>{a.type}</Badge> {a.summary} <span className="text-xs text-slate-500">(needs {a.requiredRole.toLowerCase()})</span></span>
-                    {a.status === 'PROPOSED' ? <span className="flex gap-2"><ConfirmButton confirm={`Run: ${a.summary}?`} loading={exec.isPending} onConfirm={() => exec.mutate(a.id)}>Confirm</ConfirmButton><Button variant="ghost" onClick={() => reject.mutate(a.id)}>Dismiss</Button></span> : <Badge>{a.status}</Badge>}
+                    {a.status === 'PROPOSED' && !a.executedAt ? <span className="flex gap-2"><ConfirmButton confirm={a.type === 'pause_campaign' ? `Pause campaign ${a.params.campaignId} and stop its scheduled sending? A manager can resume it later.` : `Run ${a.type.replaceAll('_', ' ')} with the displayed details?`} loading={exec.isPending} onConfirm={() => exec.mutate(a.id)}>Confirm</ConfirmButton><Button variant="ghost" onClick={() => reject.mutate(a.id)}>Dismiss</Button></span> : <Badge>{a.status === 'PROPOSED' ? 'RUNNING' : a.status}</Badge>}
+                    {a.status === 'PROPOSED' && <details className="w-full text-xs text-slate-600">
+                      <summary className="cursor-pointer">Action details</summary>
+                      <dl className="mt-1 space-y-1">{Object.entries(a.params ?? {}).map(([key, value]) => <div key={key} className="break-words">
+                        <dt className="inline font-medium">{key}</dt> <dd className="inline">{String(value)}</dd>
+                      </div>)}</dl>
+                    </details>}
+                    {a.type === 'queue_research' && a.status === 'EXECUTED' && <ResearchProgress id={a.id} workspace={workspace} />}
                   </li>
                 ))}</ul>
               </Card>}
@@ -63,6 +87,10 @@ export default function Copilot() {
           <Card>
             <Textarea rows={3} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask the Copilot…" />
             <div className="mt-2 flex items-center justify-between"><p className="text-xs text-slate-500">The Copilot never invents prices or commitments. Check numbers before acting on them.</p><Button disabled={!question.trim()} loading={ask.isPending} onClick={() => ask.mutate()}>Ask</Button></div>
+            <CopilotVoice key={workspace + voiceKey} workspace={workspace} threadId={threadId} selection={selection} disabled={ask.isPending} onReply={(result) => {
+              setThreadId(result.threadId);
+              void queryClient.invalidateQueries({ queryKey: ['ws', workspace] });
+            }} />
           </Card>
         </div>
         <div className="space-y-4">
