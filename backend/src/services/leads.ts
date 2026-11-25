@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
+import { sha256 } from '../core/crypto.js';
 import { db, Prisma } from '../core/db.js';
 import { AppError, BadRequest, NotFound } from '../core/errors.js';
 import { audit, publish, type Actor } from '../core/audit.js';
@@ -12,6 +13,19 @@ export const LEAD_STATUSES = ['NEW', 'RESEARCHED', 'QUALIFIED', 'DISQUALIFIED', 
 export const LAWFUL_BASES = ['UNKNOWN', 'CONSENT', 'LEGITIMATE_INTEREST', 'EXISTING_RELATIONSHIP', 'NOT_REQUIRED'] as const;
 
 export const normalizeEmail = (e: string) => e.trim().toLowerCase();
+/** Canonical key used for exact profile deduplication, never fuzzy name matching. */
+export function canonicalLinkedInProfile(raw: string | null | undefined): string | null {
+  if (!raw?.trim()) return null;
+  try {
+    const value = raw.trim();
+    const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+    if (!/(^|\.)linkedin\.com$/i.test(url.hostname)) return null;
+    const match = url.pathname.match(/^\/in\/([^/]+)\/?$/i);
+    if (!match?.[1]) return null;
+    const slug = decodeURIComponent(match[1]).normalize('NFKC').trim().toLowerCase();
+    return slug ? `linkedin.com/in/${slug}` : null;
+  } catch { return null; }
+}
 const EMAIL_RE = /^[^\s@<>()[\]\\,;:"]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 export const isValidEmail = (e: string) => EMAIL_RE.test(e.trim());
 
@@ -194,7 +208,7 @@ export async function updateLead(workspaceId: string, id: string, input: Partial
     where: { id },
     data: {
       ...rest,
-      ...(email ? { email: email.trim(), emailNormalized: normalizeEmail(email), emailVerificationStatus: 'UNVERIFIED' } : {}),
+      ...(email && normalizeEmail(email) !== lead.emailNormalized ? { email: email.trim(), emailNormalized: normalizeEmail(email), emailVerificationStatus: 'UNVERIFIED', emailVerifiedAt: null } : {}),
       ...(customFields ? { customFields: customFields as Prisma.InputJsonValue } : {}),
       ...(company !== undefined ? { companyId: company?.id ?? null } : {}),
     },
@@ -341,7 +355,7 @@ export async function deleteNote(workspaceId: string, id: string) {
 
 // ---------------------------------------------------------------- CSV import / export
 
-const IMPORT_FIELDS = ['email', 'firstName', 'lastName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'phone', 'country', 'city', 'timezone', 'tags'] as const;
+const IMPORT_FIELDS = ['email', 'firstName', 'lastName', 'fullName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'phone', 'country', 'city', 'timezone', 'tags'] as const;
 export const ImportMappingSchema = z.record(z.string(), z.enum([...IMPORT_FIELDS, 'ignore'] as [string, ...string[]]).or(z.string().regex(/^custom\.[a-zA-Z0-9_]+$/)));
 
 export async function uploadImport(workspaceId: string, file: { originalname: string; buffer: Buffer }, actor: Actor) {
@@ -358,7 +372,7 @@ export async function uploadImport(workspaceId: string, file: { originalname: st
   const guess: Record<string, string> = {};
   for (const h of headers) {
     const n = h.toLowerCase().replace(/[^a-z]/g, '');
-    const map: Record<string, string> = { email: 'email', emailaddress: 'email', workemail: 'email', firstname: 'firstName', first: 'firstName', lastname: 'lastName', last: 'lastName', title: 'title', jobtitle: 'title', company: 'companyName', companyname: 'companyName', organization: 'companyName', domain: 'companyDomain', companydomain: 'companyDomain', website: 'website', linkedin: 'linkedinUrl', linkedinurl: 'linkedinUrl', phone: 'phone', country: 'country', city: 'city', timezone: 'timezone', tags: 'tags' };
+    const map: Record<string, string> = { email: 'email', emailaddress: 'email', workemail: 'email', firstname: 'firstName', first: 'firstName', lastname: 'lastName', last: 'lastName', fullname: 'fullName', name: 'fullName', title: 'title', jobtitle: 'title', company: 'companyName', companyname: 'companyName', organization: 'companyName', domain: 'companyDomain', companydomain: 'companyDomain', website: 'website', companywebsite: 'website', youtube: 'custom.youtubeUrl', youtubeurl: 'custom.youtubeUrl', instagramurl: 'custom.instagramUrl', facebookurl: 'custom.facebookUrl', socialurl: 'custom.socialUrl', transcripturl: 'custom.transcriptUrl', profileurl: 'custom.publicProfileUrl', publicprofileurl: 'custom.publicProfileUrl', notes: 'custom.notes', additionalnotes: 'custom.notes', linkedin: 'linkedinUrl', linkedinurl: 'linkedinUrl', phone: 'phone', country: 'country', city: 'city', timezone: 'timezone', tags: 'tags' };
     guess[h] = map[n] ?? 'ignore';
   }
   const job = await db().importJob.create({ data: { workspaceId, fileName: file.originalname.slice(0, 200), storageKey: key, headers, mapping: guess, createdById: actor.userId ?? null } });
@@ -381,7 +395,10 @@ export async function startImport(workspaceId: string, importId: string, input: 
   const job = await db().importJob.findFirst({ where: { id: importId, workspaceId } });
   if (!job) throw NotFound('Import');
   if (job.status !== 'PENDING') throw new AppError('CONFLICT', 'Import already started', 409);
-  if (!Object.values(input.mapping).includes('email')) throw BadRequest('VALIDATION_FAILED', 'Map one column to "email"');
+  const fields = new Set(Object.values(input.mapping));
+  const mapsName = fields.has('fullName') || (fields.has('firstName') && fields.has('lastName'));
+  const mapsSource = ['companyDomain', 'website', 'custom.publicProfileUrl'].some((field) => fields.has(field));
+  if (!fields.has('email') && !(mapsName && mapsSource)) throw BadRequest('VALIDATION_FAILED', 'Map an email, or map a full name and a company website or public profile URL for research.');
   let targetListId = input.targetListId ?? null;
   if (targetListId && !(await db().leadList.findFirst({ where: { id: targetListId, workspaceId } }))) throw NotFound('List');
   if (!targetListId && input.newListName) targetListId = (await createList(workspaceId, { name: input.newListName }, actor)).id;
@@ -417,31 +434,52 @@ export async function processImport(workspaceId: string, importId: string) {
       if (!v || field === 'ignore') continue;
       if (field.startsWith('custom.')) custom[field.slice(7)] = v; else row[field] = v;
     }
+    if (row.fullName) {
+      const [firstName, ...rest] = row.fullName.split(/\s+/);
+      row.firstName ??= firstName;
+      if (rest.length) row.lastName ??= rest.join(' ');
+    }
     const email = normalizeEmail(row.email ?? '');
-    if (!isValidEmail(email)) { counters.errors++; if (errors.length < 200) errors.push({ row: i + 2, error: 'invalid or missing email' }); continue; }
-    if (seen.has(email)) { counters.skipped++; continue; } // duplicate inside the file
-    seen.add(email);
-    if (suppressed.has(email)) { counters.skipped++; if (errors.length < 200) errors.push({ row: i + 2, error: 'email is on the suppression list' }); continue; }
+    const companySource = row.companyDomain ?? row.website;
+    const researchSource = companySource ?? custom.publicProfileUrl;
+    const researchOnly = !email && !!(row.firstName && row.lastName && researchSource);
+    if (!researchOnly && !isValidEmail(email)) {
+      counters.errors++;
+      if (errors.length < 200) errors.push({ row: i + 2, error: email ? 'invalid email' : 'missing email or name and public source for research' });
+      continue;
+    }
+    const key = researchOnly
+      ? `research-only:${sha256(JSON.stringify([row.firstName, row.lastName, researchSource, custom.publicProfileUrl, row.linkedinUrl].map((value) => value?.trim().toLowerCase() ?? null)))}`
+      : email;
+    if (seen.has(key)) { counters.skipped++; continue; }
+    seen.add(key);
+    if (email && suppressed.has(email)) { counters.skipped++; if (errors.length < 200) errors.push({ row: i + 2, error: 'email is on the suppression list' }); continue; }
     try {
-      const existing = await db().lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: email } } });
+      const existing = await db().lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: key } } });
       const country = (row.country ?? opts.defaultCountry ?? '').toUpperCase().slice(0, 2) || null;
       let leadId: string;
       if (existing) {
         if (opts.dedupeMode === 'skip') { counters.skipped++; leadId = existing.id; }
         else {
-          await db().lead.update({ where: { id: existing.id }, data: { firstName: row.firstName ?? existing.firstName, lastName: row.lastName ?? existing.lastName, title: row.title ?? existing.title, country: country ?? existing.country, city: row.city ?? existing.city, phone: row.phone ?? existing.phone, linkedinUrl: row.linkedinUrl ?? existing.linkedinUrl } });
+          const previousCustom = existing.customFields && typeof existing.customFields === 'object' && !Array.isArray(existing.customFields)
+            ? existing.customFields : {};
+          await db().lead.update({ where: { id: existing.id }, data: {
+            firstName: row.firstName, lastName: row.lastName, title: row.title, country: country ?? undefined,
+            city: row.city, phone: row.phone, linkedinUrl: row.linkedinUrl, website: row.website,
+            ...(Object.keys(custom).length ? { customFields: { ...previousCustom, ...custom } } : {}),
+          } });
           counters.updated++; leadId = existing.id;
         }
       } else {
         if (leadRoom <= 0) { counters.skipped++; if (errors.length < 500) errors.push({ row: i + 2, error: 'Plan lead limit reached — upgrade to import more' }); continue; }
         leadRoom--;
-        const company = await upsertCompany(workspaceId, row.companyName, row.companyDomain ?? row.website ?? email);
+        const company = await upsertCompany(workspaceId, row.companyName, companySource ?? email);
         const lead = await db().lead.create({
           data: {
-            workspaceId, email, emailNormalized: email, firstName: row.firstName, lastName: row.lastName, title: row.title, website: row.website,
+            workspaceId, email, emailNormalized: key, ...(researchOnly ? { emailVerificationStatus: 'INVALID' as const } : {}), firstName: row.firstName, lastName: row.lastName, title: row.title, website: row.website,
             linkedinUrl: row.linkedinUrl, phone: row.phone, country, city: row.city, timezone: row.timezone,
             tags: row.tags ? row.tags.split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [], customFields: custom,
-            lawfulBasis: opts.lawfulBasis, lawfulBasisNote: opts.lawfulBasisNote, sourceId: source.id, companyId: company?.id,
+            lawfulBasis: researchOnly ? 'UNKNOWN' : opts.lawfulBasis, lawfulBasisNote: researchOnly ? null : opts.lawfulBasisNote, sourceId: source.id, companyId: company?.id,
             statusChanges: { create: { workspaceId, toStatus: 'NEW', reason: `import ${job.fileName}` } },
           },
         });

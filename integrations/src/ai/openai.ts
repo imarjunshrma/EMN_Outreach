@@ -10,6 +10,7 @@ interface OpenAiResponse {
   output?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>;
   usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   status?: string;
+  incomplete_details?: { reason?: string } | null;
 }
 interface OpenAiModelsResponse { data?: Array<{ id?: string }> }
 
@@ -67,15 +68,30 @@ export class OpenAiAdapter implements AiProviderAdapter {
         );
       },
     });
-    const text =
-      res.output_text ??
-      res.output?.flatMap((o) => o.content ?? []).find((c) => c.type === 'output_text')?.text;
-    if (!text) throw new ProviderError('openai', `empty output (status=${res.status})`);
+    if (res.status === 'incomplete') {
+      const reason = res.incomplete_details?.reason;
+      if (reason === 'max_output_tokens') {
+        throw new ProviderError('openai', `response exceeded the configured output limit (${req.maxOutputTokens} tokens)`, undefined, false, undefined, 'OPENAI_OUTPUT_LIMIT');
+      }
+      if (reason === 'content_filter') {
+        throw new ProviderError('openai', 'response stopped by the content filter', undefined, false, undefined, 'OPENAI_CONTENT_FILTER');
+      }
+      throw new ProviderError('openai', 'response was incomplete', undefined, false, undefined, 'OPENAI_INCOMPLETE');
+    }
+    const content = res.output?.flatMap((item) => item.content ?? []) ?? [];
+    if (content.some((part) => part.type === 'refusal')) {
+      throw new ProviderError('openai', 'model refused to generate a structured response', undefined, false, undefined, 'OPENAI_REFUSAL');
+    }
+    const text = res.output_text?.trim() || content
+      .filter((part) => part.type === 'output_text')
+      .map((part) => part.text ?? '')
+      .join('').trim();
+    if (!text) throw new ProviderError('openai', 'empty output', undefined, false, undefined, 'OPENAI_EMPTY_OUTPUT');
     let data: unknown;
     try {
       data = JSON.parse(text);
     } catch {
-      throw new ProviderError('openai', 'output was not valid JSON');
+      throw new ProviderError('openai', 'output was not valid JSON', undefined, false, undefined, 'OPENAI_INVALID_JSON');
     }
     return {
       data,

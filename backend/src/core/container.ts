@@ -15,6 +15,7 @@ import {
 import { SafeFetcher } from '../../../integrations/src/research/fetcher.js';
 import type { DnsLike } from '../../../integrations/src/research/dns.js';
 import { promises as dnsPromises } from 'node:dns';
+import { logger } from './logger.js';
 
 // Composition root. Tests replace adapters with fakes via setAdapters().
 
@@ -53,7 +54,7 @@ function build(): Adapters {
     finders: { hunter: new HunterFinder() },
     dnsProviders: { cloudflare: new CloudflareDns() },
     search: { brave: new BraveSearchProvider(), serper: new SerperSearchProvider() },
-    fetcher: new SafeFetcher(),
+    fetcher: new SafeFetcher(undefined, undefined, undefined, (entry) => logger.warn(entry, 'public website fetch rejected')),
     dns: dnsPromises,
     smartlead: new SmartleadAdapter(),
   };

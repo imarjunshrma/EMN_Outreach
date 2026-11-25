@@ -149,6 +149,27 @@ describe('AI adapters (mocked HTTP — requires live verification)', () => {
     expect(body.text.format.schema.required).toEqual(['a']);
     expect(toStrictSchema({ type: 'object', properties: { b: { type: 'object', properties: { c: { type: 'number' } } } } })).toMatchObject({ additionalProperties: false, properties: { b: { required: ['c'] } } });
   });
+  it('OpenAI assembles all text blocks when the aggregate text is empty', async () => {
+    const { f } = mockFetch(() => json({ status: 'completed', output_text: '', output: [
+      { type: 'reasoning' },
+      { type: 'message', content: [{ type: 'output_text', text: '{"a":' }, { type: 'output_text', text: '"joined"}' }] },
+    ] }));
+    await expect(new OpenAiAdapter(f).generateStructured('key', req)).resolves.toMatchObject({ data: { a: 'joined' } });
+  });
+  it.each([
+    [{ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output_text: '{"a":' }, 'OPENAI_OUTPUT_LIMIT', 'AI_OUTPUT_LIMIT'],
+    [{ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } }, 'OPENAI_OUTPUT_LIMIT', 'AI_OUTPUT_LIMIT'],
+    [{ status: 'incomplete', incomplete_details: { reason: 'content_filter' } }, 'OPENAI_CONTENT_FILTER', 'AI_RESPONSE_FILTERED'],
+    [{ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal' }] }] }, 'OPENAI_REFUSAL', 'AI_RESPONSE_FILTERED'],
+    [{ status: 'completed', output_text: '{"a":' }, 'OPENAI_INVALID_JSON', 'AI_INVALID_RESPONSE'],
+  ])('OpenAI classifies unsuccessful structured responses without extra calls (%#)', async (payload, providerCode, appCode) => {
+    const { f, calls } = mockFetch(() => json(payload));
+    const execution = new OpenAiAdapter(f).generateStructured('key', req);
+    await expect(execution).rejects.toMatchObject({ code: providerCode });
+    const error = await execution.catch((failure: ProviderError) => failure);
+    expect(aiProviderFailure(error as ProviderError)).toMatchObject({ code: appCode });
+    expect(calls).toHaveLength(1);
+  });
   it('Gemini retries once without systemInstruction when the selected model rejects that capability, then remembers it', async () => {
     resetPromptCompatibilityForTests();
     let attempts = 0;

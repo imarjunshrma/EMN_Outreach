@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../backend/src/core/db.js';
+import { canContact } from '../../backend/src/services/compliance.js';
 import { processImport } from '../../backend/src/services/leads.js';
 import { resetDb, installFakes, createUserSession, addLead } from '../helpers/harness.js';
 
@@ -36,6 +37,21 @@ describe('CSV import / export', () => {
     expect(ann.listMembers).toHaveLength(1);
     // companies are deduplicated by domain
     expect(await db().company.count({ where: { workspaceId: s.workspaceId, domain: 'acme.io' } })).toBe(1);
+  });
+
+  it('imports research-only records and blocks outreach until an email is supplied', async () => {
+    const s = await createUserSession('research-import@example.test');
+    const csv = 'Full Name,Company Website,Country\nTaylor Fixture,https://company.example,US\nTaylor Fixture,https://company.example,US\nMissing Source,,US';
+    const auth = { 'x-csrf-token': s.csrf };
+    const up = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports`).set(auth).attach('file', Buffer.from(csv), 'research.csv');
+    const start = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports/${up.body.importId}/start`).set(auth).send({ mapping: up.body.suggestedMapping });
+    expect(start.status).toBe(202);
+    await expect(processImport(s.workspaceId, up.body.importId)).resolves.toEqual({ imported: 1, updated: 0, skipped: 1, errors: 1 });
+    const lead = await db().lead.findFirstOrThrow({ where: { workspaceId: s.workspaceId, firstName: 'Taylor' } });
+    expect(lead).toMatchObject({ email: '', emailVerificationStatus: 'INVALID', lawfulBasis: 'UNKNOWN' });
+    expect(await canContact(s.workspaceId, lead, { requireVerified: false })).toMatchObject({ allowed: false, reasons: ['No email address has been supplied for this prospect.'] });
+    const update = await s.agent.patch(`/api/v1/w/${s.workspaceId}/leads/${lead.id}`).set(auth).send({ email: 'taylor@company.example' });
+    expect(update.body).toMatchObject({ email: 'taylor@company.example', emailVerificationStatus: 'UNVERIFIED' });
   });
 
   it('exports CSV with formula-injection protection', async () => {

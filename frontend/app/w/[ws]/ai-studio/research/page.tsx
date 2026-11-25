@@ -28,6 +28,14 @@ export default function Research() {
                 <Field label="Ignore evidence older than (days)" hint="Blank = no age limit"><Input type="number" min={1} value={d.maxEvidenceAgeDays ?? ''} onChange={(e) => s('maxEvidenceAgeDays', e.target.value === '' ? null : Number(e.target.value))} /></Field>
                 <Field label="When information is unavailable"><Select value={d.onMissing} onChange={(e) => s('onMissing', e.target.value)} options={[{ value: 'hold_for_research', label: 'Hold the lead until researched' }, { value: 'use_role_and_company_only', label: 'Write a simple honest email (role + company only)' }, { value: 'skip_lead', label: 'Skip the lead' }]} /></Field>
               </div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <Field label="Recent signal window (days)"><Input type="number" min={1} max={365} value={d.recentSignalDays} onChange={(e) => s('recentSignalDays', Number(e.target.value))} /></Field>
+                <Field label="Extended signal window (days)"><Input type="number" min={1} max={730} value={d.extendedSignalDays} onChange={(e) => s('extendedSignalDays', Number(e.target.value))} /></Field>
+                <Field label="Search calls per research stage" hint="0 disables web search"><Input type="number" min={0} max={6} value={d.maxSearchQueriesPerRun} onChange={(e) => s('maxSearchQueriesPerRun', Number(e.target.value))} /></Field>
+                <Field label="Search calls per prospect" hint="Initial + deep research combined"><Input type="number" min={0} max={20} value={d.maxSearchesPerProspect} onChange={(e) => s('maxSearchesPerProspect', Number(e.target.value))} /></Field>
+                <Field label="Pages fetched per stage"><Input type="number" min={1} max={12} value={d.maxPagesPerRun} onChange={(e) => s('maxPagesPerRun', Number(e.target.value))} /></Field>
+                <Field label="Deep research minimum score" hint="Deep research also requires verified identity and ICP qualification"><Input type="number" min={0} max={100} value={d.deepResearchScoreThreshold} onChange={(e) => s('deepResearchScoreThreshold', Number(e.target.value))} /></Field>
+              </div>
               <Field label="Additional research instructions"><Textarea rows={5} value={d.customInstructions} onChange={(e) => s('customInstructions', e.target.value)} /></Field>
             </div>
           );

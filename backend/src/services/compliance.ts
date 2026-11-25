@@ -142,6 +142,7 @@ export async function deleteRule(workspaceId: string, id: string, actor: Actor) 
 /** Full eligibility check used at enrollment AND again right before every send. */
 export async function canContact(workspaceId: string, lead: { emailNormalized: string; country: string | null; lawfulBasis: LawfulBasisValue; status: string; emailVerificationStatus: string; emailVerifiedAt?: Date | null }, opts: { requireVerified: boolean }) {
   void opts; // retained for API compatibility; verification is a workspace-wide safety gate.
+  if (lead.emailNormalized.startsWith('research-only:')) return { allowed: false, reasons: ['No email address has been supplied for this prospect.'] };
   const reasons: string[] = [];
   const sup = await isSuppressed(workspaceId, lead.emailNormalized);
   if (sup.suppressed) reasons.push(`suppressed (${sup.reason})`);

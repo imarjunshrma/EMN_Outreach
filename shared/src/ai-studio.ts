@@ -69,8 +69,14 @@ export const ResearchSchema = z.object({
     userProvided: z.boolean().default(true),
   }).default({ companyWebsite: true, webSearch: true, newsAndArticles: true, podcastsAndInterviews: true, dataProvider: true, userProvided: true }),
   signals: list(30).default(['new service or product launch', 'hiring for growth roles', 'publishing content regularly', 'expanding to new markets']),
+  recentSignalDays: z.number().int().min(1).max(365).default(90),
+  extendedSignalDays: z.number().int().min(1).max(730).default(365),
   minClaims: z.number().int().min(0).max(10).default(1),
   maxEvidenceAgeDays: z.number().int().min(1).max(3650).nullable().default(365),
+  maxSearchQueriesPerRun: z.number().int().min(0).max(6).default(3),
+  maxSearchesPerProspect: z.number().int().min(0).max(20).default(6),
+  maxPagesPerRun: z.number().int().min(1).max(12).default(7),
+  deepResearchScoreThreshold: z.number().int().min(0).max(100).default(65),
   mustNotInfer: list(50).default(['health', 'religion', 'politics', 'ethnicity', 'sexual orientation', 'family situation', 'personal finances', 'age']),
   onMissing: z.enum(['hold_for_research', 'use_role_and_company_only', 'skip_lead']).default('hold_for_research'),
   customInstructions: str(10000).default(''),
@@ -263,7 +269,10 @@ export function knowledgeText(k: Knowledge, documents: Array<{ title: string; te
   if (k.services.length) out.push('Services:', ...k.services.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`));
   if (k.products.length) out.push('Products:', ...k.products.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`));
   if (k.usps.length) out.push('What makes us different:', ...k.usps.map((u) => `- ${u}`));
-  const cs = k.caseStudies.filter((c) => c.verified);
+  // A stale `verified` flag must not turn an unfinished template into usable proof.
+  // Require both a summary and result, and reject common editorial placeholders.
+  const hasPlaceholder = (value: string) => /\[[^\]]+\]|\b(?:enter the exact|specify the exact|define precisely|add a supporting|pending human review|to be completed|insert here)\b/i.test(value);
+  const cs = k.caseStudies.filter((c) => c.verified && c.summary.trim() && c.result.trim() && !hasPlaceholder(`${c.title}\n${c.summary}\n${c.result}`));
   if (cs.length) out.push('Verified case studies (may be referenced):', ...cs.map((c) => `- ${c.title}: ${c.summary}${c.result ? ` Result: ${c.result}` : ''}`));
   const ach = k.achievements.filter((a) => a.verified);
   if (ach.length) out.push('Verified achievements (may be referenced):', ...ach.map((a) => `- ${a.text}`));

@@ -31,6 +31,12 @@ describe('campaign email quality gates', () => {
     expect(runQualityChecks(input()).passed).toBe(true);
   });
 
+  it('holds when the independent evaluator returns no sentences', () => {
+    const report = runQualityChecks(input({ factCheck: [] }));
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((c) => c.id === 'fact_check')?.status).toBe('fail');
+  });
+
   it('blocks personalization when no evidence is available', () => {
     const report = runQualityChecks(input({ usedClaims: [], availableClaimCount: 0, factCheck: [] }));
     expect(report.passed).toBe(false);

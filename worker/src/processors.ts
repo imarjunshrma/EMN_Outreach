@@ -77,12 +77,27 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
   [QUEUES.ai]: {
     'ai.classifyReply': async (j) => inbox.classifyMessage(s(j.data.workspaceId), s(j.data.messageId)),
     'ai.replyAssist': async (j) => replyAssist.processInbound(s(j.data.workspaceId), s(j.data.messageId)),
-    'ai.qualify': async (j) => intel.scoreLead(s(j.data.workspaceId), s(j.data.leadId), (j.data.icpId as string | null) ?? null),
+    'ai.qualify': async (j) => {
+      const workspaceId = s(j.data.workspaceId);
+      const leadId = s(j.data.leadId);
+      const result = await intel.scoreLead(workspaceId, leadId, (j.data.icpId as string | null) ?? null);
+      if (!result?.identityVerified || !result.qualified) return result;
+      const latest = await db().researchReport.findFirst({ where: { workspaceId, leadId, status: 'COMPLETED' }, orderBy: { completedAt: 'desc' }, select: { id: true, researchDepth: true } });
+      if (latest?.researchDepth !== 'INITIAL') return result;
+      const { getConfig } = await import('../../backend/src/services/ai-studio.js');
+      const research = (await getConfig(workspaceId, 'RESEARCH')).data;
+      if (result.score < research.deepResearchScoreThreshold) return result;
+      await enqueue(QUEUES.research, 'research.lead', {
+        workspaceId, leadId, campaignId: typeof j.data.campaignId === 'string' ? j.data.campaignId : undefined,
+        depth: 'DEEP', thenScore: true, icpId: j.data.icpId ?? null,
+      }, { jobId: `deep-research-${latest.id}-${leadId}` });
+      return { ...result, deepResearchQueued: true };
+    },
   },
   [QUEUES.research]: {
     'research.lead': async (j) => {
-      const r = await intel.runResearch(s(j.data.workspaceId), { leadId: s(j.data.leadId), campaignId: typeof j.data.campaignId === 'string' ? j.data.campaignId : undefined });
-      if (j.data.thenScore) await enqueue(QUEUES.ai, 'ai.qualify', { workspaceId: j.data.workspaceId, leadId: j.data.leadId, icpId: j.data.icpId ?? null });
+      const r = await intel.runResearch(s(j.data.workspaceId), { leadId: s(j.data.leadId), campaignId: typeof j.data.campaignId === 'string' ? j.data.campaignId : undefined, depth: j.data.depth === 'DEEP' ? 'DEEP' : 'INITIAL', refresh: j.data.refresh === true, retryMissing: j.data.retryMissing === true, retryReportId: typeof j.data.retryReportId === 'string' ? j.data.retryReportId : undefined, sourceUrl: typeof j.data.sourceUrl === 'string' ? j.data.sourceUrl : undefined });
+      if (j.data.thenScore && r?.reused && (await intel.supportedClaims(s(j.data.workspaceId), s(j.data.leadId))).length) await enqueue(QUEUES.ai, 'ai.qualify', { workspaceId: j.data.workspaceId, leadId: j.data.leadId, icpId: j.data.icpId ?? null, campaignId: j.data.campaignId ?? null });
       return r;
     },
     'research.company': async (j) => intel.runResearch(s(j.data.workspaceId), { companyId: s(j.data.companyId) }),
@@ -134,6 +149,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'tenant.purge': async () => tenancy.purgeDueTenants(),
     'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
     'emailVerification.datasets.refresh': async () => (await import('../../backend/src/services/email-verification-datasets.js')).refreshDisposableDataset(),
+    'knowledge.website.refresh': async (j) => (await import('../../backend/src/services/business-onboarding.js')).refreshBusinessWebsiteSources(typeof j.data.workspaceId === 'string' ? j.data.workspaceId : undefined),
     'billing.reconcile': async () => (await import('../../backend/src/services/billing.js')).reconcileSubscriptions(),
   },
   [QUEUES.automation]: {

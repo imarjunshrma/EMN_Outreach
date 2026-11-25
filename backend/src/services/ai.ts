@@ -12,6 +12,7 @@ import { AI_PROVIDER_NAMES, type AiProviderName } from '../../../integrations/sr
 import { ProviderError } from '../../../integrations/src/http.js';
 import { isInstructionCapabilityError } from '../../../integrations/src/ai/prompt-compat.js';
 import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
+import { emitLangSmithAiTrace } from './langsmith-tracing.js';
 
 type ProviderName = AiProviderName;
 
@@ -67,6 +68,10 @@ function monthStart() { const start = new Date(); start.setUTCDate(1); start.set
 
 /** Convert provider failures into actionable, secret-safe API errors after fallback candidates are exhausted. */
 export function aiProviderFailure(error: ProviderError): AppError {
+  if (error.code === 'OPENAI_OUTPUT_LIMIT') return new AppError('AI_OUTPUT_LIMIT', 'OpenAI reached this task’s output token limit before completing its response. Increase Max output tokens for the task in AI Studio → Models, or use a shorter input.', 502);
+  if (error.code === 'OPENAI_REFUSAL' || error.code === 'OPENAI_CONTENT_FILTER') return new AppError('AI_RESPONSE_FILTERED', 'OpenAI declined to complete this request. Check the supplied content before trying again.', 502);
+  if (error.code === 'OPENAI_INCOMPLETE') return new AppError('AI_INVALID_RESPONSE', 'OpenAI returned an incomplete response. Retry the task.', 502);
+  if (error.code === 'OPENAI_INVALID_JSON') return new AppError('AI_INVALID_RESPONSE', 'OpenAI returned malformed JSON. Retry the task with a shorter input. If it persists, check the task’s Max output tokens in AI Studio → Models.', 502);
   if (isInstructionCapabilityError(error)) return new AppError('AI_MODEL_UNSUPPORTED', `The selected ${error.provider} model does not support the required instruction format. Choose a compatible model or contact support.`, 400);
   if (error.code === 'json_validate_failed' || /failed to generate JSON|invalid JSON/i.test(error.message)) return new AppError('AI_INVALID_RESPONSE', `${error.provider} could not produce valid JSON for this request. The task output was rejected; retry or select a model with supported JSON Schema output.`, 502);
   if (error.code === 'model_not_found' || error.status === 404) return new AppError('AI_MODEL_NOT_FOUND', `The ${error.provider} provider could not find the selected model. Check the exact API model ID and account access.`, 400);
@@ -77,9 +82,13 @@ export function aiProviderFailure(error: ProviderError): AppError {
   return new AppError('AI_PROVIDER_REQUEST_FAILED', `The ${error.provider} request failed${error.status ? ` (HTTP ${error.status})` : ''}. Check its configuration and retry.`, 502);
 }
 
-async function monthSpend(workspaceId: string, task?: AiTaskName) {
-  const r = await db().aiExecution.aggregate({ where: { workspaceId, ...(task ? { task } : {}), createdAt: { gte: monthStart() } }, _sum: { costUsd: true } });
-  return Number(r._sum.costUsd ?? 0);
+export async function monthSpend(workspaceId: string, task?: AiTaskName) {
+  const createdAt = { gte: monthStart() };
+  const [tasks, embeddings] = await Promise.all([
+    db().aiExecution.aggregate({ where: { workspaceId, ...(task ? { task } : {}), createdAt }, _sum: { costUsd: true } }),
+    task ? null : db().usageRecord.aggregate({ where: { workspaceId, kind: 'embedding', createdAt }, _sum: { costUsd: true } }),
+  ]);
+  return Number(tasks._sum.costUsd ?? 0) + Number(embeddings?._sum.costUsd ?? 0);
 }
 
 /** AI spend attributed to one lead within one campaign (all tasks, all time). */
@@ -184,7 +193,7 @@ export async function runAi<T = unknown>(
     critical?: boolean;
     /** Attribute cost to a campaign/lead (enables per-lead cost limits). */
     attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null };
-    /** Refuse the call if spend for this campaign+lead plus the estimated cost would exceed maxUsd. */
+    /** Refuse if the estimated call would exceed the campaign-lead or standalone research budget. */
     maxLeadCostUsd?: number | null;
   } = {},
 ): Promise<AiRunResult<T>> {
@@ -192,7 +201,9 @@ export async function runAi<T = unknown>(
   const frozenSnapshot = frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && frozenCampaign.aiConfigSnapshot && typeof frozenCampaign.aiConfigSnapshot === 'object'
     ? frozenCampaign.aiConfigSnapshot as Record<string, unknown> : null;
   const rawFrozenTask = frozenSnapshot?.taskExecution && typeof frozenSnapshot.taskExecution === 'object' ? (frozenSnapshot.taskExecution as Record<string, unknown>)[task] : null;
-  if (frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && !rawFrozenTask) throw new AppError('CAMPAIGN_INVALID', `Approved campaign has no frozen ${task} execution configuration; reapprove it before generation`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_MISSING', task });
+  // Campaign approval freezes writing and evaluation. Evidence collection can recur while the campaign is active.
+  const isProspectResearch = task === 'FACT_EXTRACTION' && opts.entity?.type === 'research_report';
+  if (!isProspectResearch && frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && !rawFrozenTask) throw new AppError('CAMPAIGN_INVALID', `Approved campaign has no frozen ${task} execution configuration; reapprove it before generation`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_MISSING', task });
   const frozenTask = rawFrozenTask as FrozenTaskExecution | null;
   const campaignSnapshotId = frozenSnapshot && typeof frozenSnapshot.executionSnapshotId === 'string' ? frozenSnapshot.executionSnapshotId : null;
   if (frozenTask && (frozenTask.task !== task || frozenTask.schemaHash !== createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex'))) throw new AppError('CAMPAIGN_INVALID', `Frozen ${task} prompt configuration or output schema is invalid; reapprove the campaign`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_INVALID', task });
@@ -238,8 +249,11 @@ export async function runAi<T = unknown>(
     userPrompt = `${userPrompt.slice(0, limits.maxInputTokens * 4)}\n[input truncated to the ${limits.maxInputTokens}-token limit for ${task}]`;
   }
   const att = { campaignId: opts.attribution?.campaignId ?? null, leadId: opts.attribution?.leadId ?? null, profileVersionId: opts.attribution?.profileVersionId ?? null };
-  if (opts.maxLeadCostUsd != null && att.campaignId && att.leadId) {
-    const spent = await leadSpend(workspaceId, att.campaignId, att.leadId);
+  if (opts.maxLeadCostUsd != null && att.leadId) {
+    const spent = att.campaignId ? await leadSpend(workspaceId, att.campaignId, att.leadId) : Number((await db().aiExecution.aggregate({
+      where: { workspaceId, leadId: att.leadId, campaignId: null, task: { in: ['FACT_EXTRACTION', 'LEAD_QUALIFICATION'] } },
+      _sum: { costUsd: true },
+    }))._sum.costUsd ?? 0);
     const est = await estimateCallCost(workspaceId, task, prompt.systemPrompt.length + userPrompt.length, Math.min(maxOutputTokens, 1500));
     if (spent + est.usd > opts.maxLeadCostUsd) {
       throw new AppError('AI_COST_LIMIT', `AI cost limit per lead reached ($${spent.toFixed(4)} spent + ~$${est.usd.toFixed(4)} estimated > $${opts.maxLeadCostUsd})`, 402, { spentUsd: spent, estimateUsd: est.usd, limitUsd: opts.maxLeadCostUsd });
@@ -274,6 +288,12 @@ export async function runAi<T = unknown>(
             output: (res.data ?? null) as Prisma.InputJsonValue,
             errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
           },
+        });
+        void emitLangSmithAiTrace({
+          workspaceId, task, provider: cand.provider, model: cand.model, promptVersion: prompt.version,
+          generationMode: res.generationMode ?? 'structured', schemaValid: parsed.success, inputFields: Object.keys(vars),
+          output: res.data, systemPrompt: prompt.systemPrompt, userPrompt: user, entity: opts.entity,
+          inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens, latencyMs: res.latencyMs, costUsd: Number(cost),
         });
         logger.info({ executionId: exec.id, task, provider: cand.provider, model: cand.model, generationMode: res.generationMode ?? 'structured', schemaValid: parsed.success }, 'AI generation completed');
         const usage = await import('./usage.js');

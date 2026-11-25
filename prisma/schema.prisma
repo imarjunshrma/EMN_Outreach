@@ -217,6 +217,7 @@ enum EvidenceSourceType {
 }
 
 enum ClaimStatus {
+  NEEDS_REVIEW
   SUPPORTED
   REJECTED
 }
@@ -563,6 +564,7 @@ model Workspace {
   campaignServiceSelections   CampaignServiceSelection[]
   businessServiceEvents       BusinessServiceLifecycleEvent[]
   businessProofReviews        BusinessProofReview[]
+  intelligenceEmbeddings      IntelligenceEmbedding[]
 
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   aiWorkflowRuns AiWorkflowRun[]
@@ -1363,6 +1365,11 @@ model ResearchReport {
   workspaceId   String    @db.Uuid
   leadId        String?   @db.Uuid
   companyId     String?   @db.Uuid
+  subjectFingerprint String? @db.Char(64)
+  researchDepth String    @default("INITIAL")
+  coverage      Json?
+  searchCount   Int       @default(0)
+  pageCount     Int       @default(0)
   status        JobStatus @default(PENDING)
   summary       String?
   services      String[]
@@ -1381,6 +1388,8 @@ model ResearchReport {
 
   @@index([workspaceId, leadId])
   @@index([workspaceId, companyId])
+  @@index([workspaceId, leadId, subjectFingerprint, completedAt])
+  @@index([workspaceId, companyId, subjectFingerprint, completedAt])
 }
 
 model ResearchEvidence {
@@ -1394,6 +1403,7 @@ model ResearchEvidence {
   contentHash String
   httpStatus  Int?
   fetchedAt   DateTime           @default(now()) @db.Timestamptz(3)
+  publishedAt DateTime?          @db.Timestamptz(3)
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   report    ResearchReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
@@ -3098,4 +3108,30 @@ model PlatformSetting {
   value       Json
   updatedById String?  @db.Uuid
   updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+}
+
+
+/// Workspace-scoped semantic index. PostgreSQL/pgvector is the index; source records remain canonical.
+/// Queries that consume this table must always include workspaceId and current-state filters.
+model IntelligenceEmbedding {
+  id             String                      @id @default(uuid()) @db.Uuid
+  workspaceId    String                      @db.Uuid
+  entityType     String
+  entityId       String                      @db.Uuid
+  contentVersion Int                         @default(1)
+  contentHash    String                      @db.Char(64)
+  embeddingModel String
+  dimensions     Int                         @default(1536)
+  content        String
+  sourceUrl      String?
+  isCurrent      Boolean                     @default(true)
+  metadata       Json                        @default("{}")
+  embedding      Unsupported("vector(1536)")
+  createdAt      DateTime                    @default(now()) @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, entityType, entityId, embeddingModel, contentHash])
+  @@index([workspaceId, entityType, isCurrent])
+  @@index([workspaceId, entityType, entityId, isCurrent])
 }

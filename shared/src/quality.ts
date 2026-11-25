@@ -87,7 +87,7 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   add('missing_variables', 'Missing-variable check', unresolved.length ? 'fail' : 'pass', unresolved.length ? `Unresolved placeholders: ${[...new Set(unresolved)].join(', ')}` : 'No unresolved placeholders');
 
   // 2. Factual accuracy / unsupported claims (independent fact-check)
-  if (!q.factCheck) {
+  if (!q.factCheck?.length) {
     add('fact_check', 'Factual accuracy (independent fact-check)', q.factCheckRequired ? 'fail' : 'warn', q.factCheckRequired ? 'Fact-check did not run; it is required before approval' : 'Fact-check not run');
   } else {
     const bad = q.factCheck.filter((s) => s.verdict === 'UNSUPPORTED');
@@ -145,7 +145,7 @@ export function runQualityChecks(q: QualityInput): QualityReport {
   if (q.writing.ctaStyle === 'soft_question' || q.writing.ctaStyle === 'interest_check') { if (questions === 0) ctaIssues.push('no question to respond to'); }
   if (q.writing.ctaStyle === 'meeting_request' && !/\b(call|chat|meeting|meet|talk|minutes)\b/i.test(q.body)) ctaIssues.push('no meeting request');
   if (q.writing.ctaStyle === 'booking_link' && !/(https?:\/\/|\{\{bookingLink)/i.test(q.body)) ctaIssues.push('no booking link');
-  if (questions > 2) ctaIssues.push(`${questions} questions — more than one ask`);
+  if (questions > 1) ctaIssues.push(`${questions} questions — more than one ask`);
   add('cta', 'CTA check', ctaIssues.length ? 'fail' : 'pass', ctaIssues.length ? ctaIssues.join('; ') : `CTA matches "${q.writing.ctaStyle.replace(/_/g, ' ')}"`);
 
   // 10. Unsubscribe / compliance

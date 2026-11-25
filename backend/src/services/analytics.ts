@@ -7,22 +7,34 @@ function since(days: number) { return new Date(Date.now() - days * 86400_000); }
 
 export async function overview(workspaceId: string, days = 30) {
   const from = since(days);
-  const [prospects, qualified, verified, eventCounts, meetings, opportunities, aiCost, positive] = await Promise.all([
+  const [prospects, qualified, verified, eventCounts, meetings, opportunities, aiCost, positive, research, drafts, embeddings] = await Promise.all([
     db().lead.count({ where: { workspaceId, createdAt: { gte: from } } }),
     db().lead.count({ where: { workspaceId, createdAt: { gte: from }, scores: { some: { qualified: true } } } }),
     db().lead.count({ where: { workspaceId, createdAt: { gte: from }, emailVerificationStatus: 'VALID' } }),
     db().emailEvent.groupBy({ by: ['type'], where: { workspaceId, occurredAt: { gte: from } }, _count: { _all: true } }),
     db().leadStatusChange.count({ where: { workspaceId, toStatus: 'MEETING_BOOKED', createdAt: { gte: from } } }),
     db().opportunity.aggregate({ where: { workspaceId, stage: 'WON', closedAt: { gte: from } }, _sum: { valueCents: true }, _count: { _all: true } }),
-    db().aiExecution.aggregate({ where: { workspaceId, createdAt: { gte: from } }, _sum: { costUsd: true } }),
+    db().aiExecution.aggregate({ where: { workspaceId, createdAt: { gte: from } }, _sum: { costUsd: true, inputTokens: true, outputTokens: true } }),
     db().emailMessage.count({ where: { workspaceId, direction: 'INBOUND', sentAt: { gte: from }, category: { in: ['INTERESTED', 'WANTS_PRICING', 'WANTS_MEETING', 'NEEDS_INFO'] } } }),
+    db().researchReport.groupBy({ by: ['status'], where: { workspaceId, leadId: { not: null }, completedAt: { gte: from } }, _count: { _all: true } }),
+    db().leadPersonalization.groupBy({ by: ['qualityPassed'], where: { workspaceId, generatedAt: { gte: from }, status: { in: ['GENERATED', 'APPROVED', 'BLOCKED', 'REJECTED'] } }, _count: { _all: true } }),
+    db().usageRecord.aggregate({ where: { workspaceId, kind: 'embedding', createdAt: { gte: from } }, _sum: { units: true, costUsd: true } }),
   ]);
   const ev = (t: string) => eventCounts.find((e) => e.type === t)?._count._all ?? 0;
   const sent = ev('SENT');
   const bounced = ev('BOUNCED_HARD');
   const replies = ev('REPLIED');
   const rate = (n: number, d: number) => (d ? Math.round((n / d) * 1000) / 10 : null);
+  const completedResearch = research.find((row) => row.status === 'COMPLETED')?._count._all ?? 0;
+  const failedResearch = research.find((row) => row.status === 'FAILED')?._count._all ?? 0;
+  const evaluatedDrafts = drafts.reduce((sum, row) => sum + row._count._all, 0);
+  const passedDrafts = drafts.find((row) => row.qualityPassed)?._count._all ?? 0;
   return {
+    intelligence: {
+      completedResearch, failedResearch, completionRatePct: rate(completedResearch, completedResearch + failedResearch),
+      evaluatedDrafts, passedDrafts, passRatePct: rate(passedDrafts, evaluatedDrafts),
+      modelTokens: (aiCost._sum.inputTokens ?? 0) + (aiCost._sum.outputTokens ?? 0), embeddingTokens: embeddings._sum.units ?? 0,
+    },
     periodDays: days,
     measured: {
       prospectsAdded: prospects, qualified, verifiedEmails: verified, emailsSent: sent, bounces: bounced, softBounces: ev('BOUNCED_SOFT'),
@@ -36,7 +48,7 @@ export async function overview(workspaceId: string, days = 30) {
       clicks: { value: ev('CLICKED'), note: 'Only when click tracking is enabled.' },
       complaints: { note: 'Provider complaint feedback is not available for mailbox (Gmail/Microsoft API) sending; counts above are complaints detected in replies.' },
       wonValueCents: { value: opportunities._sum.valueCents ?? 0, note: 'User-entered opportunity values.' },
-      aiCostUsd: { value: Number(aiCost._sum.costUsd ?? 0), note: 'Computed from provider-reported tokens × configured prices.' },
+      aiCostUsd: { value: Number(aiCost._sum.costUsd ?? 0) + Number(embeddings._sum.costUsd ?? 0), note: 'Estimated from tracked model and embedding tokens and configured prices. Unpriced usage is excluded.' },
     },
   };
 }

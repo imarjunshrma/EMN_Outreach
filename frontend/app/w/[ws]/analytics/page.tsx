@@ -16,7 +16,7 @@ export default function Analytics() {
   const boxes = useWsQuery<any[]>(`/analytics/mailboxes?days=${days}`);
   return (
     <>
-      <PageHeader title="Analytics & reports" subtitle="Measured numbers come directly from recorded events. Estimates are labelled and explained." actions={<Select className="w-40" value={String(days)} onChange={(e) => setDays(Number(e.target.value))} options={[{ value: '7', label: 'Last 7 days' }, { value: '30', label: 'Last 30 days' }, { value: '90', label: 'Last 90 days' }, { value: '365', label: 'Last 12 months' }]} />} />
+      <PageHeader title="Performance" subtitle="Measured numbers come directly from recorded events. Estimates are labelled and explained." actions={<Select className="w-40" value={String(days)} onChange={(e) => setDays(Number(e.target.value))} options={[{ value: '7', label: 'Last 7 days' }, { value: '30', label: 'Last 30 days' }, { value: '90', label: 'Last 90 days' }, { value: '365', label: 'Last 12 months' }]} />} />
       <QueryView q={ov}>
         {(o) => (
           <div className="space-y-5">
@@ -26,6 +26,14 @@ export default function Analytics() {
               <Stat label="Meetings booked" value={o.measured.meetingsBooked} hint={fmtPct(o.rates.meetingRatePct)} /><Stat label="Hard bounces" value={o.measured.bounces} hint={`${fmtPct(o.rates.bounceRatePct)} bounce rate`} /><Stat label="Unsubscribes" value={o.measured.unsubscribes} />
               <Stat label="Complaints detected" value={o.measured.complaintsDetected} /><Stat label="Send failures" value={o.measured.sendFailures} /><Stat label="Deals won" value={o.measured.wonDeals} />
             </div>
+            {o.intelligence && <Card title="Prospect research and email evaluation">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <Stat label="Research reports completed" value={o.intelligence.completedResearch} hint={`${fmtPct(o.intelligence.completionRatePct)} completion · ${o.intelligence.failedResearch} failed`} />
+                <Stat label="Drafts passing evaluation" value={o.intelligence.passedDrafts} hint={`${fmtPct(o.intelligence.passRatePct)} of ${o.intelligence.evaluatedDrafts} evaluated`} />
+                <Stat label="Model tokens" value={o.intelligence.modelTokens} />
+                <Stat label="Embedding tokens" value={o.intelligence.embeddingTokens} />
+              </div>
+            </Card>}
             <Card title="Estimates (not directly measured)">
               <Table head={['Metric', 'Value', 'Why it is an estimate']}>
                 <tr><td className="td">Delivered emails</td><td className="td">{o.estimates.deliveredEmails.value}</td><td className="td text-xs text-slate-500">{o.estimates.deliveredEmails.note}</td></tr>

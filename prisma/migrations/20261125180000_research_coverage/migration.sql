@@ -1,0 +1,3 @@
+ALTER TYPE "ClaimStatus" ADD VALUE IF NOT EXISTS 'NEEDS_REVIEW';
+ALTER TABLE "ResearchReport" ADD COLUMN "coverage" JSONB;
+ALTER TABLE "ResearchEvidence" ADD COLUMN "publishedAt" TIMESTAMPTZ(3);

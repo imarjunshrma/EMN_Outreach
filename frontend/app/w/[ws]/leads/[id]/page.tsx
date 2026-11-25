@@ -7,7 +7,7 @@ import { GeneratePanel } from '@/components/ai/generate-panel';
 import { useAiOwner } from '@/components/ai/hooks';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fmtMoney, fullName } from '@/lib/format';
-import { Badge, Button, Card, Empty, Field, Input, Notice, PageHeader, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Empty, Field, Input, Modal, Notice, PageHeader, QueryView, Select, Table, Tabs, Textarea } from '@/components/ui';
 import { LEAD_STATUSES } from '@/lib/constants';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -22,10 +22,15 @@ function LeadDetailInner() {
   const check = useWsQuery<{ allowed: boolean; reasons: string[] }>(`/compliance/check/${id}`);
   const [tab, setTab] = useState(params.get('tab') ?? 'overview');
   const [note, setNote] = useState('');
-  const research = useWsMutation(() => ({ path: `/leads/${id}/research`, body: { thenScore: true } }), { success: 'Research queued (results appear in a minute)' });
+  const research = useWsMutation<boolean>((refresh) => ({ path: `/leads/${id}/research`, body: { thenScore: true, refresh, campaignId: params.get('campaign') ?? undefined } }), { success: 'Research queued (results appear in a minute)' });
   const score = useWsMutation(() => ({ path: `/leads/${id}/score`, body: {} }), { success: (r: any) => `Score ${r.score} (${r.qualified ? 'qualified' : 'not qualified'})` });
   const verify = useWsMutation(() => ({ path: `/leads/${id}/verify-waterfall`, body: { force: true } }), { success: (r: any) => r?.queued ? `Custom verification queued. The lead will refresh after processing.` : `Verification: ${r?.result ?? 'done'}${r?.steps?.length ? ` (${r.steps.map((s: any) => s.provider).join(' → ')})` : ''}`, onSuccess: (r: any) => { if (r?.queued) window.setTimeout(() => { void q.refetch(); }, 7000); } });
   const status = useWsMutation<string>((s) => ({ path: `/leads/${id}`, method: 'PATCH', body: { status: s } }), { success: 'Status updated' });
+  const [profileEdit, setProfileEdit] = useState<{ firstName: string; lastName: string; title: string; email: string; country: string } | null>(null);
+  const saveProfile = useWsMutation(() => ({
+    path: `/leads/${id}`, method: 'PATCH',
+    body: profileEdit ? { ...profileEdit, email: profileEdit.email.trim() || undefined, country: profileEdit.country.trim().toUpperCase() || null } : {},
+  }), { success: 'Prospect updated', onSuccess: () => { setProfileEdit(null); void check.refetch(); } });
   const addNote = useWsMutation(() => ({ path: `/leads/${id}/notes`, body: { body: note } }), { success: 'Note added', onSuccess: () => setNote('') });
   const addTask = useWsMutation<{ title: string; dueAt: string }>((b) => ({ path: '/tasks', body: { ...b, leadId: id, dueAt: b.dueAt || null } }), { success: 'Reminder created' });
   const addOpp = useWsMutation<{ title: string; value: string }>((b) => ({ path: '/opportunities', body: { leadId: id, title: b.title, valueCents: Math.round(Number(b.value || 0) * 100) } }), { success: 'Opportunity created' });
@@ -37,19 +42,30 @@ function LeadDetailInner() {
     <QueryView q={q}>
       {(l) => (
         <>
-          <PageHeader title={fullName(l)} subtitle={<>{l.email} · {l.title ?? 'No title'} {l.company && <>· <Link className="underline" href={`/w/${ws}/companies/${l.company.id}`}>{l.company.name}</Link></>}</>}
+          <PageHeader title={fullName(l)} subtitle={<>{l.email || 'Email missing'} · {l.title ?? 'No title'} {l.company && <>· <Link className="underline" href={`/w/${ws}/companies/${l.company.id}`}>{l.company.name}</Link></>}</>}
             actions={<>
               <Select value={l.status} onChange={(e) => status.mutate(e.target.value)} options={LEAD_STATUSES} className="w-44" />
-              <Button variant="secondary" loading={verify.isPending} onClick={() => verify.mutate()}>Verify email</Button>
-              <Button variant="secondary" loading={research.isPending} onClick={() => research.mutate()}>Research</Button>
+              <Button variant="secondary" loading={verify.isPending} disabled={!l.email} onClick={() => verify.mutate()}>Verify email</Button>
+              <Button variant="secondary" loading={research.isPending} onClick={() => research.mutate(l.researchReports.some((report: { status: string }) => report.status === 'COMPLETED'))}>{l.researchReports.length ? 'Refresh research' : 'Research'}</Button>
+              <Link className="text-sm underline" href={`/w/${ws}/copilot?leadId=${id}${params.get('campaign') ? `&campaignId=${encodeURIComponent(params.get('campaign')!)}` : ''}`}>Research with Copilot</Link>
               <Button loading={score.isPending} onClick={() => score.mutate()}>Score vs ICP</Button>
             </>} />
           {check.data && !check.data.allowed && <div className="mb-4"><Notice kind="warning"><b>Not currently contactable:</b> {check.data.reasons.join(' · ')}</Notice></div>}
+          {profileEdit && <Modal open title="Edit prospect" onClose={() => setProfileEdit(null)}>
+            <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); saveProfile.mutate(); }}>
+              {([['firstName', 'First name'], ['lastName', 'Last name'], ['title', 'Title'], ['email', 'Email'], ['country', 'Country (ISO-2)']] as const).map(([key, label]) => (
+                <Field key={key} label={label}><Input type={key === 'email' ? 'email' : 'text'} maxLength={key === 'country' ? 2 : undefined} value={profileEdit[key]} onChange={(event) => setProfileEdit({ ...profileEdit, [key]: event.target.value })} /></Field>
+              ))}
+              <Button type="submit" loading={saveProfile.isPending}>Save changes</Button>
+            </form>
+          </Modal>}
           <Tabs active={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'research', label: 'Research', count: l.researchReports.length }, { id: 'activity', label: 'Activity', count: l.events.length }, { id: 'crm', label: 'CRM', count: l.notes.length + l.tasks.length + l.opportunities.length }, { id: 'history', label: 'Status history' }, ...(owner.allowed ? [{ id: 'ai', label: 'Generate emails' }] : [])]} />
           {tab === 'ai' && owner.allowed && <GeneratePanel leadId={id} defaultCampaignId={params.get('campaign')} />}
           {tab === 'overview' && (
             <div className="grid gap-4 lg:grid-cols-3">
-              <Card title="Profile">
+              <Card title="Profile" actions={<Button variant="ghost" onClick={() => setProfileEdit({
+                firstName: l.firstName ?? '', lastName: l.lastName ?? '', title: l.title ?? '', email: l.email ?? '', country: l.country ?? '',
+              })}>Edit prospect</Button>}>
                 <dl className="space-y-2 text-sm">
                   {[['Status', <Badge key="s">{l.status}</Badge>], ['Email verification', <Badge key="v">{l.emailVerificationStatus}</Badge>], ['Verification checked', fmtDate(l.emailVerifiedAt)], ['Verification source', l.verifications?.[0]?.provider ?? '—'], ['Score', l.currentScore ?? '—'], ['Country', l.country ?? '—'], ['Time zone', l.timezone ?? '—'], ['Lawful basis', `${l.lawfulBasis}${l.lawfulBasisNote ? ` — ${l.lawfulBasisNote}` : ''}`], ['Source', l.source?.name ?? 'manual'], ['Owner', l.owner?.name ?? '—'], ['Tags', l.tags.join(', ') || '—'], ['LinkedIn', l.linkedinUrl ? <a key="li" className="underline" href={l.linkedinUrl} target="_blank" rel="noreferrer">profile</a> : '—'], ['Last contacted', fmtDate(l.lastContactedAt)], ['Last reply', fmtDate(l.lastRepliedAt)]].map(([k, v]) => (
                     <div key={String(k)} className="flex justify-between gap-2"><dt className="text-slate-500">{k}</dt><dd className="text-right">{v}</dd></div>
@@ -79,7 +95,7 @@ function LeadDetailInner() {
             </div>
           )}
           {tab === 'research' && (
-            l.researchReports.length === 0 ? <Empty title="No research yet" action={<Button onClick={() => research.mutate()}>Research now</Button>}>Research reads the company website (and a web-search API if configured) and keeps only facts backed by a quote from the source.</Empty> :
+            l.researchReports.length === 0 ? <Empty title="No research yet" action={<Button onClick={() => research.mutate(false)}>Research now</Button>}>Research reads the company website (and a web-search API if configured) and keeps only facts backed by a quote from the source.</Empty> :
             <div className="space-y-4">{l.researchReports.map((r: any) => (
               <Card key={r.id} title={<>Report {fmtDate(r.createdAt)} <Badge>{r.status}</Badge></>} actions={<Link className="text-sm text-brand-700" href={`/w/${ws}/research/${r.id}`}>Open</Link>}>
                 {r.summary && <p className="mb-2 text-sm">{r.summary}</p>}

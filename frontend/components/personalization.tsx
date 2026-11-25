@@ -1,10 +1,11 @@
 'use client';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, qs, type Paged } from '@/lib/api';
-import { useWsMutation, useWsQuery } from '@/lib/hooks';
+import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fullName } from '@/lib/format';
 import { Badge, Button, Card, Checkbox, ConfirmButton, Empty, Field, Input, Modal, Notice, Pagination, QueryView, Select, Table, Textarea } from '@/components/ui';
 
@@ -227,6 +228,8 @@ function PersonalizationTable({ campaign }: { campaign: any }) {
 }
 
 export function LeadReviewModal({ campaignId, leadId, onClose }: { campaignId: string; leadId: string; onClose: () => void }) {
+  const ws = useWs();
+  const research = useWsMutation(() => ({ path: `/leads/${leadId}/research`, body: { campaignId } }), { success: 'Research queued' });
   const q = useWsQuery<any>(`/campaigns/${campaignId}/personalizations/lead/${leadId}`);
   const [instr, setInstr] = useState<string | null>(null);
   const saveInstr = useWsMutation(() => ({ path: `/leads/${leadId}/ai-instructions`, method: 'PUT', body: { aiInstructions: instr } }), { success: 'Prospect instructions saved' });
@@ -236,6 +239,10 @@ export function LeadReviewModal({ campaignId, leadId, onClose }: { campaignId: s
         {(d) => (
           <div className="space-y-4">
             <div className="text-sm"><b>{fullName(d.lead) || d.lead.email}</b> · {d.lead.title ?? 'no title'} · {d.lead.company?.name ?? 'no company'} · {d.lead.email} · AI cost for this lead {usd(d.aiCostUsd)}</div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="secondary" loading={research.isPending} onClick={() => research.mutate()}>Research this prospect</Button>
+              <Link className="text-sm underline" href={`/w/${ws}/copilot?leadId=${leadId}&campaignId=${campaignId}`}>Research with Copilot</Link>
+            </div>
             <Card title={`Research used (${d.research.claims.length} evidence-backed claims${d.research.excludedByRules ? `, ${d.research.excludedByRules} excluded by research rules` : ''})`}>
               {d.research.claims.length === 0 ? <Notice kind="warning">No usable evidence. The AI is told not to state any prospect-specific fact. {d.research.reports[0]?.error ?? ''}</Notice> : (
                 <ul className="space-y-2 text-sm">{d.research.claims.map((c: any) => <li key={c.id}><b>{c.text}</b><div className="text-xs text-slate-500">“{c.quote}” — <a className="underline" href={c.url} target="_blank" rel="noreferrer noopener">{c.title ?? c.url}</a> · {c.sourceType} · retrieved {fmtDate(c.fetchedAt)} · confidence {Math.round(c.confidence * 100)}%</div></li>)}</ul>
@@ -281,7 +288,10 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
             {row.cta && <div className="text-xs">CTA: {row.cta}</div>}
             <div className="text-xs text-slate-500">Revision {row.revision} · generated {fmtDate(row.generatedAt)} · cost {usd(row.costUsd)}{row.costIsEstimate ? ' (estimate)' : ''}{row.profileVersionId ? ' · prompt profile version pinned' : ''}</div>
           </div>
-          <div className="space-y-2"><CheckList quality={row.quality} /><ScoreBox score={row.score} explanation={row.scoreExplanation} /></div>
+          <div className="space-y-2">
+            {row.scoreExplanation?.rewriteAttempted && <p className="text-xs text-slate-600">One rewrite attempted · {row.scoreExplanation.decision === 'PASS' ? 'passed evaluation' : 'held for review'}</p>}
+            <CheckList quality={row.quality} /><ScoreBox score={row.score} explanation={row.scoreExplanation} />
+          </div>
         </div>
       )}
       {edit && (

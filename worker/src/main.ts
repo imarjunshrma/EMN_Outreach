@@ -66,6 +66,7 @@ async function schedules() {
   await queue(QUEUES.maintenance).upsertJobScheduler('task-reminders', { every: 300_000 }, { name: 'maintenance.taskReminders', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('verification-datasets-daily', { pattern: '41 2 * * *' }, { name: 'emailVerification.datasets.refresh', data: {} });
   await queue(QUEUES.maintenance).upsertJobScheduler('mailbox-readiness-daily', { pattern: '31 5 * * *' }, { name: 'maintenance.mailboxReadiness', data: {} });
+  await queue(QUEUES.maintenance).upsertJobScheduler('business-website-knowledge-weekly', { pattern: '19 4 * * 1' }, { name: 'knowledge.website.refresh', data: {} });
 }
 schedules()
   .then(async () => { const r = await (await import('../../backend/src/services/ai-workflow-runs.js')).recoverAiRuns(); if (r.requeued) logger.info(r, 'AI workflow runs recovered after restart'); })

@@ -7,6 +7,7 @@ import { AppError, NotFound } from '../core/errors.js';
 import { logger } from '../core/logger.js';
 import { enqueue, queue, QUEUES, type QueueName } from '../core/queues.js';
 import { platformAudit } from '../core/tenant.js';
+import { supportedClaims } from './intelligence.js';
 import { computeCost } from './ai.js';
 import { decryptSecret } from './workspace.js';
 import { isAiSubscriptionOwner, recordProviderOutcome, runnerFor, loadConnection } from './ai-subscriptions.js';
@@ -55,10 +56,7 @@ function prospectBlock(lead: LeadCtx): string {
 }
 
 async function evidenceBlock(workspaceId: string, lead: LeadCtx): Promise<string> {
-  const claims = await db().researchClaim.findMany({
-    where: { workspaceId, status: 'SUPPORTED', report: { status: 'COMPLETED', OR: [{ leadId: lead.id }, ...(lead.companyId ? [{ companyId: lead.companyId }] : [])] } },
-    include: { evidence: { select: { url: true, fetchedAt: true } } }, orderBy: { createdAt: 'desc' }, take: 25,
-  });
+  const claims = (await supportedClaims(workspaceId, lead.id)).slice(0, 25);
   if (!claims.length) return '(No saved research evidence for this prospect.)';
   return `<untrusted_content source="research_evidence">\n${neutralizeTags(claims.map((c) => `- ${c.text}\n  quote: "${c.quote}"\n  source: ${c.evidence.url} (retrieved ${c.evidence.fetchedAt.toISOString().slice(0, 10)})`).join('\n'))}\n</untrusted_content>`;
 }
@@ -92,15 +90,15 @@ export async function buildStagePrompt(run: { workspaceId: string; leadId: strin
   const sections: string[] = [];
   const wanted = new Set(stage.inputs);
   if (wanted.has('prospect')) sections.push(`## Prospect\n${prospectBlock(lead)}`);
-  if (wanted.has('research_evidence')) sections.push(`## Saved research evidence\n${await evidenceBlock(run.workspaceId, lead)}`);
+  if (wanted.has('research_evidence') || !isResearchTask(stage.taskType)) sections.push(`## Saved research evidence\n${await evidenceBlock(run.workspaceId, lead)}`);
   if (wanted.has('playbook')) sections.push(`## Writing playbook (follow it)\n${playbook?.content ?? '(no playbook)'}`);
   const include = new Map<string, Stage>();
   if (wanted.has('all')) for (const s of earlier) include.set(s.id, s);
   if (wanted.has('previous') && prev) include.set(prev.id, prev);
   for (const inp of stage.inputs) if (inp.startsWith('stage:')) { const s = earlier.find((x) => x.id === inp.slice(6)); if (s) include.set(s.id, s); }
-  for (const s of include.values()) sections.push(`## Output of stage "${s.name}" (${TASK_LABELS[s.taskType]}, ${providerLabel(outputs[s.id].provider)})\n\`\`\`json\n${JSON.stringify(outputs[s.id].output, null, 2).slice(0, 20_000)}\n\`\`\``);
+  for (const s of include.values()) if (isResearchTask(stage.taskType) || !isResearchTask(s.taskType)) sections.push(`## Output of stage "${s.name}" (${TASK_LABELS[s.taskType]}, ${providerLabel(outputs[s.id].provider)})\n\`\`\`json\n${JSON.stringify(outputs[s.id].output, null, 2).slice(0, 20_000)}\n\`\`\``);
   const priorVariants = [...include.values()].reverse().map((s) => (outputs[s.id].output as { variants?: unknown[] })?.variants).find(Array.isArray)?.length ?? 0;
-  const web = stage.allowWebResearch && WEB_TASKS.includes(stage.taskType) && isSubscriptionProvider(stage.provider);
+  const web = isResearchTask(stage.taskType) && stage.allowWebResearch && WEB_TASKS.includes(stage.taskType) && isSubscriptionProvider(stage.provider);
   const system = [
     'You are a careful B2B research and cold-email assistant working for the sender. Your output is reviewed by a human before anything is sent; never claim an email was sent.',
     SAFETY_RULES,
@@ -108,6 +106,7 @@ export async function buildStagePrompt(run: { workspaceId: string; leadId: strin
     web ? 'You may use web search and open public pages (read-only) to research the prospect. Prefer the prospect\'s own website and linked profiles. Do not log in anywhere.' : 'You cannot browse. Use only the inputs provided; if something is unknown, say so instead of guessing.',
     stage.instructions.trim() ? `Additional instructions from the sender (apply them unless they conflict with the rules above):\n${stage.instructions.trim()}` : '',
     runInstructions(run) ? `Instructions for this particular email from the sender (follow them closely unless they conflict with the rules above):\n${runInstructions(run)}` : '',
+    !isResearchTask(stage.taskType) ? 'Use reviewed saved research evidence for prospect-specific factual statements. Treat earlier draft wording as style context, never as evidence.' : '',
     formatGuidance(stage, priorVariants),
     'Answer with JSON that matches the required schema exactly.',
   ].filter(Boolean).join('\n\n');
@@ -163,7 +162,7 @@ export async function callProvider(ctx: { ownerUserId: string; workspaceId: stri
     try {
       const r = await runner.run({
         system: prompt.system, prompt: prompt.user, jsonSchema, model: stage.model ?? conn?.model ?? null,
-        allowWeb: stage.allowWebResearch && WEB_TASKS.includes(stage.taskType), timeoutMs: stage.timeoutSec * 1000, reasoningEffort: stage.reasoningEffort,
+        allowWeb: isResearchTask(stage.taskType) && stage.allowWebResearch && WEB_TASKS.includes(stage.taskType), timeoutMs: stage.timeoutSec * 1000, reasoningEffort: stage.reasoningEffort,
       });
       await recordProviderOutcome(ctx.ownerUserId, stage.provider, { ok: true, rateLimit: r.rateLimit });
       return { data: r.data, model: r.model, provider: stage.provider, usage: r.usage, rateLimit: r.rateLimit };
@@ -554,7 +553,7 @@ export async function processRegenerateJob(data: { runId: string; workspaceId: s
   const pbRun = { ...run };
   const prompt = await buildStagePrompt(pbRun, [stage], 0, {});
   const others = variants.filter((_, i) => i !== data.index).map((v) => ({ subject: v.subject, body: v.body }));
-  prompt.user += `\n\n## Research\n\`\`\`json\n${JSON.stringify(run.research ?? {}, null, 2).slice(0, 15_000)}\n\`\`\`\n\n## Existing variants (write ONE new variant with a different angle from all of these)\n\`\`\`json\n${JSON.stringify(others, null, 2)}\n\`\`\``;
+  prompt.user += `\n\n## Existing variants (write ONE new variant with a different angle from all of these)\n\`\`\`json\n${JSON.stringify(others, null, 2)}\n\`\`\``;
   const r = await callProvider(run, stage, prompt);
   const out = validateOutput(stage, r.data, 1) as { variants: EmailVariant[] };
   const fresh = (await db().aiWorkflowRun.findUnique({ where: { id: run.id } }))!;

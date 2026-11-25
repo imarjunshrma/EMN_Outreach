@@ -17,10 +17,11 @@ import { identityFromScoreReason } from '../../../shared/src/identity.js';
 import { evaluatePersonalizationGates } from '../../../shared/src/personalization-gates.js';
 import { runAi, estimateCallCost, routeLimits } from './ai.js';
 import { effectiveSnapshot, resolveFromSnapshot, renderProfilePrompt, configHash, type AiSnapshot } from './ai-studio.js';
-import { factCheck } from './intelligence.js';
+import { currentProspectReportIds, factCheck, prospectReportScope } from './intelligence.js';
 import { canContact } from './compliance.js';
 import { readSettings } from './workspace.js';
 import * as outreachBrain from './outreach-brain.js';
+import { indexMemoryItems, searchMemory, type MemoryItem } from './intelligence-memory.js';
 
 // =====================================================================================
 // Individual prospect personalization engine
@@ -79,8 +80,9 @@ function stripFooter(body: string | null) { return (body ?? '').split('\n\n--\n'
 // ------------------------------------------------------------------ evidence
 
 export async function evidenceForLead(workspaceId: string, lead: { id: string; companyId: string | null }, r: ResolvedConfig['research']) {
+  const reportIds = await currentProspectReportIds(workspaceId, lead.id, lead.companyId);
   const claims = await db().researchClaim.findMany({
-    where: { workspaceId, status: 'SUPPORTED', report: { status: 'COMPLETED', OR: [{ leadId: lead.id }, ...(lead.companyId ? [{ companyId: lead.companyId }] : [])] } },
+    where: { workspaceId, status: 'SUPPORTED', category: { not: 'opportunity' }, reportId: { in: reportIds }, evidence: { NOT: { url: { startsWith: 'search:' } } } },
     include: { evidence: { select: { id: true, url: true, title: true, sourceType: true, fetchedAt: true } } },
     orderBy: { createdAt: 'desc' }, take: 80,
   });
@@ -137,6 +139,7 @@ export interface BuiltContext {
   snapshot: AiSnapshot;
   frozen: boolean;
   claims: Awaited<ReturnType<typeof evidenceForLead>>['claims'];
+  writerClaimIds: Set<string>;
   excludedClaims: number;
   reportIds: string[];
   previous: Array<{ stepOrder: number; subject: string | null; openingLine: string | null; body: string }>;
@@ -144,7 +147,8 @@ export interface BuiltContext {
   step: { id: string; order: number; threadMode: string; aiInstructions: string | null; personalizationMode: string };
   profilePrompt: { text: string; missing: string[] };
   hash: string;
-  knowledge: string;
+  profileFacts: string;
+  approvedOfferFacts: Map<string, string>;
   allowedServices: AiSnapshot['selectedServices'];
   serviceEligibilityExcluded: Array<{ serviceVersionId: string; eligible: boolean; reason: string }>;
   retrievedKnowledgeIds: string[];
@@ -161,13 +165,13 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const { snapshot, frozen } = await effectiveSnapshot(workspaceId, campaign);
   const resolved = resolveFromSnapshot(snapshot, step, variant, lead);
   const ev = await evidenceForLead(workspaceId, lead, resolved.research);
-  const latestScore = await db().leadScore.findFirst({ where: { workspaceId, leadId: lead.id }, orderBy: { createdAt: 'desc' }, select: { qualified: true, reasons: true } });
+  const latestScore = await db().leadScore.findFirst({ where: { workspaceId, leadId: lead.id, ...(snapshot.icp ? { icpId: snapshot.icp.id } : {}), icp: { workspaceId, isActive: true } }, orderBy: { createdAt: 'desc' }, select: { qualified: true, reasons: true } });
   const scoreReasons = Array.isArray(latestScore?.reasons) ? latestScore.reasons as Array<Record<string, unknown>> : [];
   const identityReason = scoreReasons.find((r) => r.criterion === 'professional_identity');
   const identity = identityFromScoreReason(
     { firstName: lead.firstName, lastName: lead.lastName, companyName: lead.company?.name },
     identityReason as { met?: boolean; identityStatus?: string; claimIds?: unknown } | undefined,
-    ev.claims.map((c) => ({ id: c.id, text: c.text, category: c.category, sourceType: c.evidence.sourceType })),
+    ev.claims.map((c) => ({ id: c.id, text: c.quote, category: c.category, sourceType: c.evidence.sourceType })),
   );
   const qualification = {
     qualified: !!latestScore?.qualified,
@@ -181,15 +185,74 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const businessCategories = Array.isArray(companyCustom.businessCategories) ? companyCustom.businessCategories.filter((x): x is string => typeof x === 'string') : [];
   const serviceEligibility = filterEligibleServices(selectedServices, { industry: lead.company?.industry, country: lead.country ?? lead.company?.country, employeeCount: lead.company?.employeeCount, companyType: asFact(companyCustom.companyType), role: lead.title, seniority: asFact(leadCustom.seniority), businessCategories });
   const allowedServices = serviceEligibility.eligible;
-  const serviceKnowledge = allowedServices.map((s) => `SERVICE ${s.name} v${s.version}: ${s.description}\nProblems: ${s.customerProblems.join('; ')}\nOutcomes: ${s.desiredOutcomes.join('; ')}\nDeliverables: ${s.deliverables.join('; ')}\nCommercial boundaries: ${s.commercialBoundaries.join('; ')}\nApproved proof: ${s.proof.map((p) => `${p.claim}${p.sourceUrl ? ` (source: ${p.sourceUrl})` : ''}`).join('; ')}`).join('\n\n');
-  const knowledge = [knowledgeText(KnowledgeSchema.parse(snapshot.knowledge.data), snapshot.documents), serviceKnowledge ? `APPROVED CAMPAIGN SERVICE KNOWLEDGE (source of truth):\n${serviceKnowledge}` : ''].filter(Boolean).join('\n\n');
+  const knowledgeData = KnowledgeSchema.parse(snapshot.knowledge.data);
+  const approvedProfileText = [
+    `Company: ${knowledgeData.companyName}`, `Description: ${knowledgeData.description}`, `Website: ${knowledgeData.website}`,
+    `Target audience: ${knowledgeData.targetAudience}`, `Customer profiles: ${knowledgeData.customerProfiles}`,
+    `Services: ${knowledgeData.services.map((x) => `${x.name}: ${x.description}`).join('; ')}`,
+    `Products: ${knowledgeData.products.map((x) => `${x.name}: ${x.description}`).join('; ')}`,
+    `Positioning: ${knowledgeData.usps.join('; ')}`,
+  ].filter((x) => !x.endsWith(': ')).join('\n');
+  const profileMemoryItem: MemoryItem | null = snapshot.knowledge.versionId && approvedProfileText.trim().length >= 40
+    ? { entityType: 'KNOWLEDGE_DOCUMENT', entityId: snapshot.knowledge.versionId, content: approvedProfileText, metadata: { kind: 'active_business_profile', version: snapshot.knowledge.version } }
+    : null;
+  const memoryItems: MemoryItem[] = [
+    { entityType: 'LEAD', entityId: lead.id, content: `Professional profile: ${lead.title ?? 'role not listed'} at ${lead.company?.name ?? 'company not listed'}; ${lead.company?.industry ?? 'industry not listed'}; ${lead.country ?? lead.company?.country ?? 'location not listed'}.` },
+    ...(lead.company ? [{ entityType: 'COMPANY' as const, entityId: lead.company.id, content: `${lead.company.name}\n${lead.company.industry ?? ''}\n${lead.company.description ?? ''}\nServices: ${lead.company.services.join('; ')}\nAudience: ${lead.company.audience ?? ''}\nBusiness model: ${lead.company.businessModel ?? ''}` }] : []),
+    ...(profileMemoryItem ? [profileMemoryItem] : []),
+    ...ev.claims.map((c) => ({ entityType: 'RESEARCH_CLAIM' as const, entityId: c.id, content: `${c.text}\nEvidence quote: ${c.quote}\nSource: ${c.evidence.url}`, sourceUrl: c.evidence.url, metadata: { category: c.category, reportId: c.reportId } })),
+    ...snapshot.documents.map((d) => ({ entityType: 'KNOWLEDGE_DOCUMENT' as const, entityId: d.id, content: `${d.title}\n${d.text}` })),
+    ...allowedServices.map((s) => ({ entityType: 'BUSINESS_SERVICE_VERSION' as const, entityId: s.serviceVersionId, content: `${s.name} v${s.version}\n${s.description}\nProblems: ${s.customerProblems.join('; ')}\nOutcomes: ${s.desiredOutcomes.join('; ')}\nDeliverables: ${s.deliverables.join('; ')}` })),
+    ...allowedServices.flatMap((s) => s.proof.map((p) => ({ entityType: 'BUSINESS_PROOF' as const, entityId: p.id, content: p.claim, sourceUrl: p.sourceUrl }))),
+    ...snapshot.outreachExamples.map((e) => ({ entityType: 'OUTREACH_EXAMPLE' as const, entityId: e.id, content: `${e.name}\n${e.correctedContent ?? e.content}\n${e.explanation ?? ''}`, metadata: { polarity: e.polarity, category: e.category, humanApproved: true } })),
+  ];
+  const memoryQuery = `${lead.title ?? ''} ${lead.company?.name ?? ''} ${lead.company?.industry ?? ''}\n${ev.claims.slice(0, 8).map((c) => c.text).join('\n')}`.trim();
+  let memoryHits: Awaited<ReturnType<typeof searchMemory>> = [];
+  try {
+    await indexMemoryItems(workspaceId, memoryItems);
+    memoryHits = await searchMemory(workspaceId, memoryQuery, {
+      LEAD: [lead.id],
+      COMPANY: lead.company ? [lead.company.id] : [],
+      RESEARCH_CLAIM: ev.claims.map((c) => c.id),
+      KNOWLEDGE_DOCUMENT: [snapshot.knowledge.versionId, ...snapshot.documents.map((d) => d.id)].filter((id): id is string => !!id),
+      BUSINESS_SERVICE_VERSION: allowedServices.map((s) => s.serviceVersionId),
+      BUSINESS_PROOF: allowedServices.flatMap((s) => s.proof.map((p) => p.id)),
+      OUTREACH_EXAMPLE: snapshot.outreachExamples.map((e) => e.id),
+    }, 18);
+  } catch (error) {
+    // Semantic retrieval is an optimization. Existing relational/lexical context stays available.
+    logger.warn({ workspaceId, error: (error as Error).message.slice(0, 200) }, 'semantic memory unavailable; using relational context');
+  }
+  const knowledgeHits = memoryHits.filter((hit) => hit.entityType !== 'LEAD' && hit.entityType !== 'COMPANY');
+  const rank = new Map(knowledgeHits.map((hit, i) => [hit.entityId, i]));
+  const relevantDocuments = rank.size
+    ? [...snapshot.documents].filter((d) => rank.has(d.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!).slice(0, 5)
+    : snapshot.documents;
+  const promptClaims = rank.size
+    ? [...ev.claims].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER))
+    : ev.claims;
+  const rankedExamples = rank.size
+    ? [...snapshot.outreachExamples].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER))
+    : snapshot.outreachExamples;
+  const approvedOfferFacts = new Map(allowedServices.map((s) => [s.serviceVersionId, [
+    `Service ${s.name} v${s.version}: ${s.description}`,
+    `Customer problems: ${s.customerProblems.join('; ')}`,
+    `Desired outcomes: ${s.desiredOutcomes.join('; ')}`,
+    `Deliverables: ${s.deliverables.join('; ')}`,
+    `Eligibility: ${s.eligibilityCriteria.join('; ')}`,
+    `Exclusions: ${s.exclusions.join('; ')}`,
+    `Commercial boundaries: ${s.commercialBoundaries.join('; ')}`,
+    `Approved proof: ${s.proof.map((p) => `${p.claim}${p.sourceUrl ? ` (source: ${p.sourceUrl})` : ''}`).join('; ')}`,
+  ].join('\n')]));
+  const profileFacts = [knowledgeData.companyName, knowledgeData.website, knowledgeData.description].filter(Boolean).join('\n');
+  const knowledge = [knowledgeText(knowledgeData, relevantDocuments), ...approvedOfferFacts.values()].join('\n\n');
   const approvedServicesText = allowedServices.length ? allowedServices.map((s) => JSON.stringify({ id: s.serviceVersionId, name: s.name, version: s.version, description: s.description, targetIndustries: s.targetIndustries, targetGeographies: s.targetGeographies, employeeCountBounds: [s.minEmployeeCount, s.maxEmployeeCount], targetCustomerProfiles: s.targetCustomerProfiles, customerProblems: s.customerProblems, desiredOutcomes: s.desiredOutcomes, deliverables: s.deliverables, eligibilityCriteria: s.eligibilityCriteria, exclusions: s.exclusions, commercialBoundaries: s.commercialBoundaries, approvedProof: s.proof })).join('\n') : '(none eligible for this prospect; return no service match and hold)';
   const sender = campaign.accounts[0]?.emailAccount;
-  const pv = promptVars({ lead, claimCount: ev.claims.length, summary: report?.summary ?? null, stepOrder: step.order, campaignName: campaign.name, icpName: snapshot.icp?.name ?? null, senderName: sender?.displayName ?? sender?.emailAddress?.split('@')[0] ?? '', ourCompany: KnowledgeSchema.parse(snapshot.knowledge.data).companyName });
+  const pv = promptVars({ lead, claimCount: ev.claims.length, summary: report?.summary ?? null, stepOrder: step.order, campaignName: campaign.name, icpName: snapshot.icp?.name ?? null, senderName: sender?.displayName ?? sender?.emailAddress?.split('@')[0] ?? '', ourCompany: knowledgeData.companyName });
   const profilePrompt = snapshot.profile ? renderProfilePrompt(snapshot.profile.instructions, pv) : { text: '(no prompt profile selected — follow the instructions above)', missing: [] };
   const rules = snapshot.outreachRules ?? [];
-  const exampleContext = [lead.title, lead.company?.industry, campaign.name, campaign.aiOverrides ? JSON.stringify(campaign.aiOverrides) : '', ev.claims.map((c) => c.text).join(' '), KnowledgeSchema.parse(snapshot.knowledge.data).services.map((s) => `${s.name} ${s.description}`).join(' ')].filter(Boolean).join(' ');
-  const examples = retrieveRelevantExamples((snapshot.outreachExamples ?? []) as OutreachExampleLike[], exampleContext);
+  const exampleContext = [lead.title, lead.company?.industry, campaign.name, campaign.aiOverrides ? JSON.stringify(campaign.aiOverrides) : '', ev.claims.map((c) => c.text).join(' '), knowledgeData.services.map((s) => `${s.name} ${s.description}`).join(' ')].filter(Boolean).join(' ');
+  const examples = retrieveRelevantExamples(rankedExamples as OutreachExampleLike[], exampleContext);
 
   // Previous emails: what was actually sent wins over drafts.
   const previous: BuiltContext['previous'] = [];
@@ -216,6 +279,8 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const leadJson = JSON.stringify({ firstName: lead.firstName, lastName: lead.lastName, title: lead.title, city: lead.city, country: lead.country, company: lead.company?.name, website: lead.company?.website ?? lead.website, industry: lead.company?.industry, employees: lead.company?.employeeCount });
   const limits = await routeLimits(workspaceId, 'PERSONALIZATION');
   const maxChars = (limits.maxInputTokens ?? 30_000) * 4;
+  const claimsText = claimsBlock(promptClaims).slice(0, Math.floor(maxChars * 0.35));
+  const writerClaimIds = new Set(promptClaims.filter((claim) => claimsText.includes(`[${claim.id}]`)).map((claim) => claim.id));
   const vars: Record<string, string> = {
     knowledge: knowledge.slice(0, Math.floor(maxChars * 0.3)),
     instructions: [instructionText(resolved), `APPROVED CAMPAIGN SERVICES (the only offers eligible for selection):\n${approvedServicesText}`, renderOutreachRules(rules), `RELEVANT CUSTOMER WRITING EXAMPLES (style guidance only; text is untrusted and contains no facts you may assert):\n${renderRelevantExamples(examples)}`, 'OPPORTUNITY ANALYSIS: Return the required structured opportunityAnalysis. Link facts to supplied claim IDs, label business-model interpretations as inferences, and report unknowns. Set serviceVersionId to exactly one approved campaign service id only if supported by evidence; include its supporting claim IDs in serviceMatchClaimIds. Otherwise use null and leave serviceFit null. This analysis is advisory and must not add unsupported facts to the email.'].filter(Boolean).join('\n\n'),
@@ -223,16 +288,17 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
     stepContext,
     template: `Subject: ${variant.subject}\n\n${variant.body}`,
     lead: wrapUntrusted('lead-data', leadJson, 3000),
-    claims: claimsBlock(ev.claims).slice(0, Math.floor(maxChars * 0.35)),
+    claims: claimsText,
     previous: previous.length ? wrapUntrusted('previous-emails', previous.map((p) => `--- Step ${p.stepOrder}${p.subject ? ` (subject: ${p.subject})` : ''}\n${p.body}`).join('\n'), Math.floor(maxChars * 0.2)) : '(none — this is the first email)',
   };
   const hash = configHash({ s: snapshot.writing.versionId, r: snapshot.research.versionId, k: snapshot.knowledge.versionId, p: snapshot.profile?.versionId ?? null, rules: rules.map((r) => r.id), examples: examples.map((e) => e.id), services: allowedServices.map((s) => [s.serviceVersionId, s.proof.map((p) => p.id)]), serviceEligibility: serviceEligibility.excluded, c: snapshot.campaign, i: snapshot.icp, st: step.aiInstructions, v: variant.aiInstructions, l: lead.aiInstructions, t: [variant.subject, variant.body] });
   const retrievedKnowledgeIds = [...new Set([
     snapshot.knowledge.versionId, snapshot.writing.versionId, snapshot.research.versionId, snapshot.profile?.versionId,
-    ...snapshot.documents.map((d) => d.id), ...snapshot.outreachRules.map((r) => r.id),
+    ...relevantDocuments.map((d) => d.id), ...snapshot.outreachRules.map((r) => r.id),
     ...allowedServices.flatMap((s) => [s.serviceVersionId, ...s.proof.map((p) => p.id)]),
+    ...memoryHits.map((hit) => hit.entityId),
   ].filter((id): id is string => !!id))];
-  return { vars, resolved, snapshot, frozen, claims: ev.claims, excludedClaims: ev.excluded, reportIds: ev.reportIds, previous, variant, step, profilePrompt, hash, knowledge, allowedServices, serviceEligibilityExcluded: serviceEligibility.excluded, retrievedKnowledgeIds, retrievedExampleIds: examples.map((e) => e.id).filter((id): id is string => !!id), qualification, identity };
+  return { vars, resolved, snapshot, frozen, claims: ev.claims, writerClaimIds, excludedClaims: ev.excluded, reportIds: ev.reportIds, previous, variant, step, profilePrompt, hash, profileFacts, approvedOfferFacts, allowedServices, serviceEligibilityExcluded: serviceEligibility.excluded, retrievedKnowledgeIds, retrievedExampleIds: examples.map((e) => e.id).filter((id): id is string => !!id), qualification, identity };
 }
 
 async function engagementState(campaignId: string, leadId: string) {
@@ -351,58 +417,81 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
       return { status, id: row?.id ?? null, reason: err.message, code: err.code };
     }
 
-    // Evidence filter: only claims that were actually supplied to the writer count.
-    const valid = new Map(ctx.claims.map((c) => [c.id, c]));
-    const usedClaims = out.usedClaimIds.filter((id) => valid.has(id)).map((id) => valid.get(id)!);
-    const invalidClaimIds = out.usedClaimIds.filter((id) => !valid.has(id));
-    const opp = out.opportunityAnalysis;
-    const supportedIds = new Set(ctx.claims.map((c) => c.id));
-    const opportunityAnalysis = {
-      ...opp,
-      serviceVersionId: ctx.allowedServices.some((s) => s.serviceVersionId === opp.serviceVersionId) ? opp.serviceVersionId : null,
-      serviceMatchClaimIds: opp.serviceMatchClaimIds.filter((id) => supportedIds.has(id)),
-      businessModel: opp.businessModel.basis === 'UNKNOWN' || !opp.businessModel.claimIds.length || !opp.businessModel.claimIds.every((id) => supportedIds.has(id))
-        ? { statement: null, basis: 'UNKNOWN' as const, claimIds: [] }
-        : opp.businessModel,
-      facts: opp.facts.filter((f) => supportedIds.has(f.claimId)),
-      inferences: opp.inferences.filter((i) => i.claimIds.length > 0 && i.claimIds.every((id) => supportedIds.has(id))),
-      ...(ctx.claims.length ? {} : { qualification: 'INSUFFICIENT_INFORMATION' as const, confidence: 0, opportunity: null, serviceFit: null, recommendedApproach: null, unknowns: [...new Set([...opp.unknowns, 'No evidence-backed prospect claims were available.'])] }),
-    };
-    if (!opportunityAnalysis.serviceVersionId || !opportunityAnalysis.serviceMatchClaimIds.length) opportunityAnalysis.serviceFit = null;
-    const subject = ctx.step.threadMode === 'REPLY_IN_THREAD' && ctx.step.order > 1 ? null : (out.subject?.trim() || null);
-    const body = out.body.trim();
-    const openingLine = out.openingLine?.trim() || null;
-
-    // Independent fact-check (separate AI call, same evidence + our knowledge).
-    let fcSentences: FactCheckSentence[] | null = null;
-    // AI-generated campaign content must always pass factual validation. Keep the legacy
-    // setting for compatibility, but it cannot disable this minimum safety gate.
-    const factCheckRequired = true;
-    try {
-      const fc = await factCheck(workspaceId, leadId, `${subject ?? ''}\n${body}`, ctx.knowledge, { claims: ctx.claims, attribution, maxLeadCostUsd: maxLead });
-      executionIds.push(fc.executionId);
-      fcSentences = fc.sentences;
-    } catch (e) {
-      if (opts.preview && !factCheckRequired) fcSentences = null;
-      else logger.warn({ err: (e as Error).message }, 'fact-check failed during personalization');
-    }
-
     const others = opts.preview ? [] : await db().leadPersonalization.findMany({ where: { campaignId, stepId, leadId: { not: leadId }, openingLine: { not: null } }, select: { openingLine: true }, take: 300, orderBy: { updatedAt: 'desc' } });
-    const quality = runQualityChecks({
-      subject, openingLine, body, stepOrder: ctx.step.order, newThread: ctx.step.threadMode === 'NEW_THREAD' || ctx.step.order === 1,
-      writing: ctx.resolved.writing, usedClaims, invalidClaimIds, availableClaimCount: ctx.claims.length,
-      previousEmails: ctx.previous, otherLeadOpenings: others.map((o) => o.openingLine!),
-      factCheck: fcSentences, factCheckRequired, postalAddressConfigured: !!ws.postalAddress?.trim(), insufficientContext: out.insufficientContext,
-    });
-    applyCommercialRelevanceGate(quality, opportunityAnalysis, ctx.allowedServices);
-    const ruleChecks = checkRuleTriggerTerms(ctx.snapshot.outreachRules ?? [], `${subject ?? ''}\n${openingLine ?? ''}\n${body}\n${out.cta ?? ''}`);
-    quality.checks.push(...ruleChecks);
-    if (ruleChecks.some((c) => c.status === 'fail')) quality.passed = false;
+    const evaluate = async (out: Personalization) => {
+      // Evidence filter: only claims that were actually supplied to the writer count.
+      const valid = new Map(ctx.claims.filter((c) => ctx.writerClaimIds.has(c.id)).map((c) => [c.id, c]));
+      const usedClaims = out.usedClaimIds.filter((id) => valid.has(id)).map((id) => valid.get(id)!);
+      const invalidClaimIds = out.usedClaimIds.filter((id) => !valid.has(id));
+      const opp = out.opportunityAnalysis;
+      const supportedIds = ctx.writerClaimIds;
+      const opportunityAnalysis = {
+        ...opp,
+        serviceVersionId: ctx.allowedServices.some((s) => s.serviceVersionId === opp.serviceVersionId) ? opp.serviceVersionId : null,
+        serviceMatchClaimIds: opp.serviceMatchClaimIds.filter((id) => supportedIds.has(id)),
+        businessModel: opp.businessModel.basis === 'UNKNOWN' || !opp.businessModel.claimIds.length || !opp.businessModel.claimIds.every((id) => supportedIds.has(id))
+          ? { statement: null, basis: 'UNKNOWN' as const, claimIds: [] }
+          : opp.businessModel,
+        facts: opp.facts.filter((f) => supportedIds.has(f.claimId)),
+        inferences: opp.inferences.filter((i) => i.claimIds.length > 0 && i.claimIds.every((id) => supportedIds.has(id))),
+        ...(ctx.claims.length ? {} : { qualification: 'INSUFFICIENT_INFORMATION' as const, confidence: 0, opportunity: null, serviceFit: null, recommendedApproach: null, unknowns: [...new Set([...opp.unknowns, 'No evidence-backed prospect claims were available.'])] }),
+      };
+      if (!opportunityAnalysis.serviceVersionId || !opportunityAnalysis.serviceMatchClaimIds.length) opportunityAnalysis.serviceFit = null;
+      const subject = ctx.step.threadMode === 'REPLY_IN_THREAD' && ctx.step.order > 1 ? null : (out.subject?.trim() || null);
+      const body = out.body.trim();
+      const openingLine = out.openingLine?.trim() || null;
+
+      let fcSentences: FactCheckSentence[] | null = null;
+      const factCheckRequired = true;
+      try {
+        const offerFacts = ctx.approvedOfferFacts.get(opportunityAnalysis.serviceVersionId ?? '');
+        const fc = await factCheck(workspaceId, leadId, [...new Set([subject, openingLine, body, out.cta].filter(Boolean))].join('\n'), [ctx.profileFacts, offerFacts].filter(Boolean).join('\n\n'), { claims: ctx.claims, attribution, maxLeadCostUsd: maxLead });
+        executionIds.push(fc.executionId);
+        fcSentences = fc.sentences;
+      } catch (e) {
+        logger.warn({ err: (e as Error).message }, 'fact-check failed during personalization');
+      }
+
+      const quality = runQualityChecks({
+        subject, openingLine, body, stepOrder: ctx.step.order, newThread: ctx.step.threadMode === 'NEW_THREAD' || ctx.step.order === 1,
+        writing: ctx.resolved.writing, usedClaims, invalidClaimIds, availableClaimCount: ctx.claims.length,
+        previousEmails: ctx.previous, otherLeadOpenings: others.map((o) => o.openingLine!),
+        factCheck: fcSentences, factCheckRequired, postalAddressConfigured: !!ws.postalAddress?.trim(), insufficientContext: out.insufficientContext,
+      });
+      applyCommercialRelevanceGate(quality, opportunityAnalysis, ctx.allowedServices);
+      const ruleChecks = checkRuleTriggerTerms(ctx.snapshot.outreachRules ?? [], `${subject ?? ''}\n${openingLine ?? ''}\n${body}\n${out.cta ?? ''}`);
+      quality.checks.push(...ruleChecks);
+      if (ruleChecks.some((c) => c.status === 'fail')) quality.passed = false;
+      return { out, subject, openingLine, body, usedClaims, opportunityAnalysis, fcSentences, quality };
+    };
+
+    let evaluated = await evaluate(out);
+    let rewriteAttempted = false;
+    if (!evaluated.quality.passed && evaluated.fcSentences?.length) {
+      rewriteAttempted = true;
+      const feedback = evaluated.quality.checks.filter((check) => check.status === 'fail')
+        .map((check) => `${check.label}: ${check.detail}`).join('\n');
+      try {
+        const rewrite = await runAi<Personalization>(workspaceId, 'PERSONALIZATION', {
+          ...vars,
+          instructions: `${vars.instructions}\n\nRewrite once using the original approved offer and evidence. Address the following evaluation findings.\n${wrapUntrusted('evaluation', feedback, 2500)}`,
+        }, { entity: { type: 'lead_personalization', id: `${campaignId}:${leadId}:${stepId}` }, attribution, maxLeadCostUsd: maxLead });
+        executionIds.push(rewrite.executionId);
+        evaluated = await evaluate(rewrite.data);
+      } catch (e) {
+        logger.warn({ err: (e as Error).message }, 'controlled personalization rewrite failed');
+      }
+    }
+    const { subject, openingLine, body, usedClaims, opportunityAnalysis, fcSentences, quality } = evaluated;
+    out = evaluated.out;
     const costAgg = await db().aiExecution.aggregate({ where: { id: { in: executionIds } }, _sum: { costUsd: true } });
     const unpriced = await db().aiExecution.count({ where: { id: { in: executionIds }, costIsEstimate: true } });
     const cost = Number(costAgg._sum.costUsd ?? 0);
-    const provenance = { retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, researchEvidenceIds: [...new Set(ctx.claims.map((c) => c.evidence.id))], selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId) };
-    const explanation = { factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, basis: out.personalizationBasis, opportunityAnalysis, factCheck: fcSentences, provenance, model: null as string | null, frozenConfig: ctx.frozen, missingPromptVariables: ctx.profilePrompt.missing };
+    const citedIds = new Set([...usedClaims.map((claim) => claim.id), ...opportunityAnalysis.serviceMatchClaimIds, ...(fcSentences ?? []).flatMap((sentence) => sentence.claimId ? [sentence.claimId] : [])]);
+    const selectedServiceVersionIds = opportunityAnalysis.serviceVersionId ? [opportunityAnalysis.serviceVersionId] : [];
+    const provenance = { retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds,
+      researchEvidenceIds: [...new Set(ctx.claims.filter((claim) => citedIds.has(claim.id)).map((claim) => claim.evidence.id))], selectedServiceVersionIds };
+    const explanation = { rewriteAttempted, decision: quality.passed ? 'PASS' : 'HOLD', factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, basis: out.personalizationBasis, opportunityAnalysis, factCheck: fcSentences, provenance, model: null as string | null, frozenConfig: ctx.frozen, missingPromptVariables: ctx.profilePrompt.missing };
 
     if (opts.preview) {
       return { status: quality.passed ? 'GENERATED' : 'BLOCKED', preview: true, subject, subjectAlternatives: out.subjectAlternatives, openingLine, body, cta: out.cta, usedClaims: usedClaims.map((c) => ({ id: c.id, text: c.text, url: c.evidence.url, fetchedAt: c.evidence.fetchedAt })), opportunityAnalysis, quality, costUsd: cost, costIsEstimate: unpriced > 0, prompt: { profile: ctx.profilePrompt.text, instructions: ctx.vars.instructions }, explanation };
@@ -417,7 +506,7 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
       const r = await tx.leadPersonalization.update({
         where: { id: prev.id },
         data: {
-          ...content, variantId: ctx.variant.id, subjectAlternatives: out.subjectAlternatives.slice(0, 5), usedClaimIds: usedClaims.map((c) => c.id), researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId),
+          ...content, variantId: ctx.variant.id, subjectAlternatives: out.subjectAlternatives.slice(0, 5), usedClaimIds: usedClaims.map((c) => c.id), researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds,
           quality: quality as unknown as Prisma.InputJsonValue, qualityPassed: quality.passed, score: quality.score, scoreExplanation: explanation as unknown as Prisma.InputJsonValue,
           costUsd: { increment: cost }, costIsEstimate: unpriced > 0, status: quality.passed ? 'GENERATED' : 'BLOCKED',
           manuallyEdited: false, editedById: null, editedAt: null,
@@ -425,7 +514,7 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
           configHash: ctx.hash, profileVersionId: ctx.snapshot.profile?.versionId ?? null, revision, error: null, generatedAt: new Date(),
         },
       });
-      await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: r.id, revision, source: 'AI', ...content, usedClaimIds: r.usedClaimIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds: ctx.allowedServices.map((s) => s.serviceVersionId), quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, costUsd: cost, executionIds, createdById: actor.userId ?? null } });
+      await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: r.id, revision, source: 'AI', ...content, usedClaimIds: r.usedClaimIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds, quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, costUsd: cost, executionIds, createdById: actor.userId ?? null } });
       return r;
     });
     await publish(workspaceId, 'personalization.updated', { campaignId, leadId, stepId, status: row.status });
@@ -466,7 +555,7 @@ export async function leadReview(workspaceId: string, campaignId: string, leadId
   const { snapshot } = await effectiveSnapshot(workspaceId, campaign);
   const research = resolveFromSnapshot(snapshot, null, null).research;
   const ev = await evidenceForLead(workspaceId, lead, research);
-  const reports = await db().researchReport.findMany({ where: { workspaceId, OR: [{ leadId }, ...(lead.companyId ? [{ companyId: lead.companyId }] : [])] }, orderBy: { createdAt: 'desc' }, take: 5, include: { evidence: { select: { id: true, url: true, title: true, sourceType: true, fetchedAt: true } } } });
+  const reports = await db().researchReport.findMany({ where: { workspaceId, ...prospectReportScope(leadId, lead.companyId) }, orderBy: { createdAt: 'desc' }, take: 5, include: { evidence: { select: { id: true, url: true, title: true, sourceType: true, fetchedAt: true } } } });
   const cost = await db().aiExecution.aggregate({ where: { workspaceId, campaignId, leadId }, _sum: { costUsd: true } });
   return {
     lead, steps: (campaign.sequence?.steps ?? []).map((s) => ({ id: s.id, order: s.order, personalizationMode: s.personalizationMode, threadMode: s.threadMode })),
@@ -488,13 +577,15 @@ export async function editPersonalization(workspaceId: string, id: string, input
   const campaign = await loadCampaign(workspaceId, p.campaignId);
   const generatedRevision = await db().personalizationRevision.findFirst({ where: { workspaceId, personalizationId: p.id, source: 'AI' }, orderBy: { revision: 'desc' } });
   const ctx = await buildContext(workspaceId, campaign, p.lead, p.stepId);
+  const priorAnalysis = (p.scoreExplanation as { opportunityAnalysis?: Personalization['opportunityAnalysis'] } | null)?.opportunityAnalysis;
+  const offerFacts = ctx.approvedOfferFacts.get(priorAnalysis?.serviceVersionId ?? '');
   let fc: FactCheckSentence[] | null = null;
   const executionIds: string[] = [];
   {
     try {
       const ws0 = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
       const maxLead = p.campaign.maxAiCostPerLeadUsd !== null ? Number(p.campaign.maxAiCostPerLeadUsd) : readSettings(ws0.settings).aiMaxCostPerLeadUsd;
-      const r = await factCheck(workspaceId, p.leadId, `${content.subject ?? ''}\n${content.body}`, ctx.knowledge, { claims: ctx.claims, attribution: { campaignId: p.campaignId, leadId: p.leadId }, maxLeadCostUsd: maxLead });
+      const r = await factCheck(workspaceId, p.leadId, [...new Set([content.subject, content.openingLine, content.body, content.cta].filter(Boolean))].join('\n'), [ctx.profileFacts, offerFacts].filter(Boolean).join('\n\n'), { claims: ctx.claims, attribution: { campaignId: p.campaignId, leadId: p.leadId }, maxLeadCostUsd: maxLead });
       fc = r.sentences; executionIds.push(r.executionId);
     } catch (e) { logger.warn({ err: (e as Error).message }, 'fact-check after edit failed'); }
   }
@@ -507,8 +598,12 @@ export async function editPersonalization(workspaceId: string, id: string, input
     usedClaims, invalidClaimIds: [], availableClaimCount: ctx.claims.length, previousEmails: ctx.previous, otherLeadOpenings: others.map((o) => o.openingLine!),
     factCheck: fc, factCheckRequired: true, postalAddressConfigured: !!ws.postalAddress?.trim(),
   });
-  const priorAnalysis = (p.scoreExplanation as { opportunityAnalysis?: Personalization['opportunityAnalysis'] } | null)?.opportunityAnalysis;
-  if (priorAnalysis) applyCommercialRelevanceGate(quality, priorAnalysis, ctx.allowedServices);
+  if (priorAnalysis) applyCommercialRelevanceGate(quality, {
+    ...priorAnalysis,
+    serviceMatchClaimIds: priorAnalysis.serviceMatchClaimIds.filter((claimId) => valid.has(claimId)),
+    facts: priorAnalysis.facts.filter((fact) => valid.has(fact.claimId)),
+    inferences: priorAnalysis.inferences.filter((inference) => inference.claimIds.every((claimId) => valid.has(claimId))),
+  }, ctx.allowedServices);
   else {
     quality.checks.push({ id: 'commercial_relevance', label: 'ICP, opportunity and service relevance', status: 'fail', detail: 'Opportunity and service match must be regenerated and reviewed before this email can be approved' });
     quality.passed = false;

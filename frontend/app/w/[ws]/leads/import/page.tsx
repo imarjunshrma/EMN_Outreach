@@ -8,7 +8,7 @@ import { LAWFUL_BASES } from '@/lib/constants';
 import { Badge, Button, Card, Field, Input, Notice, PageHeader, QueryView, Select, Table } from '@/components/ui';
 import { useToast } from '@/components/toast';
 
-const FIELDS = ['ignore', 'email', 'firstName', 'lastName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'phone', 'country', 'city', 'timezone', 'tags'];
+const FIELDS = ['ignore', 'email', 'firstName', 'lastName', 'fullName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'custom.youtubeUrl', 'custom.instagramUrl', 'custom.facebookUrl', 'custom.socialUrl', 'custom.transcriptUrl', 'custom.publicProfileUrl', 'custom.notes', 'phone', 'country', 'city', 'timezone', 'tags'];
 interface Upload { importId: string; headers: string[]; sampleRows: string[][]; suggestedMapping: Record<string, string> }
 interface ImportJob { id: string; fileName: string; status: string; totalRows: number; importedRows: number; updatedRows: number; skippedRows: number; errorRows: number; errors: Array<{ row: number; error: string }>; createdAt: string }
 
@@ -19,6 +19,9 @@ export default function ImportPage() {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [opts, setOpts] = useState({ dedupeMode: 'skip', newListName: '', targetListId: '', sourceName: 'CSV import', lawfulBasis: 'LEGITIMATE_INTEREST', lawfulBasisNote: '', defaultCountry: '' });
   const [busy, setBusy] = useState(false);
+  const fields = new Set(Object.values(mapping));
+  const canImport = fields.has('email') || ((fields.has('fullName') || (fields.has('firstName') && fields.has('lastName')))
+    && ['companyDomain', 'website', 'custom.publicProfileUrl'].some((field) => fields.has(field)));
   const lists = useWsQuery<Array<{ id: string; name: string }>>('/lists');
   const imports = useWsQuery<ImportJob[]>('/imports', { refetchInterval: 5000 });
   const start = useWsMutation(() => ({ path: `/imports/${upload!.importId}/start`, body: { mapping, dedupeMode: opts.dedupeMode, targetListId: opts.targetListId || null, newListName: opts.newListName || undefined, sourceName: opts.sourceName, lawfulBasis: opts.lawfulBasis, lawfulBasisNote: opts.lawfulBasisNote || undefined, defaultCountry: opts.defaultCountry || undefined } }), { success: 'Import started', onSuccess: () => setUpload(null) });
@@ -26,8 +29,10 @@ export default function ImportPage() {
   async function onFile(file: File) {
     setBusy(true);
     try {
+      if (file.size > 20 * 1024 * 1024) throw new Error('Choose a CSV or Excel workbook of 20 MB or smaller.');
+      const uploadFile = /\.xlsx$/i.test(file.name) ? await (await import('@/lib/prospect-workbook')).workbookToCsv(file) : file;
       const form = new FormData();
-      form.append('file', file);
+      form.append('file', uploadFile);
       const r = await api<Upload>(`/w/${ws}/imports`, { method: 'POST', form });
       setUpload(r);
       setMapping(r.suggestedMapping);
@@ -36,16 +41,16 @@ export default function ImportPage() {
 
   return (
     <>
-      <PageHeader title="Import & export" subtitle="Upload a CSV of prospects. Duplicates (by email) and suppressed addresses are skipped automatically. Record the lawful basis for contacting these people." actions={<a className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/api/v1/w/${ws}/leads/export`}>Export all leads (CSV)</a>} />
+      <PageHeader title="Import & export" subtitle="Upload a CSV or Excel workbook of prospects. Duplicates (by email) and suppressed addresses are skipped automatically. Record the lawful basis for contacting these people." actions={<a className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/api/v1/w/${ws}/leads/export`}>Export all leads (CSV)</a>} />
       {!upload ? (
-        <Card title="1. Upload CSV">
-          <input type="file" accept=".csv,text/csv" disabled={busy} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-          <p className="mt-2 text-xs text-slate-500">Max 20 MB. First row must be headers. One column must contain email addresses.</p>
+        <Card title="Upload prospects">
+          <input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={busy} onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+          <p className="mt-2 text-xs text-slate-500">Max 20 MB. Excel imports the first worksheet. Start with a header row. A full name and public source are enough for research when email is missing.</p>
         </Card>
       ) : (
         <div className="space-y-4">
           <Card title="2. Map columns">
-            <Table head={['CSV column', 'Sample', 'Maps to']}>
+            <Table head={['File column', 'Sample', 'Maps to']}>
               {upload.headers.map((h, i) => (
                 <tr key={h}>
                   <td className="td font-medium">{h}</td>
@@ -68,7 +73,7 @@ export default function ImportPage() {
               <Field label="Basis note"><Input value={opts.lawfulBasisNote} onChange={(e) => setOpts({ ...opts, lawfulBasisNote: e.target.value })} placeholder="e.g. Public business contact, relevant B2B offer" /></Field>
             </div>
             <div className="mt-3"><Notice kind="warning">A publicly visible email address does not by itself authorise marketing. Choose the basis that genuinely applies; country rules decide whether these contacts can be emailed.</Notice></div>
-            <div className="mt-4 flex gap-2"><Button loading={start.isPending} disabled={!Object.values(mapping).includes('email')} onClick={() => start.mutate()}>Start import</Button><Button variant="secondary" onClick={() => setUpload(null)}>Cancel</Button></div>
+            <div className="mt-4 flex gap-2"><Button loading={start.isPending} disabled={!canImport} onClick={() => start.mutate()}>Start import</Button><Button variant="secondary" onClick={() => setUpload(null)}>Cancel</Button></div>
           </Card>
         </div>
       )}

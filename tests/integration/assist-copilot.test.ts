@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { queue, QUEUES } from '../../backend/src/core/queues.js';
 import { db } from '../../backend/src/core/db.js';
 import * as ra from '../../backend/src/services/reply-assist.js';
 import * as copilot from '../../backend/src/services/copilot.js';
+import { saveConfig } from '../../backend/src/services/ai-studio.js';
+import { approveServiceVersion, createService, ServiceCreateSchema } from '../../backend/src/services/business-knowledge.js';
 import * as inbox from '../../backend/src/services/inbox.js';
 import { resetDb, installFakes, createUserSession, addMailbox, addLead, addAiProvider } from '../helpers/harness.js';
 import type { FakeAi } from '../helpers/fakes.js';
@@ -118,6 +121,107 @@ describe('AI Copilot', () => {
     expect(t.messages.map((m) => m.role)).toEqual(['USER', 'ASSISTANT']);
     const other = await createUserSession('b@x.com', 'OWNER', s.workspaceId);
     await expect(copilot.getThread(s.workspaceId, other.userId, r.threadId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('passes active knowledge, approved services and inactive metadata to Copilot on each turn', async () => {
+    const s = await createUserSession('knowledge@fixture.example');
+    const other = await createUserSession('other@fixture.example');
+    await addAiProvider(s.workspaceId);
+    const active = await saveConfig(s.workspaceId, 'KNOWLEDGE', {
+      companyName: 'Fixture Company', description: 'Current fixture company description.',
+      targetAudience: 'Consulting teams', offers: [],
+    }, undefined, ACTOR);
+    const inactive = await db().aiConfigVersion.create({ data: {
+      workspaceId: s.workspaceId, kind: 'KNOWLEDGE', version: active.version + 1,
+      isActive: false, data: { description: 'INACTIVE-CONTENT-SENTINEL' },
+    } });
+    await saveConfig(other.workspaceId, 'KNOWLEDGE', { description: 'OTHER-WORKSPACE-SENTINEL' }, undefined, ACTOR);
+
+    const addService = (workspaceId: string, name: string) => createService(workspaceId, ServiceCreateSchema.parse({
+      name, description: 'Fixture service details', deliverables: ['Editorial calendar'],
+    }), ACTOR);
+    const approved = (await addService(s.workspaceId, 'Content strategy')).versions[0];
+    await approveServiceVersion(s.workspaceId, approved.id, ACTOR);
+    await addService(s.workspaceId, 'DRAFT-SERVICE-SENTINEL');
+    const foreign = (await addService(other.workspaceId, 'FOREIGN-SERVICE-SENTINEL')).versions[0];
+    await approveServiceVersion(other.workspaceId, foreign.id, ACTOR);
+    for (const [claim, status, permittedUse] of [
+      ['Approved fixture proof', 'APPROVED_FOR_USE', true],
+      ['UNAPPROVED-PROOF-SENTINEL', 'SUBMITTED', false],
+    ] as const) {
+      await db().businessProof.create({ data: { workspaceId: s.workspaceId, serviceVersionId: approved.id, claim, status, permittedUse } });
+    }
+
+    let prompt = '';
+    ai.on('COPILOT', (request) => {
+      prompt = request.user;
+      return { answer: 'Fixture response', recommendations: [], proposedActions: [] };
+    });
+    const snapshot = () => JSON.parse(prompt.split('\n').find((line) => line.startsWith('{"company"'))!);
+    const run = await copilot.ask(s.workspaceId, s.userId, 'OWNER', null, 'What business knowledge is available?');
+    expect(snapshot()).toMatchObject({ offers: [], businessKnowledge: {
+      activeVersion: { id: active.versionId, version: active.version, isActive: true },
+      companyDescription: 'Current fixture company description.', targetAudience: 'Consulting teams',
+      commercialOffers: [],
+      approvedServices: [{ id: approved.id, name: 'Content strategy', status: 'APPROVED', description: 'Fixture service details', deliverables: ['Editorial calendar'] }],
+      approvedProof: [{ serviceVersionId: approved.id, claim: 'Approved fixture proof' }],
+      inactiveVersions: [{ id: inactive.id, version: inactive.version, isActive: false }],
+    } });
+    expect(prompt).not.toMatch(/INACTIVE-CONTENT-SENTINEL|DRAFT-SERVICE-SENTINEL|UNAPPROVED-PROOF-SENTINEL|OTHER-WORKSPACE-SENTINEL|FOREIGN-SERVICE-SENTINEL/);
+
+    const next = await saveConfig(s.workspaceId, 'KNOWLEDGE', {
+      description: 'Updated current description.', offers: [{ name: 'Intro workshop', description: 'One-hour workshop' }],
+    }, undefined, ACTOR);
+    await copilot.ask(s.workspaceId, s.userId, 'OWNER', run.threadId, 'What has changed?');
+    expect(snapshot().businessKnowledge).toMatchObject({
+      activeVersion: { id: next.versionId }, companyDescription: 'Updated current description.',
+      commercialOffers: [{ name: 'Intro workshop' }], approvedServices: [{ name: 'Content strategy' }],
+    });
+    expect(prompt).not.toContain('Current fixture company description.');
+  });
+
+  it('reports missing active knowledge while exposing only metadata for inactive versions', async () => {
+    const s = await createUserSession('missing@fixture.example');
+    const inactive = await db().aiConfigVersion.create({ data: {
+      workspaceId: s.workspaceId, kind: 'KNOWLEDGE', version: 1,
+      isActive: false, data: { description: 'DRAFT-ONLY-SENTINEL' },
+    } });
+    const result = await copilot.buildSnapshot(s.workspaceId);
+    expect(result.businessKnowledge).toMatchObject({
+      activeVersion: null, companyDescription: null, targetAudience: null,
+      commercialOffers: [], approvedServices: [], approvedProof: [],
+      inactiveVersions: [{ id: inactive.id, version: 1, isActive: false }],
+    });
+    expect(JSON.stringify(result)).not.toContain('DRAFT-ONLY-SENTINEL');
+  });
+
+  it('resolves a selected or named prospect without an AI call and enforces workspace and campaign scope', async () => {
+    const s = await createUserSession('research-owner@fixture.example');
+    const company = await db().company.create({ data: { workspaceId: s.workspaceId, name: 'Fixture Studio' } });
+    const lead = await addLead(s.workspaceId, 'taylor@fixture.example', { firstName: 'Taylor', lastName: 'Example', companyId: company.id });
+    const selected = await copilot.ask(s.workspaceId, s.userId, 'OWNER', null, 'Research this prospect', { leadId: lead.id });
+    expect(selected.answer).toContain('Taylor Example');
+    expect(selected.proposedActions).toMatchObject([{ type: 'queue_research', params: { leadIds: lead.id } }]);
+    expect(ai.calls).toHaveLength(0);
+    await expect(copilot.executeAction(s.workspaceId, selected.proposedActions[0].id, 'OWNER', ACTOR)).resolves.toMatchObject({ result: { queued: 1 } });
+    const jobs = await queue(QUEUES.research).getJobs(['waiting']);
+    expect(jobs.some((job) => job.name === 'research.lead' && job.data.workspaceId === s.workspaceId && job.data.leadId === lead.id)).toBe(true);
+    expect(await copilot.resolveResearchRequest(s.workspaceId, 'Research Taylor Example at Fixture Studio', {})).toMatchObject({
+      action: { params: [{ key: 'leadIds', value: lead.id }] },
+    });
+    expect(await copilot.resolveResearchRequest(s.workspaceId, 'Research', {})).toMatchObject({ answer: expect.stringContaining('full name and company') });
+    const other = await createUserSession('research-other@fixture.example');
+    await expect(copilot.resolveResearchRequest(other.workspaceId, 'Research this prospect', { leadId: lead.id })).rejects.toMatchObject({ status: 404 });
+    const { createCampaign, CampaignSettingsSchema, setCampaignLists } = await import('../../backend/src/services/engine.js');
+    const campaign = await createCampaign(s.workspaceId, CampaignSettingsSchema.parse({ name: 'Fixture research campaign' }), ACTOR);
+    const selection = { leadId: lead.id, campaignId: campaign.id };
+    await expect(copilot.resolveResearchRequest(s.workspaceId, 'Research this prospect', selection)).rejects.toMatchObject({ status: 404 });
+    const list = await db().leadList.create({ data: { workspaceId: s.workspaceId, name: 'Fixture prospect list' } });
+    await db().leadListMember.create({ data: { workspaceId: s.workspaceId, listId: list.id, leadId: lead.id } });
+    await setCampaignLists(s.workspaceId, campaign.id, [list.id], ACTOR);
+    await expect(copilot.resolveResearchRequest(s.workspaceId, 'Research this prospect', selection)).resolves.toMatchObject({
+      action: { params: [{ key: 'leadIds', value: lead.id }, { key: 'campaignId', value: campaign.id }] },
+    });
   });
 
   it('cannot propose actions outside the allow-list (schema rejects them)', async () => {

@@ -1,8 +1,8 @@
 import { AI_TASKS } from '../../shared/src/ai-schemas.js';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../backend/src/core/db.js';
 import { runAi, upsertPrice } from '../../backend/src/services/ai.js';
-import { runResearch, scoreLead, generateEmail, importProspects, searchProspects } from '../../backend/src/services/intelligence.js';
+import { getReport, setClaimStatus, supportedClaims, runResearch, scoreLead, generateEmail, importProspects, searchProspects } from '../../backend/src/services/intelligence.js';
 import { getAuth } from '../../backend/src/services/accounts.js';
 import { encryptSecret } from '../../backend/src/services/workspace.js';
 import { ProviderError } from '../../integrations/src/http.js';
@@ -121,6 +121,10 @@ describe('evidence-backed research, scoring and writing', () => {
     expect(fakes.anthropic.calls[0].system).not.toContain('IGNORE ALL');
     expect((await db().lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe('RESEARCHED');
 
+    expect(report.claims.every((claim) => claim.status === 'NEEDS_REVIEW')).toBe(true);
+    expect(await supportedClaims(s.workspaceId, lead.id)).toEqual([]);
+    for (const claim of report.claims) await setClaimStatus(s.workspaceId, claim.id, 'SUPPORTED', SYS);
+
     // Scoring only accepts real claim ids and applies deterministic guardrails
     const icp = await db().idealCustomerProfile.create({ data: { workspaceId: s.workspaceId, name: 'Consultants', criteria: { titles: ['Founder'], countries: ['US'], industries: ['Consulting'], keywords: [], seniorities: [], employeeMin: null, employeeMax: null, mustHave: [], disqualifiers: [] }, minScore: 60 } });
     fakes.anthropic.on('LEAD_QUALIFICATION', () => ({ score: 88, reasons: [{ criterion: 'industry', met: true, explanation: 'consulting', claimIds: [report.claims[0].id, 'made-up'] }], risks: [] }));
@@ -135,6 +139,106 @@ describe('evidence-backed research, scoring and writing', () => {
     const draft = await generateEmail(s.workspaceId, { leadId: lead.id, mode: 'full', templateSubject: '', templateBody: '', previousEmails: '', instructions: '' });
     expect(draft.usedClaimIds).toEqual([report.claims[1].id]);
     expect(draft.factCheck.passed).toBe(true);
+  });
+
+  it('tracks independent coverage and reads a published public transcript without fetching restricted profiles', async () => {
+    const { s, lead } = await setup();
+    await db().lead.update({ where: { id: lead.id }, data: {
+      linkedinUrl: 'https://www.linkedin.com/in/fixture',
+      customFields: { transcriptUrl: 'https://broadcast.example/transcript', facebookUrl: 'https://www.facebook.com/fixture' },
+    } });
+    const publishedAt = new Date('2026-11-01T00:00:00Z');
+    const quote = 'Our agency will start publishing a weekly advisory series in December.';
+    fakes.fetcher.pages.set('https://broadcast.example/transcript', {
+      url: 'https://broadcast.example/transcript', status: 200, title: 'Public transcript', text: quote, links: [], publishedAt,
+    });
+    fakes.anthropic.on('FACT_EXTRACTION', (req) => {
+      const candidates = [...req.user.matchAll(/evidenceId="([^"]+)"/g)];
+      const finding = { category: 'interview', evidenceId: candidates.at(-1)![1], quote, text: quote, confidence: 0.9 };
+      return { summary: '', industry: null, services: [], audience: null, businessModel: null, claims: [finding, finding] };
+    });
+    const result = await runResearch(s.workspaceId, { leadId: lead.id });
+    const report = await getReport(s.workspaceId, result!.reportId);
+    expect(report.coverage.areas).toMatchObject({
+      linkedin: { status: 'INACCESSIBLE' }, social: { status: 'INACCESSIBLE' },
+      interviews: { status: 'PARTIAL' }, identity: { status: 'PARTIAL' },
+    });
+    expect(report.claims).toEqual([expect.objectContaining({
+      status: 'NEEDS_REVIEW', quote, evidence: expect.objectContaining({ url: 'https://broadcast.example/transcript', title: 'Public transcript', publishedAt }),
+    })]);
+    const other = await createUserSession('other-research@fixture.example');
+    await expect(getReport(other.workspaceId, report.id)).rejects.toMatchObject({ status: 404 });
+    await expect(runResearch(s.workspaceId, { leadId: lead.id })).resolves.toMatchObject({ reportId: report.id, reused: true });
+    await setClaimStatus(s.workspaceId, report.claims[0].id, 'SUPPORTED', SYS);
+    await expect(runResearch(s.workspaceId, { leadId: lead.id, retryMissing: true })).resolves.toMatchObject({ reportId: report.id });
+    const refreshed = await getReport(s.workspaceId, report.id);
+    expect(refreshed.claims).toHaveLength(1);
+    expect(refreshed.claims[0]).toMatchObject({ id: report.claims[0].id, status: 'SUPPORTED' });
+    expect(refreshed.evidence.filter((item) => item.url === 'https://broadcast.example/transcript')).toHaveLength(1);
+  });
+
+  it.each([false, true])('recovers missing categories after a www redirect (configured search: %s)', async (withSearch) => {
+    const { s, lead } = await setup();
+    const origin = 'https://www.growthadvisory.co';
+    const original = 'https://growthadvisory.co';
+    const initialContent = 'Growth Advisory provides part-time marketing leadership to founders.';
+    const news = 'Growth Advisory launched a new research publication for small business owners.';
+    const interview = 'The team publishes interviews with specialist marketing practitioners.';
+    const fetch = vi.spyOn(fakes.fetcher, 'fetchPage');
+    fakes.fetcher.pages.set(original, { url: origin + '/', status: 200, title: 'Home', text: initialContent, links: [] });
+    fakes.anthropic.on('FACT_EXTRACTION', (req) => {
+      const docs = [...req.user.matchAll(/evidenceId="([^"]+)" url="([^"]+)"/g)];
+      const claims = docs.map(([, evidenceId, url]) => {
+        const quote = url.includes('news') ? news : url.includes('interview') ? interview : initialContent;
+        return { evidenceId, text: quote, quote, category: 'other', confidence: 0.9 };
+      });
+      return { summary: '', industry: null, services: [], audience: null, businessModel: null, claims: [...claims, ...claims] };
+    });
+    const initial = (await runResearch(s.workspaceId, { leadId: lead.id, sourceUrl: origin + '/' }))!;
+    const before = await getReport(s.workspaceId, initial.reportId);
+    expect(before.evidence).toHaveLength(1);
+    expect(before.claims).toHaveLength(1);
+    const priorClaim = before.claims[0];
+    await setClaimStatus(s.workspaceId, priorClaim.id, 'SUPPORTED', SYS);
+    // Simulate old reports created before redirect aliases were persisted.
+    await db().researchReport.update({ where: { id: before.id }, data: { coverage: before.coverage.areas } });
+    fakes.fetcher.pages.set(origin + '/sitemap.xml', {
+      url: origin + '/sitemap.xml', status: 200, title: 'Sitemap', text: '',
+      links: ['/in-the-news.html', '/in-the-news.html#duplicate', '/interviews.html'],
+    });
+    for (const [path, text] of [['/in-the-news.html', news], ['/interviews.html', interview]]) {
+      fakes.fetcher.pages.set(origin + path, { url: origin + path, title: path, status: 200, text, links: [] });
+    }
+    const search = vi.spyOn(fakes.search, 'search');
+    if (withSearch) {
+      await db().workspace.update({ where: { id: s.workspaceId }, data: { settings: { searchProvider: 'brave' } } });
+      await db().integration.create({ data: { workspaceId: s.workspaceId, type: 'brave', encryptedConfig: encryptSecret('fixture-search-key') } });
+    }
+    fetch.mockClear();
+    await expect(runResearch(s.workspaceId, { leadId: lead.id, retryReportId: before.id })).resolves.toMatchObject({ reportId: before.id, claims: 2 });
+    expect(fetch.mock.calls.map(([url]) => url)).not.toContain(original);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(expect.arrayContaining([origin + '/in-the-news.html', origin + '/interviews.html']));
+    if (withSearch) expect(search).toHaveBeenCalled();
+    else expect(search).not.toHaveBeenCalled();
+    const after = await getReport(s.workspaceId, before.id);
+    expect(after.coverage.retry).toMatchObject({
+      retainedSources: 1, newSources: 2, attemptedCategories: expect.arrayContaining(['signals', 'interviews']),
+      searchUnavailable: withSearch ? null : expect.stringMatching(/no web search provider/i),
+    });
+    expect(after.evidence.map((item) => item.id)).toContain(before.evidence[0].id);
+    expect(after.evidence).toHaveLength(3);
+    expect(after.claims).toHaveLength(3);
+    expect(await supportedClaims(s.workspaceId, lead.id)).toEqual([expect.objectContaining({ id: priorClaim.id })]);
+    expect(after.claims.filter((claim) => claim.id !== priorClaim.id).every((claim) => claim.status === 'NEEDS_REVIEW')).toBe(true);
+
+    const other = await createUserSession('retry-other@example.test');
+    const otherLead = await addLead(other.workspaceId, 'profile@fixture.example');
+    await expect(runResearch(other.workspaceId, { leadId: otherLead.id, retryReportId: before.id })).rejects.toMatchObject({ status: 404 });
+    await runResearch(s.workspaceId, { leadId: lead.id, retryReportId: before.id });
+    const repeated = await getReport(s.workspaceId, before.id);
+    expect(repeated.coverage.retry).toMatchObject({ retainedSources: 3, newSources: 0, message: 'Retained 3 source(s). No new sources were collected.' });
+    expect(repeated.claims).toHaveLength(3);
+    expect(repeated.error ?? '').not.toContain('No public sources available');
   });
 
   it('marks research failed (no claims) when sources are unavailable', async () => {

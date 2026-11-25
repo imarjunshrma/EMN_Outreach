@@ -31,7 +31,7 @@ export const FactExtractionOutput = z.object({
   claims: z.array(
     z.object({
       text: z.string(),
-      category: z.enum(['service', 'industry', 'audience', 'business_model', 'content', 'signal', 'professional_identity', 'other']),
+      category: z.enum(['service', 'industry', 'audience', 'business_model', 'content', 'signal', 'professional_identity', 'professional_background', 'linkedin', 'social', 'interview', 'opportunity', 'other']),
       evidenceId: z.string(),
       quote: z.string(),
       confidence: z.number().min(0).max(1),

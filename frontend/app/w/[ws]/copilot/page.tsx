@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate } from '@/lib/format';
 import { Badge, Button, Card, ConfirmButton, Empty, Notice, PageHeader, QueryView, Textarea } from '@/components/ui';
@@ -11,12 +11,21 @@ const EXAMPLES = ['Which campaigns are underperforming this month and why?', 'Wh
 export default function Copilot() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [question, setQuestion] = useState('');
+  const [selection, setSelection] = useState<{ leadId?: string; campaignId?: string }>({});
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const leadId = params.get('leadId');
+    if (leadId) {
+      setSelection({ leadId, campaignId: params.get('campaignId') ?? undefined });
+      setQuestion('Research the selected prospect');
+    }
+  }, []);
   const threads = useWsQuery<any[]>('/copilot/threads');
   const thread = useWsQuery<any>(threadId ? `/copilot/threads/${threadId}` : null);
   const memory = useWsQuery<any[]>('/copilot/memory');
   const repetition = useWsQuery<any>('/copilot/repetition');
   const [mem, setMem] = useState('');
-  const ask = useWsMutation(() => ({ path: '/copilot/ask', body: { threadId, question } }), { onSuccess: (r: any) => { setThreadId(r.threadId); setQuestion(''); } });
+  const ask = useWsMutation(() => ({ path: '/copilot/ask', body: { threadId, question, ...selection } }), { onSuccess: (r: any) => { setThreadId(r.threadId); setQuestion(''); } });
   const exec = useWsMutation<string>((id) => ({ path: `/copilot/actions/${id}/execute`, body: {} }), { success: 'Action done' });
   const reject = useWsMutation<string>((id) => ({ path: `/copilot/actions/${id}/reject`, body: {} }), { success: 'Dismissed' });
   const addMem = useWsMutation(() => ({ path: '/copilot/memory', body: { content: mem } }), { success: 'Saved to business memory', onSuccess: () => setMem('') });

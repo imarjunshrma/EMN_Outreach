@@ -9,6 +9,7 @@ import * as studio from '../services/ai-studio.js';
 import * as pz from '../services/personalization.js';
 import * as brain from '../services/outreach-brain.js';
 import * as businessKnowledge from '../services/business-knowledge.js';
+import * as businessOnboarding from '../services/business-onboarding.js';
 import * as engine from '../services/engine.js';
 import { KnowledgeSchema, WritingSchema, ResearchSchema } from '../../../shared/src/ai-studio.js';
 import { PROMPT_VARIABLES, lintPromptTemplate, EXAMPLE_PROFILE_PROMPT } from '../../../shared/src/prompt-builder.js';
@@ -87,6 +88,11 @@ route({ method: 'get', path: '/w/:workspaceId/ai-studio/schemas', tag: 'AI Studi
   handler: async () => ({ defaults: { knowledge: KnowledgeSchema.parse({}), writing: WritingSchema.parse({}), research: ResearchSchema.parse({}) }, promptVariables: PROMPT_VARIABLES, exampleProfilePrompt: EXAMPLE_PROFILE_PROMPT }) });
 
 // ---------------------------------------------------------------- knowledge documents
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/onboarding/website', tag: 'AI Studio', summary: 'Safely crawl a company website and prepare inactive evidence and unapproved knowledge/service drafts', auth: 'workspace', role: 'ADMIN', status: 200, rateLimit: { limit: 5, windowSec: 3600, key: 'workspace' }, body: businessOnboarding.WebsiteIntakeSchema,
+  handler: (c) => businessOnboarding.ingestBusinessWebsite(c.workspaceId, c.body, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/onboarding/revise', tag: 'AI Studio', summary: 'Propose a source-backed knowledge revision for review', auth: 'workspace', role: 'ADMIN', status: 201,
+  rateLimit: { limit: 10, windowSec: 3600, key: 'workspace' }, body: businessOnboarding.WebsiteRevisionSchema,
+  handler: (c) => businessOnboarding.proposeWebsiteRevision(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/ai-studio/documents', tag: 'AI Studio', summary: 'Knowledge documents', auth: 'workspace', role: 'VIEWER', handler: (c) => studio.listDocuments(c.workspaceId) });
 route({ method: 'get', path: '/w/:workspaceId/ai-studio/documents/:id', tag: 'AI Studio', summary: 'One knowledge document with its extracted text', auth: 'workspace', role: 'VIEWER', handler: (c) => studio.getDocument(c.workspaceId, c.params.id) });
 route({ method: 'post', path: '/w/:workspaceId/ai-studio/documents', tag: 'AI Studio', summary: 'Add a document (multipart "file" .txt/.md/.csv/.json/.html ≤5 MB, or fields title+text)', auth: 'workspace', role: 'ADMIN', raw: true, rateLimit: { limit: 60, windowSec: 3600, key: 'workspace' },

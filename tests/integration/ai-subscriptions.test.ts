@@ -292,6 +292,15 @@ describe('generation runs', () => {
   }
 
   it('Claude only, Codex only, Claude → Codex and Codex → Claude each produce three distinct variants with the right provider per stage', async () => {
+    const report = await db().researchReport.create({ data: { workspaceId: s.workspaceId, leadId, status: 'COMPLETED', completedAt: new Date() } });
+    const evidence = await db().researchEvidence.create({ data: {
+      workspaceId: s.workspaceId, reportId: report.id, sourceType: 'WEBSITE', url: 'https://clinic.example/about',
+      content: 'The clinic opened a new pediatric care service.', contentHash: 'fixture',
+    } });
+    await db().researchClaim.create({ data: {
+      workspaceId: s.workspaceId, reportId: report.id, evidenceId: evidence.id, category: 'service', status: 'SUPPORTED',
+      text: evidence.content, quote: evidence.content, confidence: 0.95,
+    } });
     const claudeOnly = await runWith({ mode: 'claude' });
     expect(claudeOnly.status).toBe('SUCCEEDED');
     expect(claudeOnly.executions.map((e: { provider: string }) => e.provider)).toEqual(['CLAUDE_SUBSCRIPTION', 'CLAUDE_SUBSCRIPTION']);
@@ -311,9 +320,10 @@ describe('generation runs', () => {
     const tc = await runWith({ workflowId: await presetId('codex_then_claude') });
     expect(tc.executions.map((e: { provider: string }) => e.provider)).toEqual(['CODEX_SUBSCRIPTION', 'CODEX_SUBSCRIPTION', 'CLAUDE_SUBSCRIPTION']);
 
-    // The humanization stage received the research and the drafted variants as inputs.
+    // Humanization receives reviewed research and the drafted variants.
     const humanizeCall = codex.calls.find((c) => c.system.includes('Email humanization'))!;
-    expect(humanizeCall.prompt).toContain('Output of stage "Prospect research"');
+    expect(humanizeCall.prompt).toContain('The clinic opened a new pediatric care service.');
+    expect(humanizeCall.prompt).not.toContain('Output of stage "Prospect research"');
     expect(humanizeCall.prompt).toContain('Output of stage "Email drafting"');
     expect(fakes.openai.calls.length + fakes.anthropic.calls.length).toBe(0); // no paid API was used
   });

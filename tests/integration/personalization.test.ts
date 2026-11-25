@@ -3,6 +3,12 @@ import { db } from '../../backend/src/core/db.js';
 import { sha256 } from '../../backend/src/core/crypto.js';
 import * as engine from '../../backend/src/services/engine.js';
 import * as studio from '../../backend/src/services/ai-studio.js';
+import { ingestBusinessWebsite, proposeWebsiteRevision } from '../../backend/src/services/business-onboarding.js';
+import { overview } from '../../backend/src/services/analytics.js';
+import { processImport } from '../../backend/src/services/leads.js';
+import { getReport, runResearch, scoreLead, setClaimStatus, supportedClaims } from '../../backend/src/services/intelligence.js';
+import { indexMemoryItems, resetMemoryFetchForTests, searchMemory, setMemoryFetchForTests } from '../../backend/src/services/intelligence-memory.js';
+import * as business from '../../backend/src/services/business-knowledge.js';
 import * as pz from '../../backend/src/services/personalization.js';
 import { resetDb, installFakes, createUserSession, addMailbox, addLead, addAiProvider, MONDAY_10_UTC, type Session } from '../helpers/harness.js';
 import type { FakeAi } from '../helpers/fakes.js';
@@ -18,26 +24,34 @@ const ACTOR = { type: 'SYSTEM' as const };
 /** Claims the writer received, parsed from the prompt: "- [id] (category) text". */
 function claimsIn(req: StructuredRequest) {
   const block = req.user.split('EVIDENCE-BACKED CLAIMS')[1]?.split('PREVIOUS EMAILS')[0] ?? '';
-  return [...block.matchAll(/- \[([0-9a-f-]{36})\] \([a-z_]+\) ([^\n]+)/g)].map((m) => ({ id: m[1], text: m[2].trim() }));
+  return [...block.matchAll(/- \[([0-9a-f-]{36})\] \((?!professional_identity\))[a-z_]+\) ([^\n]+)/g)].map((m) => ({ id: m[1], text: m[2].trim() }));
 }
 
 /** A deterministic "writer": uses the first evidence-backed claim, honest fallback when there is none. */
 function honestWriter(extra: (req: StructuredRequest) => Partial<Record<string, unknown>> = () => ({})) {
   return (req: StructuredRequest) => {
     const c = claimsIn(req)[0];
+    const serviceVersionId = /APPROVED CAMPAIGN SERVICES[^\n]*\n\{"id":"([0-9a-f-]+)"/.exec(req.user)?.[1];
+    const opportunityAnalysis = c && serviceVersionId ? {
+      qualification: 'POSSIBLE_FIT', businessModel: { statement: null, basis: 'UNKNOWN', claimIds: [] },
+      facts: [{ statement: c.text, claimId: c.id }], inferences: [], unknowns: [],
+      opportunity: 'Turn existing developments into short-form content.', serviceFit: 'Content distribution supports this development.',
+      serviceVersionId, serviceMatchClaimIds: [c.id], confidence: 0.8, missingInformation: [],
+      recommendedApproach: 'Offer a short outline.',
+    } : undefined;
     const follow = /This is step ([2-9])/.exec(req.user);
     const opening = c ? `Saw that ${c.text.replace(/\.$/, '')}.` : 'I run a small growth studio for consulting firms.';
     const body = follow
       ? `Hi there,\n\nOne different angle since my last note: many firms turn existing client questions into weekly short videos that bring in enquiries. Would a two-line outline for your team be useful?`
       : `Hi there,\n\n${opening} We help teams like yours turn that into a steady flow of qualified enquiries with short-form content and distribution. Worth a quick look at how it could work for you?`;
-    return { subject: follow ? null : c ? `About ${c.text.split(' ').slice(0, 3).join(' ')}` : 'Quick question', subjectAlternatives: ['Idea for you'], openingLine: follow ? 'One different angle since my last note.' : opening, body, cta: 'Worth a quick look?', usedClaimIds: c ? [c.id] : [], personalizationBasis: c ? c.text : 'none', insufficientContext: !c, ...extra(req) };
+    return { subject: follow ? null : c ? `About ${c.text.split(' ').slice(0, 3).join(' ')}` : 'Quick question', subjectAlternatives: ['Idea for you'], openingLine: follow ? 'One different angle since my last note.' : opening, body, cta: 'Worth a quick look?', usedClaimIds: c ? [c.id] : [], personalizationBasis: c ? c.text : 'none', insufficientContext: !c, opportunityAnalysis, ...extra(req) };
   };
 }
 
 /** Fact-checker: a sentence is SUPPORTED if it contains a claim text, UNSUPPORTED if it contains a marker of invention. */
 function factChecker(req: StructuredRequest) {
   const email = req.user.split('</untrusted_content>')[0];
-  const claims = [...req.user.matchAll(/- \[([0-9a-f-]{36})\] ([^\n(]+)/g)].map((m) => ({ id: m[1], text: m[2].trim() }));
+  const claims = [...req.user.matchAll(/- \[([0-9a-f-]{36})\] <untrusted_content source="claim">\n([^\n]+)/g)].map((m) => ({ id: m[1], text: m[2].trim() }));
   const sentences = email.split(/(?<=[.?!])\s+/).filter((s) => s.trim().length > 3).map((text) => {
     if (/Series B|award|raised \$/.test(text)) return { text, verdict: 'UNSUPPORTED', claimId: null, reason: 'not in evidence' };
     const c = claims.find((x) => text.toLowerCase().includes(x.text.toLowerCase().replace(/\.$/, '').slice(0, 30)));
@@ -59,11 +73,20 @@ async function setup(s: Session, opts: { leads?: Array<{ email: string; facts: s
   await db().aiModelPrice.create({ data: { provider: 'ANTHROPIC', model: 'claude-haiku-5-5', inputPerMTokUsd: 1, outputPerMTokUsd: 5 } }).catch(() => undefined);
   const mailbox = await addMailbox(s.workspaceId);
   const list = await db().leadList.create({ data: { workspaceId: s.workspaceId, name: 'Founders' } });
+  const icp = await db().idealCustomerProfile.create({ data: { workspaceId: s.workspaceId, name: 'Founders', criteria: {} } });
   const leads = [];
   for (const l of opts.leads ?? [{ email: 'asha@studio-a.com', facts: ['Studio A launched a weekly podcast on hiring designers.'] }]) {
-    const lead = await addLead(s.workspaceId, l.email, { firstName: l.email.split('@')[0], timezone: 'UTC', title: 'Founder' });
+    const domain = l.email.split('@')[1];
+    const company = await db().company.create({ data: { workspaceId: s.workspaceId, name: domain.split('.')[0], domain } });
+    const lead = await addLead(s.workspaceId, l.email, { companyId: company.id, firstName: l.email.split('@')[0], lastName: 'Fixture', timezone: 'UTC', title: 'Founder' });
     await db().leadListMember.create({ data: { workspaceId: s.workspaceId, listId: list.id, leadId: lead.id } });
-    if (l.facts.length) await addResearch(s.workspaceId, lead.id, l.facts);
+    if (l.facts.length) {
+      const identity = `${lead.firstName} ${lead.lastName} is founder of ${company.name}.`;
+      const report = await addResearch(s.workspaceId, lead.id, [...l.facts, identity]);
+      const identityClaim = await db().researchClaim.findFirstOrThrow({ where: { reportId: report.id, text: identity } });
+      await db().researchClaim.update({ where: { id: identityClaim.id }, data: { category: 'professional_identity', createdAt: new Date(0) } });
+      await db().leadScore.create({ data: { workspaceId: s.workspaceId, leadId: lead.id, icpId: icp.id, score: 90, tier: 'A', qualified: true, reasons: [{ criterion: 'professional_identity', met: true, identityStatus: 'VERIFIED', claimIds: [identityClaim.id] }] } });
+    }
     leads.push(lead);
   }
   const c = await engine.createCampaign(s.workspaceId, engine.CampaignSettingsSchema.parse({ name: 'Consulting founders', sendingWindow: ALWAYS, reviewMode: 'AI_CONTENT_ONLY', ...(opts.settings ?? {}) }), ACTOR);
@@ -71,6 +94,11 @@ async function setup(s: Session, opts: { leads?: Array<{ email: string; facts: s
     { delayDays: 0, personalizationMode: 'AI_FULL', aiInstructions: 'Personal introduction.', variants: [{ label: 'A', subject: 'Idea', body: 'Hi {{firstName}}, short intro.' }] },
     { delayDays: 3, personalizationMode: 'AI_FULL', threadMode: 'REPLY_IN_THREAD', aiInstructions: 'Different business angle.', variants: [{ label: 'A', subject: '', body: 'Follow-up.' }] },
   ] }), ACTOR);
+  const offer = await business.createService(s.workspaceId, business.ServiceCreateSchema.parse({
+    name: 'Content distribution', description: 'Turn original stories into short-form content and distribute it.',
+  }), ACTOR);
+  await business.approveServiceVersion(s.workspaceId, offer.versions[0].id, ACTOR);
+  await business.setCampaignServices(s.workspaceId, c.id, [{ serviceVersionId: offer.versions[0].id }], ACTOR);
   await engine.setCampaignLists(s.workspaceId, c.id, [list.id], ACTOR);
   await engine.setCampaignAccounts(s.workspaceId, c.id, [mailbox.id], ACTOR);
   const full = await engine.getCampaign(s.workspaceId, c.id);
@@ -173,6 +201,8 @@ describe('AI personalization engine', () => {
     const { campaignId, steps, leads } = await setup(s);
     const r = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     expect(r.status).toBe('BLOCKED');
+    expect(personalizationCalls()).toHaveLength(2);
+    expect(ai.calls.filter((call) => call.schemaName === 'fact_check')).toHaveLength(2);
     await expect(pz.approvePersonalizations(s.workspaceId, [r.id!], ACTOR)).rejects.toMatchObject({ code: 'QUALITY_CHECK_FAILED' });
     const edited = await pz.editPersonalization(s.workspaceId, r.id!, { body: 'Hi there,\n\nSaw that Studio A launched a weekly podcast on hiring designers. We help teams turn that kind of content into qualified enquiries. Open to a quick idea?', rerunFactCheck: true, feedbackScope: 'CAMPAIGN' }, ACTOR);
     expect(edited.status).toBe('GENERATED');
@@ -187,17 +217,12 @@ describe('AI personalization engine', () => {
     const held = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     expect(held.status).toBe('NEEDS_RESEARCH');
     expect(personalizationCalls()).toHaveLength(0);
-    // Rule switched to "role and company only": the prompt says so and the email states no prospect facts
     await studio.saveConfig(s.workspaceId, 'RESEARCH', { onMissing: 'use_role_and_company_only' }, 'v', ACTOR);
     const r = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
-    expect(personalizationCalls()[0].user).toMatch(/NO EVIDENCE-BACKED CLAIMS AVAILABLE/);
-    expect(personalizationCalls()[0].user).toMatch(/No research is available|NO EVIDENCE/);
+    expect(r.status).toBe('BLOCKED');
+    expect(personalizationCalls()).toHaveLength(0);
     const p = await db().leadPersonalization.findUniqueOrThrow({ where: { id: r.id! } });
     expect(p.usedClaimIds).toEqual([]);
-    // If the writer invents a fact anyway, the fact-check blocks it
-    ai.on('PERSONALIZATION', honestWriter(() => ({ body: 'Hi there,\n\nI saw your recent award for best consultancy. We help firms like yours win more clients. Open to an idea?' })));
-    const bad = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id, { force: true });
-    expect(bad.status).toBe('BLOCKED');
   });
 
   it('7. preserves manual edits across bulk regeneration', async () => {
@@ -229,11 +254,11 @@ describe('AI personalization engine', () => {
       { email: 'ben@ledger-b.com', facts: ['Ledger B opened a second office in Austin for tax advisory.'] },
     ] });
     await engine.updateCampaignAi(s.workspaceId, campaignId, { aiProfileId: profile.id }, ACTOR);
+    await engine.submitCampaign(s.workspaceId, campaignId, ACTOR);
+    await engine.approveCampaign(s.workspaceId, campaignId, ACTOR);
     const r = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
     await pz.approvePersonalizations(s.workspaceId, [r.id!], ACTOR);
     const approvedBody = (await db().leadPersonalization.findUniqueOrThrow({ where: { id: r.id! } })).body;
-    await engine.submitCampaign(s.workspaceId, campaignId, ACTOR);
-    await engine.approveCampaign(s.workspaceId, campaignId, ACTOR);
     // Change the profile and the workspace writing rules after approval
     await studio.createProfileVersion(s.workspaceId, profile.id, { instructions: 'PROFILE-V2: completely different.', settings: {}, activate: true }, ACTOR);
     await studio.saveConfig(s.workspaceId, 'WRITING', { customInstructions: 'NEW-WORKSPACE-RULE' }, 'later', ACTOR);
@@ -255,7 +280,7 @@ describe('AI personalization engine', () => {
     const s = await createUserSession('owner@x.com');
     ai.on('FACT_CHECK', factChecker);
     ai.on('PERSONALIZATION', () => { throw new Error('model overloaded'); });
-    const { campaignId, steps, leads } = await setup(s, { settings: { reviewMode: 'NONE' }, steps: [{ delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Idea', body: 'Hi' }] }] });
+    const { campaignId, steps, leads } = await setup(s, { settings: { reviewMode: 'AI_CONTENT_ONLY' }, steps: [{ delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Idea', body: 'Hi' }] }] });
     await engine.submitCampaign(s.workspaceId, campaignId, ACTOR);
     await engine.approveCampaign(s.workspaceId, campaignId, ACTOR);
     await engine.startCampaign(s.workspaceId, campaignId, ACTOR);
@@ -271,10 +296,12 @@ describe('AI personalization engine', () => {
     await engine.prepareOutbound(s.workspaceId, o.id);
     await engine.tick(new Date(MONDAY_10_UTC.getTime() + 60_000));
     expect(await db().outboundEmail.count({ where: { campaignId } })).toBe(1);
-    // Retry succeeds; reviewMode NONE + passing checks → auto-approved → released → sent once
+    // Retry succeeds, then explicit approval releases the draft to the fake mailbox.
     ai.on('PERSONALIZATION', honestWriter());
     const ok = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
-    expect(ok.status).toBe('APPROVED');
+    expect(ok.status).toBe('GENERATED');
+    expect(fakes.gmail.sent).toHaveLength(0);
+    await pz.approvePersonalizations(s.workspaceId, [ok.id!], ACTOR);
     expect((await db().outboundEmail.findUniqueOrThrow({ where: { id: o.id } })).status).toBe('PENDING');
     await engine.prepareOutbound(s.workspaceId, o.id);
     expect((await engine.sendOutbound(s.workspaceId, o.id, MONDAY_10_UTC)).outcome).toBe('sent');
@@ -382,5 +409,131 @@ describe('prompt builder, preview, versions and test email', () => {
     const ok = await a.agent.get(`/api/v1/w/${a.workspaceId}/campaigns/${campaignId}/personalizations`);
     expect(ok.status).toBe(200);
     expect(ok.body.data[0].warnings).toBeInstanceOf(Array);
+  });
+});
+
+describe('synthetic Outvexa pilot', () => {
+  it('takes a website and an imported prospect through evidence-backed draft evaluation', async () => {
+    const s = await createUserSession('pilot-owner@example.test');
+    const { campaignId, steps, list } = await setup(s, { leads: [] });
+    const companyWebsite = 'https://studio-a.example/';
+    const senderWebsite = 'https://content-studio.example/';
+    const content = 'Asha Fixture is founder of Studio A. Studio A publishes a weekly podcast on hiring designers.';
+    for (const url of [senderWebsite, companyWebsite, companyWebsite.slice(0, -1)]) {
+      fakes.fetcher.pages.set(url, { url: url === senderWebsite ? senderWebsite : companyWebsite, status: 200, title: 'Fixture homepage', text: url === senderWebsite ? 'The studio offers Podcast repurposing for consulting teams.' : content, links: [] });
+    }
+    ai.on('FACT_EXTRACTION', (req) => {
+      const evidenceId = /evidenceId="([^"]+)"/.exec(req.user)![1];
+      const sender = req.user.includes(senderWebsite);
+      const facts = sender
+        ? [{ category: 'service', text: 'Podcast repurposing', quote: 'The studio offers Podcast repurposing for consulting teams.' }]
+        : [{ category: 'professional_identity', text: 'Asha Fixture is founder of Studio A.', quote: 'Asha Fixture is founder of Studio A.' },
+          { category: 'content', text: 'Studio A publishes a weekly podcast on hiring designers.', quote: 'Studio A publishes a weekly podcast on hiring designers.' }];
+      return { summary: '', industry: null, services: sender ? ['Podcast repurposing'] : [], audience: null, businessModel: null, claims: facts.map((fact) => ({ ...fact, evidenceId, confidence: 0.95 })) };
+    });
+    const intake = await ingestBusinessWebsite(s.workspaceId, { website: senderWebsite }, ACTOR);
+    expect(intake).toMatchObject({ draftKnowledge: { active: false }, supportedClaims: [{ sourceUrl: senderWebsite, sourceTitle: 'Fixture homepage', approvalStatus: 'DRAFT' }] });
+    if (!('draftServices' in intake) || !intake.draftServices?.[0]) throw new Error('Website offer draft missing');
+    const offerVersion = intake.draftServices[0].versionId;
+    const reviseInput = { draftId: intake.draftKnowledge.id, sourceIds: intake.sourceDocuments.map((doc) => doc.id), field: 'description' as const, instruction: 'Describe the podcast service.' };
+    ai.on('FACT_EXTRACTION', (req) => {
+      const evidenceId = /evidenceId="([^"]+)"/.exec(req.user)![1];
+      return { summary: '', industry: null, services: [], audience: null, businessModel: null,
+        claims: [{ evidenceId, text: 'The studio offers podcast repurposing for consulting teams.', category: 'service',
+          quote: 'The studio offers Podcast repurposing for consulting teams.', confidence: 0.95 }] };
+    });
+    const proposal = await proposeWebsiteRevision(s.workspaceId, reviseInput, ACTOR);
+    expect(await db().aiConfigVersion.findUniqueOrThrow({ where: { id: proposal.id } })).toMatchObject({ isActive: false });
+    await studio.activateConfigVersion(s.workspaceId, proposal.id, ACTOR);
+    expect((await studio.getConfig(s.workspaceId, 'KNOWLEDGE')).data.description).toBe(proposal.value);
+    ai.on('FACT_EXTRACTION', (req) => {
+      const evidenceId = /evidenceId="([^"]+)"/.exec(req.user)![1];
+      const [identity, observation] = content.split('. ');
+      return { summary: '', industry: null, services: [], audience: null, businessModel: null,
+        claims: [{ category: 'professional_identity', text: identity, quote: identity }, { category: 'content', text: observation, quote: observation }]
+          .map((fact) => ({ ...fact, evidenceId, confidence: 0.95 })) };
+    });
+    await business.approveServiceVersion(s.workspaceId, offerVersion, ACTOR);
+    await business.setCampaignServices(s.workspaceId, campaignId, [{ serviceVersionId: offerVersion }], ACTOR);
+    await expect(ingestBusinessWebsite(s.workspaceId, { website: senderWebsite }, ACTOR)).resolves.toMatchObject({ unchanged: true });
+
+    const csv = 'Email,Full Name,Company,Company Website,Country,YouTube URL,Additional Notes\nasha@studio-a.example,Asha Fixture,Studio A,https://studio-a.example/,US,https://www.youtube.com/@fixture,Synthetic test row';
+    const csrf = { 'x-csrf-token': s.csrf };
+    const up = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports`).set(csrf).attach('file', Buffer.from(csv), 'synthetic-pilot.csv');
+    expect(up.status).toBe(201);
+    const start = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports/${up.body.importId}/start`).set(csrf)
+      .send({ mapping: up.body.suggestedMapping, targetListId: list.id, lawfulBasis: 'LEGITIMATE_INTEREST' });
+    expect(start.status).toBe(202);
+    const imported = await processImport(s.workspaceId, up.body.importId);
+    expect(imported).toMatchObject({ imported: 1, errors: 0 });
+    const lead = await db().lead.findFirstOrThrow({ where: { workspaceId: s.workspaceId, email: 'asha@studio-a.example' } });
+    expect(lead).toMatchObject({ firstName: 'Asha', lastName: 'Fixture', customFields: { youtubeUrl: 'https://www.youtube.com/@fixture', notes: 'Synthetic test row' } });
+
+    await db().lead.update({ where: { id: lead.id }, data: { emailVerificationStatus: 'VALID', emailVerifiedAt: new Date() } });
+    const started = performance.now();
+    const research = await runResearch(s.workspaceId, { leadId: lead.id });
+    const researchMs = Math.round(performance.now() - started);
+    expect(research).toMatchObject({ claims: 2 });
+    const report = await getReport(s.workspaceId, research!.reportId);
+    expect(report.error).toContain('No permitted transcript was retrieved');
+    expect(report.coverage).toMatchObject({ researchCompleteness: 'PARTIAL', supportedClaims: 0 });
+    for (const claim of report.claims) await setClaimStatus(s.workspaceId, claim.id, 'SUPPORTED', ACTOR);
+    await expect(runResearch(s.workspaceId, { leadId: lead.id })).resolves.toMatchObject({ reportId: research?.reportId, reused: true });
+
+    const claims = await supportedClaims(s.workspaceId, lead.id);
+    const observation = claims.find((claim) => claim.category === 'content')!;
+    const identity = claims.find((claim) => claim.category === 'professional_identity')!;
+    ai.on('LEAD_QUALIFICATION', () => ({
+      score: 88, reasons: [{ criterion: 'Active content publisher', met: true, explanation: 'Publishes a weekly podcast.', claimIds: [observation.id] }],
+      risks: [], identityAssessment: { status: 'VERIFIED', evidenceClaimIds: [identity.id], reason: 'The official site names the founder.' },
+    }));
+    await expect(scoreLead(s.workspaceId, lead.id)).resolves.toMatchObject({ qualified: true, identityVerified: true });
+
+    const other = await createUserSession('pilot-other@example.test');
+    await expect(supportedClaims(other.workspaceId, lead.id)).rejects.toMatchObject({ status: 404 });
+    const peer = await addLead(s.workspaceId, 'peer@studio-a.example', { companyId: lead.companyId! });
+    await expect(supportedClaims(s.workspaceId, peer.id)).resolves.toEqual([]);
+
+    const previousProvider = process.env.OUTVEXA_EMBEDDING_PROVIDER;
+    const previousModel = process.env.OUTVEXA_EMBEDDING_MODEL;
+    process.env.OUTVEXA_EMBEDDING_PROVIDER = 'OPENAI';
+    process.env.OUTVEXA_EMBEDDING_MODEL = 'fixture-embedding';
+    await addAiProvider(s.workspaceId, 'OPENAI', 'fixture-embedding');
+    setMemoryFetchForTests(async (_url, options) => {
+      const { input } = JSON.parse(String(options?.body)) as { input: string[] };
+      return Response.json({ data: input.map((_text, index) => ({ index, embedding: [1, ...Array(1535).fill(0)] })), usage: { total_tokens: 12 } });
+    });
+    try {
+      await indexMemoryItems(s.workspaceId, [{ entityType: 'RESEARCH_CLAIM', entityId: observation.id, content: observation.text }]);
+      await expect(searchMemory(s.workspaceId, 'weekly podcast', { RESEARCH_CLAIM: [observation.id] })).resolves.toMatchObject([{ entityId: observation.id }]);
+      await expect(searchMemory(other.workspaceId, 'weekly podcast', { RESEARCH_CLAIM: [observation.id] })).resolves.toEqual([]);
+    } finally {
+      resetMemoryFetchForTests();
+      if (previousProvider === undefined) delete process.env.OUTVEXA_EMBEDDING_PROVIDER; else process.env.OUTVEXA_EMBEDDING_PROVIDER = previousProvider;
+      if (previousModel === undefined) delete process.env.OUTVEXA_EMBEDDING_MODEL; else process.env.OUTVEXA_EMBEDDING_MODEL = previousModel;
+    }
+
+    ai.on('PERSONALIZATION', honestWriter((req) => req.user.includes('Rewrite once') ? {} : {
+      body: 'Hi Asha,\n\nCongrats on your Series B. Would a short podcast repurposing outline be useful?',
+    })).on('FACT_CHECK', factChecker);
+    const result = await pz.generateForLead(s.workspaceId, campaignId, lead.id, steps[0].id);
+    expect(result.status, JSON.stringify(result)).toBe('GENERATED');
+    expect(personalizationCalls()).toHaveLength(2);
+    const row = await db().leadPersonalization.findUniqueOrThrow({ where: { id: result.id! } });
+    expect(row).toMatchObject({ approvedAt: null, scoreExplanation: { rewriteAttempted: true, decision: 'PASS' } });
+    expect(row.usedClaimIds).toContain(observation.id);
+    const usage = await db().aiExecution.aggregate({ where: { workspaceId: s.workspaceId }, _sum: { inputTokens: true, outputTokens: true, costUsd: true }, _count: true });
+    const embeddingUsage = await db().usageRecord.aggregate({ where: { workspaceId: s.workspaceId, kind: 'embedding' }, _sum: { units: true, costUsd: true }, _count: true });
+    await expect(overview(s.workspaceId)).resolves.toMatchObject({ intelligence: {
+      completedResearch: 1, failedResearch: 0, evaluatedDrafts: 1, passedDrafts: 1, modelTokens: 9600, embeddingTokens: 24,
+    } });
+    await setClaimStatus(s.workspaceId, observation.id, 'REJECTED', ACTOR);
+    expect(await db().leadPersonalization.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ status: 'BLOCKED', qualityPassed: false });
+    expect(await supportedClaims(s.workspaceId, lead.id)).toEqual([expect.objectContaining({ id: identity.id })]);
+    expect(await db().intelligenceEmbedding.count({
+      where: { workspaceId: s.workspaceId, entityId: observation.id, isCurrent: true },
+    })).toBe(0);
+    process.stdout.write(JSON.stringify({ pilot: 'synthetic', imported: 1, verified: 1, researched: 1, qualified: 1, held: 0,
+      generated: 1, passed: 1, revised: 1, researchMs, evidenceBackedClaims: claims.length, supportedDraftClaims: row.usedClaimIds.length, usage, embeddingUsage }) + '\n');
   });
 });
