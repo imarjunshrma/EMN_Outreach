@@ -759,7 +759,10 @@ async function applyTracking(workspaceId: string, outboundId: string, text: stri
 
 /** Counts accepted sends plus in-flight reservations so concurrent workers cannot overshoot a cap. */
 async function reservedSendCountSince(where: Prisma.OutboundEmailWhereInput, since: Date) {
-  return db().outboundEmail.count({ where: { ...where, OR: [{ status: 'SENT', sentAt: { gte: since } }, { status: { in: ['SENDING', 'UNCERTAIN'] }, sendStartedAt: { gte: since } }] } });
+  const campaignCount = await db().outboundEmail.count({ where: { ...where, OR: [{ status: 'SENT', sentAt: { gte: since } }, { status: { in: ['SENDING', 'UNCERTAIN'] }, sendStartedAt: { gte: since } }] } });
+  if (where.campaignId) return campaignCount;
+  const { countWarmupReservations } = await import('./warmup.js');
+  return campaignCount + await countWarmupReservations(String(where.workspaceId), since, where.emailAccountId as string | { in: string[] } | undefined);
 }
 
 async function maybePauseMailboxAfterProviderErrors(workspaceId: string, accountId: string, now: Date, error: string) {

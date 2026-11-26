@@ -52,6 +52,7 @@ for (const name of Object.keys(HANDLERS) as QueueName[]) {
 
 // Repeatable schedules (idempotent upserts)
 async function schedules() {
+  await queue(QUEUES.scheduler).upsertJobScheduler('warmup-tick', { every: 60_000 }, { name: 'warmup.tick', data: {} });
   await queue(QUEUES.scheduler).upsertJobScheduler('campaign-tick', { every: 60_000 }, { name: 'campaign.tick', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('mailbox-poll', { every: 120_000 }, { name: 'sync.pollAll', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('graph-renew', { every: 12 * 3600_000 }, { name: 'graph.renew', data: {} });

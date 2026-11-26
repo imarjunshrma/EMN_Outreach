@@ -15,7 +15,7 @@ export default function MailboxHealth() {
   const readinessSave = useWsMutation<{ id: string; readiness: any }, any>((v) => ({ path: `/email-accounts/${v.id}`, method: 'PATCH', body: { readiness: v.readiness } }), { success: 'Mailbox readiness settings saved' });
   return (
     <>
-      <PageHeader actions={<Link className="underline" href={`/w/${ws}/mailbox-health/reconciliation`}>Send reconciliation</Link>} title="Mailbox health" subtitle="Connection, authentication, sync and sending signals for every mailbox (last 30 days). Only measured data is shown — inbox placement is not estimated." />
+      <PageHeader actions={<><Link className="mr-4 underline" href={`/w/${ws}/warmup`}>Warm-up</Link><Link className="underline" href={`/w/${ws}/mailbox-health/reconciliation`}>Send reconciliation</Link></>} title="Mailbox health" subtitle="Connection, authentication, sync and sending signals for every mailbox (last 30 days). Only measured data is shown — inbox placement is not estimated." />
       <QueryView q={q} isEmpty={(d) => d.length === 0} empty={<Empty title="No mailboxes connected" action={<Link className="underline" href={`/w/${ws}/email-accounts`}>Connect a mailbox</Link>} />}>
         {(rows) => (
           <div className="card p-2"><Table head={['Mailbox', 'Health', 'Status', 'SMTP', 'IMAP', 'Auth', 'Last sync', 'Last accepted (30d)', 'Last received', 'Readiness cap', 'Accepted today / hour', 'Accepted 30d', 'Bounce %', 'Complaints in replies', 'Tracking (all dates)', 'Domain', 'Last error and history']}>

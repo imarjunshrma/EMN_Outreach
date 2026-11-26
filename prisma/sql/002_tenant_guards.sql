@@ -98,6 +98,8 @@ DROP TRIGGER IF EXISTS emn_tenant_guard ON "Task";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "Task" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('leadId', 'Lead', 'conversationId', 'Conversation');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "TrackedLink";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "TrackedLink" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('outboundEmailId', 'OutboundEmail');
+DROP TRIGGER IF EXISTS emn_tenant_guard ON "WarmupProgram";
+CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "WarmupProgram" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('emailAccountId', 'EmailAccount');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "WebhookDelivery";
 CREATE TRIGGER emn_tenant_guard BEFORE INSERT OR UPDATE ON "WebhookDelivery" FOR EACH ROW EXECUTE FUNCTION emn_same_workspace('webhookId', 'Webhook');
 DROP TRIGGER IF EXISTS emn_tenant_guard ON "WorkflowRun";

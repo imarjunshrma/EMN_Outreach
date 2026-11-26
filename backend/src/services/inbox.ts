@@ -41,6 +41,7 @@ export async function ingestMessages(workspaceId: string, accountId: string, mes
       const exists = await db().emailMessage.findUnique({ where: { emailAccountId_providerMessageId: { emailAccountId: accountId, providerMessageId: m.providerMessageId } } });
       if (exists && !exists.ingestPending) { stats.skipped++; continue; }
       const outbound = m.from.address === account.emailAddress;
+      if (await (await import('./warmup.js')).ingestWarmup(workspaceId, accountId, m, outbound)) { stats.skipped++; continue; }
 
       // Our own campaign email seen in the Sent folder: link provider ids, don't duplicate.
       if (!exists && outbound && m.outboundId) {

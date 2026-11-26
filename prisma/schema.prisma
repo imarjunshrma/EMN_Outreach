@@ -457,6 +457,7 @@ model Session {
 }
 
 model Workspace {
+  warmupPrograms WarmupProgram[]
   id              String    @id @default(uuid()) @db.Uuid
   // Owning tenant. Every workspace-scoped record inherits its tenant through this column; it can never change (DB trigger).
   organizationId  String    @db.Uuid
@@ -683,6 +684,7 @@ model DomainHealthCheck {
 }
 
 model EmailAccount {
+  warmupPrograms WarmupProgram[]
   id                     String             @id @default(uuid()) @db.Uuid
   workspaceId            String             @db.Uuid
   domainId               String?            @db.Uuid
@@ -3158,4 +3160,89 @@ model IntelligenceEmbedding {
   @@unique([workspaceId, entityType, entityId, embeddingModel, contentHash])
   @@index([workspaceId, entityType, isCurrent])
   @@index([workspaceId, entityType, entityId, isCurrent])
+}
+
+enum WarmupStatus {
+  READY_TO_START
+  ACTIVE
+  PAUSED
+  HEALTH_HOLD
+  AUTH_REQUIRED
+  COMPLETED
+  STOPPED
+}
+
+enum WarmupSubmission {
+  RESERVED
+  ACCEPTED
+  REJECTED
+  UNCERTAIN
+  NOT_SUBMITTED
+}
+
+model WarmupProgram {
+  id             String       @id @default(uuid()) @db.Uuid
+  workspaceId    String       @db.Uuid
+  emailAccountId String       @db.Uuid
+  status         WarmupStatus @default(READY_TO_START)
+  config         Json
+  dailyTarget    Int
+  nextAt         DateTime?    @db.Timestamptz(3)
+  startedAt      DateTime?    @db.Timestamptz(3)
+  finishedAt     DateTime?    @db.Timestamptz(3)
+  progressedAt   DateTime?    @db.Timestamptz(3)
+  reason         String?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  emailAccount   EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  recipients     WarmupRecipient[]
+  messages       WarmupMessage[]
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, emailAccountId])
+  @@index([status, nextAt])
+}
+
+model WarmupRecipient {
+  id              String        @id @default(uuid()) @db.Uuid
+  workspaceId     String        @db.Uuid
+  programId       String        @db.Uuid
+  email           String
+  evidence        String
+  authorizedBy    String        @db.Uuid
+  authorizedAt    DateTime      @default(now()) @db.Timestamptz(3)
+  dailyLimit      Int           @default(1)
+  enabled         Boolean       @default(true)
+  program         WarmupProgram @relation(fields: [workspaceId, programId], references: [workspaceId, id], onDelete: Cascade)
+  messages        WarmupMessage[]
+
+  @@unique([programId, email])
+  @@unique([workspaceId, programId, id])
+}
+
+model WarmupMessage {
+  id                String           @id @default(uuid()) @db.Uuid
+  workspaceId       String           @db.Uuid
+  emailAccountId    String           @db.Uuid
+  programId         String           @db.Uuid
+  recipientId       String           @db.Uuid
+  status            WarmupSubmission @default(RESERVED)
+  internetMessageId String           @unique
+  providerMessageId String?
+  providerThreadId  String?
+  reason            String?
+  reservedAt        DateTime         @default(now()) @db.Timestamptz(3)
+  acceptedAt        DateTime?        @db.Timestamptz(3)
+  bouncedAt         DateTime?        @db.Timestamptz(3)
+  hardBounce        Boolean          @default(false)
+  repliedAt         DateTime?        @db.Timestamptz(3)
+  resolvedAt        DateTime?        @db.Timestamptz(3)
+  reconciliation    Json?
+  program           WarmupProgram    @relation(fields: [workspaceId, programId], references: [workspaceId, id], onDelete: Cascade)
+  recipient         WarmupRecipient  @relation(fields: [workspaceId, programId, recipientId], references: [workspaceId, programId, id], onDelete: Cascade)
+
+  @@index([workspaceId, emailAccountId, reservedAt])
+  @@index([programId, reservedAt])
+  @@index([status, reservedAt])
 }

@@ -1,3 +1,4 @@
+import * as warmup from '../services/warmup.js';
 import { listUncertainSends, ReconciliationSchema, resolveUncertainSend } from '../services/send-reconciliation.js';
 import { emptyTracking, trackingTotals } from '../services/tracking-analytics.js';
 import { z } from 'zod';
@@ -137,3 +138,14 @@ route({ method: 'put', path: '/w/:workspaceId/webhooks/:id', tag: 'Webhooks', su
 route({ method: 'delete', path: '/w/:workspaceId/webhooks/:id', tag: 'Webhooks', summary: 'Delete a webhook', auth: 'workspace', role: 'ADMIN', handler: async (c) => { await webhooks.deleteWebhook(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
 route({ method: 'post', path: '/w/:workspaceId/webhooks/:id/test', tag: 'Webhooks', summary: 'Send a test delivery', auth: 'workspace', role: 'ADMIN', status: 202, handler: (c) => webhooks.sendTest(c.workspaceId, c.params.id) });
 route({ method: 'get', path: '/w/:workspaceId/webhooks/:id/deliveries', tag: 'Webhooks', summary: 'Recent deliveries', auth: 'workspace', role: 'ADMIN', handler: (c) => webhooks.listDeliveries(c.workspaceId, c.params.id) });
+
+route({ method: 'get', path: '/w/:workspaceId/warmup', tag: 'Mailboxes', summary: 'Warm-up overview', auth: 'workspace', role: 'ADMIN', handler: c => warmup.warmupOverview(c.workspaceId) });
+route({ method: 'post', path: '/w/:workspaceId/warmup/mailboxes/:id', tag: 'Mailboxes', summary: 'Enroll a mailbox for controlled warm-up', auth: 'workspace', role: 'ADMIN', body: warmup.WarmupConfig, handler: c => warmup.enrollWarmup(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'get', path: '/w/:workspaceId/warmup/:id', tag: 'Mailboxes', summary: 'Warm-up program and activity', auth: 'workspace', role: 'ADMIN', handler: c => warmup.warmupDetail(c.workspaceId, c.params.id) });
+route({ method: 'post', path: '/w/:workspaceId/warmup/:id/actions', tag: 'Mailboxes', summary: 'Change warm-up lifecycle', auth: 'workspace', role: 'ADMIN', body: warmup.WarmupAction, handler: c => warmup.changeWarmup(c.workspaceId, c.params.id, c.body.action, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/warmup/:id/recipients', tag: 'Mailboxes', summary: 'Authorize controlled warm-up recipients', auth: 'workspace', role: 'ADMIN', body: warmup.WarmupRecipients, handler: c => warmup.addWarmupRecipients(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'delete', path: '/w/:workspaceId/warmup/:id/recipients/:recipientId', tag: 'Mailboxes', summary: 'Withdraw warm-up recipient authorization', auth: 'workspace', role: 'ADMIN', handler: c => warmup.revokeWarmupRecipient(c.workspaceId, c.params.id, c.params.recipientId, c.actor) });
+
+route({ method: 'post', path: '/w/:workspaceId/warmup/:id/messages/:messageId/reconcile', tag: 'Mailboxes', summary: 'Review an ambiguous warm-up submission without resending', auth: 'workspace', role: 'ADMIN', body: ReconciliationSchema, handler: c => warmup.resolveWarmupSubmission(c.workspaceId, c.params.id, c.params.messageId, c.actor, c.body) });
+
+route({ method: 'patch', path: '/w/:workspaceId/warmup/:id', tag: 'Mailboxes', summary: 'Edit a warm-up program before it starts', auth: 'workspace', role: 'ADMIN', body: warmup.WarmupConfig, handler: c => warmup.updateWarmupConfig(c.workspaceId, c.params.id, c.body, c.actor) });
