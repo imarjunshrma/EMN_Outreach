@@ -9,3 +9,6 @@ process.env.ENCRYPTION_ACTIVE_KEY = '2';
 process.env.STORAGE_ROOT = '/tmp/emn-test-storage';
 process.env.LOG_LEVEL = 'silent';
 process.env.QUEUE_PREFIX = 'emntest';
+// Production-grade authorization defaults for tests must not inherit permissive local .env flags.
+process.env.PLATFORM_MFA_REQUIRED = 'true';
+process.env.AI_SUBSCRIPTION_ACCESS = 'owners';

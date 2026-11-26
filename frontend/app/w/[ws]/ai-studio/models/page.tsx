@@ -41,7 +41,7 @@ export default function Models() {
                   <td><Input className="w-24" type="number" value={e.maxInputTokens ?? ''} placeholder="none" onChange={(x) => set('maxInputTokens', x.target.value === '' ? null : Number(x.target.value))} /></td>
                   <td><Input className="w-24" type="number" value={e.maxOutputTokens} onChange={(x) => set('maxOutputTokens', Number(x.target.value))} /></td>
                   <td><Input className="w-24" type="number" value={e.monthlyBudgetUsd ?? ''} placeholder="none" onChange={(x) => set('monthlyBudgetUsd', x.target.value === '' ? null : Number(x.target.value))} /></td>
-                  <td>{edits[r.task] && <Button variant="secondary" onClick={() => route.mutate({ task: r.task, provider: e.provider, model: e.model, fallbackProvider: e.fallbackProvider || null, fallbackModel: e.fallbackModel || null, temperature: e.temperature ?? null, maxOutputTokens: Number(e.maxOutputTokens), maxInputTokens: e.maxInputTokens ?? null, monthlyBudgetUsd: e.monthlyBudgetUsd === null || e.monthlyBudgetUsd === undefined ? null : Number(e.monthlyBudgetUsd) })}>Save</Button>}</td>
+                  <td>{edits[r.task] && <Button variant="secondary" onClick={() => route.mutate({ task: r.task, provider: e.provider, model: e.model, useWorkspaceDefault: !!e.useWorkspaceDefault, fallbackProvider: e.fallbackProvider || null, fallbackModel: e.fallbackModel || null, temperature: e.temperature ?? null, maxOutputTokens: Number(e.maxOutputTokens), maxInputTokens: e.maxInputTokens ?? null, monthlyBudgetUsd: e.monthlyBudgetUsd === null || e.monthlyBudgetUsd === undefined ? null : Number(e.monthlyBudgetUsd) })}>Save</Button>}</td>
                 </tr>
               );
             })}</Table>}

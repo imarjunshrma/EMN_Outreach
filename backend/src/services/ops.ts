@@ -4,7 +4,7 @@ import { adapters } from '../core/container.js';
 import { createHmac } from 'node:crypto';
 import { safeEqual } from '../core/crypto.js';
 import { AppError, NotFound } from '../core/errors.js';
-import { audit, publish, type Actor } from '../core/audit.js';
+import { audit, publish, notifyWorkspace, WORKER_ACTOR, type Actor } from '../core/audit.js';
 import { ALL_QUEUE_NAMES, enqueue, queue, QUEUES, type QueueName } from '../core/queues.js';
 import { assertKeyBelongsTo, store } from '../core/storage.js';
 import { startOfDayIn } from '../../../shared/src/schedule.js';
@@ -66,10 +66,28 @@ export async function runDomainCheck(workspaceId: string, domainId: string) {
   const r = await checkDomain(d.name, d.dkimSelectors, adapters().dns);
   const critical = r.issues.some((i) => i.severity === 'critical');
   const health = critical ? 'CRITICAL' : r.issues.length ? 'WARNING' : 'HEALTHY';
-  await db().$transaction([
-    db().domainHealthCheck.create({ data: { workspaceId, domainId, spfStatus: r.spf.status, spfRecord: r.spf.record, dkimStatus: r.dkim.status, dkimResults: r.dkim.results as Prisma.InputJsonValue, dmarcStatus: r.dmarc.status, dmarcRecord: r.dmarc.record, mxStatus: r.mx.status, mxRecords: r.mx.records as Prisma.InputJsonValue, issues: r.issues as Prisma.InputJsonValue } }),
-    db().domain.update({ where: { id: domainId }, data: { spfStatus: r.spf.status, dkimStatus: r.dkim.status, dmarcStatus: r.dmarc.status, mxStatus: r.mx.status, healthStatus: health, lastCheckedAt: new Date() } }),
-  ]);
+  const authentication = { SPF: r.spf.status, DKIM: r.dkim.status, DMARC: r.dmarc.status };
+  const failures = Object.keys(authentication).filter(key => authentication[key as keyof typeof authentication] === 'FAIL');
+  const healthy = Object.values(authentication).every(status => status === 'PASS');
+  const sendingHoldReason = failures.length ? `Domain authentication failed: ${failures.join(', ')}` : healthy ? null : d.sendingHoldReason;
+  const changed = await db().$transaction(async tx => {
+    const updated = await tx.domain.updateMany({ where: { id: domainId, workspaceId, lastCheckedAt: d.lastCheckedAt }, data: {
+      spfStatus: r.spf.status, dkimStatus: r.dkim.status, dmarcStatus: r.dmarc.status,
+      mxStatus: r.mx.status, healthStatus: health, lastCheckedAt: new Date(), sendingHoldReason,
+    } });
+    if (!updated.count) return false;
+    await tx.domainHealthCheck.create({ data: { workspaceId, domainId, spfStatus: r.spf.status, spfRecord: r.spf.record, dkimStatus: r.dkim.status, dkimResults: r.dkim.results as Prisma.InputJsonValue, dmarcStatus: r.dmarc.status, dmarcRecord: r.dmarc.record, mxStatus: r.mx.status, mxRecords: r.mx.records as Prisma.InputJsonValue, issues: r.issues as Prisma.InputJsonValue } });
+    return true;
+  });
+  if (changed && sendingHoldReason !== d.sendingHoldReason) {
+    await audit(workspaceId, WORKER_ACTOR, sendingHoldReason ? 'domain.sending_held' : 'domain.sending_recovered',
+      { type: 'domain', id: domainId }, { authentication, reason: sendingHoldReason });
+    await notifyWorkspace(workspaceId, 'ADMIN', {
+      type: sendingHoldReason ? 'domain.sending_held' : 'domain.sending_recovered',
+      title: sendingHoldReason ? `Sending held for ${d.name}` : `Authentication recovered for ${d.name}`,
+      body: sendingHoldReason ?? 'A fresh DNS check passed SPF, DKIM and DMARC.', link: `/domains/${domainId}`,
+    });
+  }
   await publish(workspaceId, 'domain.checked', { domainId, health });
   return r;
 }

@@ -46,8 +46,10 @@ function AI_WORKFLOW_HANDLERS(): Record<string, Handler> {
 
 /** Job handlers by queue and job name. Every handler is idempotent. */
 export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
-  [QUEUES.scheduler]: {
+  [QUEUES.warmup]: {
     'warmup.tick': async () => (await import('../../backend/src/services/warmup.js')).tickWarmup(),
+  },
+  [QUEUES.scheduler]: {
     'campaign.tick': async (j) => engine.tick(new Date(), j.data.campaignId ? s(j.data.campaignId) : undefined),
   },
   [QUEUES.prepare]: {

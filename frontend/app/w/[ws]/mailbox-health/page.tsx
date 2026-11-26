@@ -25,6 +25,8 @@ export default function MailboxHealth() {
                 <td className="td"><Badge color={a.health.status === 'Healthy' ? 'green' : a.health.status === 'Warning' || a.health.status === 'Disconnected' ? 'red' : a.health.status === 'Paused' ? 'gray' : 'yellow'}>{a.health.status}</Badge>{a.health.reasons.length > 0 && <div className="mt-1 max-w-xs text-xs text-slate-500" title={a.health.reasons.join('\n')}>{a.health.reasons[0]}</div>}</td>
                 <td className="td"><Badge>{a.status}</Badge>
                   {a.statusReason && <div className="text-xs text-slate-600">{a.statusReason}</div>}
+                  {a.policy?.blocked && <div className="text-xs text-red-700">{a.policy.reason}</div>}
+                  {a.policy?.target != null && <div className="text-xs text-slate-600">Campaign policy ceiling {a.policy.target}/day · {a.policy.reason}</div>}
                   {a.autoPauseUntil && <div className="text-xs text-slate-600">Cooldown until {fmtDate(a.autoPauseUntil)}</div>}
                 </td>
                 <td className="td text-xs">{a.provider === 'SMTP_IMAP' ? <Badge color={a.smtpConnection?.ok ? 'green' : a.smtpConnection ? 'red' : 'gray'}>{a.smtpConnection?.ok ? 'OK' : a.smtpConnection ? 'Error' : 'Not tested'}</Badge> : 'OAuth'}</td>

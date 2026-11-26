@@ -70,7 +70,7 @@ export async function createUserSession(email: string, role: 'OWNER' | 'ADMIN' |
 }
 
 export async function addMailbox(workspaceId: string, email = 'sender@ourco.com', provider: 'GMAIL' | 'MICROSOFT' = 'GMAIL', overrides: Record<string, unknown> = {}) {
-  return db().emailAccount.create({
+  const account = await db().emailAccount.create({
     data: {
       workspaceId, provider, emailAddress: email, displayName: 'Arjun', dailySendLimit: 50, minSecondsBetweenSends: 0,
       sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5, 6, 7], start: '00:00', end: '23:59', timezone: 'UTC' },
@@ -78,6 +78,9 @@ export async function addMailbox(workspaceId: string, email = 'sender@ourco.com'
       ...overrides,
     },
   });
+  const domain = email.split('@').at(-1)?.toLowerCase();
+  if (domain) await db().domain.upsert({ where: { workspaceId_name: { workspaceId, name: domain } }, update: {}, create: { workspaceId, name: domain, spfStatus: 'PASS', dkimStatus: 'PASS', dmarcStatus: 'PASS', lastCheckedAt: new Date() } });
+  return account;
 }
 
 export async function addAiProvider(workspaceId: string, provider: 'ANTHROPIC' | 'OPENAI' = 'ANTHROPIC', model = 'claude-haiku-5-5') {

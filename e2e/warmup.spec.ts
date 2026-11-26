@@ -5,7 +5,10 @@ test('opens the controlled warm-up module without enrolling a mailbox', async ({
   await login(page);
   const base = await workspaceBase(page);
   await page.goto(base + '/mailbox-health');
-  await page.getByRole('link', { name: 'Warm-up', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Warm-up', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Email warm-up' })).toBeVisible();
+  await expect(page).toHaveURL(base + '/warmup');
+  await page.reload();
   await expect(page.getByRole('heading', { name: 'Email warm-up' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Enroll a mailbox' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enroll mailbox' })).toBeDisabled();

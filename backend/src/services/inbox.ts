@@ -1,3 +1,4 @@
+import { bounceFailureClass } from './deliverability.js';
 import { z } from 'zod';
 import sanitizeHtml from 'sanitize-html';
 import { randomUUID } from 'node:crypto';
@@ -115,13 +116,13 @@ async function handleBounce(workspaceId: string, accountId: string, messageId: s
   const recipient = b.recipient ?? ob?.toAddress ?? null;
   const lead = recipient ? await db().lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: recipient } } }) : null;
   if (!lead && !ob) return;
+  const failureClass = bounceFailureClass(b.status);
   const type = b.hard ? 'BOUNCED_HARD' : 'BOUNCED_SOFT';
   const key = `${type}:${ob?.id ?? lead?.id}:${b.hard ? '' : messageId}`;
-  await db().emailEvent.upsert({ where: { dedupeKey: key }, update: {}, create: { workspaceId, type, leadId: lead?.id ?? null, campaignId: ob?.campaignId, enrollmentId: ob?.enrollmentId, outboundEmailId: ob?.id, emailMessageId: messageId, emailAccountId: accountId, dedupeKey: key, metadata: { status: b.status, recipient } } });
+  await db().emailEvent.upsert({ where: { dedupeKey: key }, update: {}, create: { workspaceId, type, leadId: lead?.id ?? null, campaignId: ob?.campaignId, enrollmentId: ob?.enrollmentId, outboundEmailId: ob?.id, emailMessageId: messageId, emailAccountId: accountId, dedupeKey: key, metadata: { status: b.status, failureClass, recipient } } });
   await maybeAutoPauseMailboxOnBounce(workspaceId, accountId);
   if (!lead) return;
-  const soft = b.hard ? 0 : await db().emailEvent.count({ where: { leadId: lead.id, type: 'BOUNCED_SOFT' } });
-  if (b.hard || soft >= 3) {
+  if (b.hard && failureClass === 'INVALID_RECIPIENT') {
     await addSuppression(workspaceId, { type: 'EMAIL', value: lead.emailNormalized, reason: 'HARD_BOUNCE', source: 'bounce', note: b.status ?? undefined }, WORKER_ACTOR);
     if (lead.status !== 'BOUNCED') await db().lead.update({ where: { id: lead.id }, data: { status: 'BOUNCED', emailVerificationStatus: 'INVALID', statusChanges: { create: { workspaceId, fromStatus: lead.status, toStatus: 'BOUNCED', reason: `bounce ${b.status ?? ''}` } } } });
     await emitEvent(workspaceId, 'email.bounced', `bounce:${lead.id}`, { leadId: lead.id, status: b.status, campaignId: ob?.campaignId });
@@ -135,7 +136,7 @@ async function maybeAutoPauseMailboxOnBounce(workspaceId: string, accountId: str
   if (!account) return;
   const { mailboxBounceRisk } = await import('./accounts.js');
   const risk = await mailboxBounceRisk(workspaceId, accountId, account.sendingWindow, ws.settings);
-  if (!risk) return;
+  if (!risk || risk.bounced < 2) return;
   const { sent, bounced, threshold, windowDays, cooldownMinutes } = risk;
   const reason = `Auto-paused: hard-bounce rate ${(bounced / sent * 100).toFixed(1)}% reached the configured threshold ${threshold}% over the last ${windowDays} days (${bounced}/${sent}).`;
   const r = await db().emailAccount.updateMany({ where: { id: accountId, workspaceId, status: 'CONNECTED' }, data: { status: 'PAUSED', statusReason: reason, autoPauseUntil: new Date(Date.now() + cooldownMinutes * 60_000) } });

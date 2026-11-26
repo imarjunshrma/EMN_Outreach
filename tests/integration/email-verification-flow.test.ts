@@ -204,3 +204,17 @@ describe('CSV helpers', () => {
     expect(() => chooseEmailColumn(['Name'], 'missing')).toThrow(/not found/);
   });
 });
+
+
+it('returns a compact verification summary in the Leads table and keeps details on the record', async () => {
+  const s = await createUserSession('lead-summary@example.test');
+  const lead = await db().lead.create({ data: { workspaceId: s.workspaceId, email: 'recipient@example.test', emailNormalized: 'recipient@example.test', emailVerificationStatus: 'CATCH_ALL', tags: [] } });
+  await db().emailVerification.create({ data: { workspaceId: s.workspaceId, leadId: lead.id, email: lead.email, provider: 'first-party-dns', result: 'CATCH_ALL', rawResult: '{"state":"COMPLETE"}', details: { state: 'COMPLETE' } } });
+  const path = `/api/v1/w/${s.workspaceId}/leads`;
+  const list = await s.agent.get(path);
+  expect(list.status).toBe(200);
+  expect(list.body.data[0]).toMatchObject({ emailVerificationStatus: 'CATCH_ALL', verifications: [{ provider: 'first-party-dns', result: 'CATCH_ALL' }] });
+  expect(list.body.data[0].verifications[0]).not.toHaveProperty('rawResult');
+  const detail = await s.agent.get(`${path}/${lead.id}`);
+  expect(detail.body.verifications[0].details).toMatchObject({ state: 'COMPLETE' });
+});

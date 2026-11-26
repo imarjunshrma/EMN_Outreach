@@ -19,7 +19,7 @@ test('every v1.2 screen renders without errors (integrated navigation)', async (
   const base = await workspaceBase(page);
   const screens: Array<[string, RegExp]> = [
     ['/copilot', /AI Copilot/], ['/reply-assistant', /Reply assistant/], ['/workflows', /Workflow builder/], ['/workflows/new', /New workflow/],
-    ['/billing', /Plan & billing/], ['/reports', /Reports & alerts/], ['/enrichment', /Verification & enrichment/], ['/mailbox-health', /Mailbox health/],
+    ['/billing', /Plan & billing/], ['/reports', /Reports & alerts/], ['/enrichment', /Verification & enrichment/], ['/mailbox-health', /Mailbox health/], ['/intelligent-sending', /Intelligent Sending/],
     ['/settings/policies', /Security & AI policies/], ['/settings/account', /My account/], ['/settings/api-keys', /API keys/], ['/pipeline', /CRM pipeline/],
     ['/inbox', /Unified inbox/], ['/leads', /Leads/], ['/campaigns', /Campaigns/], ['/domains', /Sending domains/], ['', /Good (morning|afternoon|evening)/],
   ];

@@ -641,6 +641,7 @@ model Domain {
   mxStatus      DnsCheckStatus @default(UNKNOWN)
   dkimSelectors String[]       @default(["google", "selector1", "selector2", "default"])
   lastCheckedAt DateTime?      @db.Timestamptz(3)
+  sendingHoldReason String?
   createdAt     DateTime       @default(now()) @db.Timestamptz(3)
   updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
 
@@ -1493,6 +1494,7 @@ model Campaign {
   sendingWindow        Json // {days:[1,2,3,4,5], start:"09:00", end:"17:00"}
   dailyNewLeadLimit    Int            @default(25)
   dailySendLimit       Int            @default(100)
+  sendingPolicy        Json?
   stopOnReply          Boolean        @default(true)
   stopOnAutoReply      Boolean        @default(false)
   reviewMode           ReviewMode     @default(AI_CONTENT_ONLY)

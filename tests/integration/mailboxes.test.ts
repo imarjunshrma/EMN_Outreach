@@ -93,7 +93,7 @@ describe('mailboxes', () => {
     const start = await s.agent.post(`${root}/oauth/google`).set(auth).send({});
     const callback = await s.agent.get(`/api/v1/oauth/callback/google?code=c1&state=${stateOf(start.body.url)}`);
     expect(callback.headers.location).toContain(`/w/${s.workspaceId}/email-accounts?connected=`);
-    expect(await db().emailAccount.findUnique({ where: { id: mailbox.id } })).toMatchObject({ operatorPaused: true, status: 'PAUSED' });
+    expect(await db().emailAccount.findUnique({ where: { id: mailbox.id } })).toMatchObject({ operatorPaused: true, status: 'PAUSED', domainId: expect.any(String) });
     const results = await Promise.all([s.agent.post(`${base}/resume`).set(auth).send({}), s.agent.post(`${base}/resume`).set(auth).send({})]);
     expect(results.map(r => r.status).sort()).toEqual([200, 409]);
     expect(await db().emailAccount.findUnique({ where: { id: mailbox.id } })).toMatchObject({ operatorPaused: false, status: 'CONNECTED' });

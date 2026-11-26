@@ -1,3 +1,4 @@
+import { mailboxSendingPolicy } from './deliverability.js';
 import { emptyTracking, trackingTotals } from './tracking-analytics.js';
 import { Resolver } from 'node:dns/promises';
 import { z } from 'zod';
@@ -125,7 +126,7 @@ export function providerRegistry() { return PROVIDER_REGISTRY; }
 
 /** Mailbox health in one view (only data we actually have — no inferred inbox placement). */
 export async function mailboxHealth(workspaceId: string) {
-  const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
+  const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true, timezone: true } });
   const readinessManagementEnabled = readSettings(workspace?.settings).mailboxReadinessManagement;
   const since = new Date(Date.now() - 30 * 86400_000);
   const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, autoPauseUntil: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true, connectionConfig: true } });
@@ -142,7 +143,7 @@ export async function mailboxHealth(workspaceId: string) {
     }),
     trackingTotals(workspaceId, 'mailbox'),
   ]);
-  return accounts.map((a) => {
+  return Promise.all(accounts.map(async (a) => {
     const n = (t: string) => events.find((e) => e.emailAccountId === a.id && e.type === t)?._count._all ?? 0;
     const sent = n('SENT');
     const dom = domains.find((d) => a.emailAddress.endsWith(`@${d.name}`));
@@ -157,9 +158,11 @@ export async function mailboxHealth(workspaceId: string) {
     const connectionHealth = privateConfig?.connectionHealth;
     const rawReadiness = privateConfig?.readiness;
     const readiness = rawReadiness ? { ...rawReadiness, globallyEnabled: readinessManagementEnabled, effectiveDailyCap: readinessManagementEnabled && rawReadiness.enabled === true ? Math.min(a.dailySendLimit, Number(rawReadiness.currentDailyCap ?? 5)) : a.dailySendLimit } : null;
-    return { ...publicAccount, lifetimeTracking: tracking.get(a.id) ?? emptyTracking, readiness, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: mailboxUsage?.sentToday ?? 0, sentLastHour: mailboxUsage?.sentLastHour ?? 0, hourlyLimit, lastAcceptedAt,
+    const mailboxZone = (mailboxUsage?.sendingWindow as { timezone?: string } | undefined)?.timezone ?? workspace?.timezone ?? 'UTC';
+    const policy = await mailboxSendingPolicy(workspaceId, a.id, a.emailAddress, mailboxZone, new Date());
+    return { ...publicAccount, policy, lifetimeTracking: tracking.get(a.id) ?? emptyTracking, readiness, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: mailboxUsage?.sentToday ?? 0, sentLastHour: mailboxUsage?.sentLastHour ?? 0, hourlyLimit, lastAcceptedAt,
       softBounces30d: n('BOUNCED_SOFT'), failed30d: n('FAILED'), healthHistory: history.filter(event => event.entityId === a.id).slice(0, 5), quota: { dailyLimit: readiness?.effectiveDailyCap ?? a.dailySendLimit, source: 'mailbox configuration and readiness cap (provider quotas are not exposed)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
-  });
+  }));
 }
 
 export async function dnsProviderConnected(workspaceId: string) { return !!(await getSecret(workspaceId, 'cloudflare')); }

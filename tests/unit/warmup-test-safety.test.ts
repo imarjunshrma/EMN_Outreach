@@ -15,11 +15,11 @@ describe('local warm-up startup fence', () => {
   });
 
   it.each([
+    { OUTVEXA_WARMUP_TEST: undefined, OUTVEXA_EMAIL_MODE: undefined },
     { DATABASE_URL: db.replace('emn_outvexa_warmup_local', 'emn_dev') },
     { DATABASE_MIGRATION_URL: db.replace('127.0.0.1', 'production.example') },
     { NODE_ENV: 'production' },
     { OUTVEXA_EMAIL_MODE: 'real' },
-    { OUTVEXA_WARMUP_TEST: undefined, OUTVEXA_EMAIL_MODE: undefined },
     { REDIS_URL: 'redis://127.0.0.1:6379/0' },
     { QUEUE_PREFIX: 'emn' },
     { GOOGLE_CLIENT_ID: 'fixture' },
@@ -29,17 +29,8 @@ describe('local warm-up startup fence', () => {
   });
 });
 
-describe('original development warm-up profile', () => {
-  const original = {
-    ...isolated, NODE_ENV: 'development', EMN_ENV_FILE: '/repo/.env', OUTVEXA_WARMUP_TEST: 'dev',
+it('rejects the retired mock mode on the shared development database', () => {
+  expect(() => assertWarmupTestSafety({ ...isolated, OUTVEXA_WARMUP_TEST: 'dev',
     DATABASE_URL: 'postgresql://fixture@127.0.0.1:5432/emn_dev',
-    DATABASE_MIGRATION_URL: 'postgresql://fixture@127.0.0.1:5432/emn_dev',
-    REDIS_URL: 'redis://127.0.0.1:6379/0', QUEUE_PREFIX: 'emn-warmup-dev-test',
-  };
-  it('accepts the original stack only with the dedicated mock override', () => {
-    expect(() => assertWarmupTestSafety(original)).not.toThrow();
-    expect(() => assertWarmupTestSafety({ ...original, OUTVEXA_EMAIL_MODE: 'real' })).toThrow();
-    expect(() => assertWarmupTestSafety({ ...original, QUEUE_PREFIX: 'emn' })).toThrow();
-    expect(() => assertWarmupTestSafety({ ...original, EMN_ENV_FILE: '/repo/.env.warmup-local' })).toThrow();
-  });
+  })).toThrow();
 });

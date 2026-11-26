@@ -494,7 +494,14 @@ export const RouteUpdateSchema = z.object({
 });
 
 export async function listRoutes(workspaceId: string) {
-  return db().aiModelRoute.findMany({ where: { workspaceId }, orderBy: { task: 'asc' } });
+  const [routes, defaultName] = await Promise.all([
+    db().aiModelRoute.findMany({ where: { workspaceId }, orderBy: { task: 'asc' } }),
+    workspaceDefaultProvider(workspaceId),
+  ]);
+  if (!defaultName) return routes;
+  const provider = await db().aiProvider.findUnique({ where: { workspaceId_provider: { workspaceId, provider: defaultName } }, select: { provider: true, defaultModel: true } });
+  if (!provider) return routes;
+  return routes.map(route => route.useWorkspaceDefault ? { ...route, provider: provider.provider, model: provider.defaultModel } : route);
 }
 
 export async function updateRoute(workspaceId: string, input: z.infer<typeof RouteUpdateSchema>, actor: Actor) {

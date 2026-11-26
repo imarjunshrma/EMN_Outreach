@@ -1,4 +1,3 @@
-import { WARMUP_DEV_WORKSPACE } from '../core/warmup-test-safety.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
@@ -67,7 +66,7 @@ export async function warmupOverview(workspaceId: string) {
 export async function warmupDetail(workspaceId: string, id: string) {
   const program = await db().warmupProgram.findFirst({ where: { workspaceId, id }, include: {
     emailAccount: { select: { ...mailboxView, operatorPaused: true, domain: { select: {
-      spfStatus: true, dkimStatus: true, dmarcStatus: true, healthStatus: true,
+      id: true, name: true, lastCheckedAt: true, spfStatus: true, dkimStatus: true, dmarcStatus: true, healthStatus: true,
     } } } }, recipients: { orderBy: { authorizedAt: 'desc' } },
   } });
   if (!program) throw NotFound('Warm-up program');
@@ -148,10 +147,15 @@ async function healthIssue(workspaceId: string, mailboxId: string, now: Date) {
   const account = await db().emailAccount.findFirstOrThrow({ where: { id: mailboxId, workspaceId }, include: { domain: true } });
   if (account.status === 'NEEDS_REAUTH') return { status: 'AUTH_REQUIRED' as const, reason: 'Mailbox must be reauthorized.' };
   if (account.status !== 'CONNECTED' || account.operatorPaused || (account.autoPauseUntil && account.autoPauseUntil > now)) return { status: 'HEALTH_HOLD' as const, reason: 'Mailbox is held or disconnected.' };
-  if (account.domain?.spfStatus !== 'PASS' || account.domain.dkimStatus !== 'PASS' || account.domain.dmarcStatus !== 'PASS' ||
-      !account.domain.lastCheckedAt || now.getTime() - account.domain.lastCheckedAt.getTime() > 3 * DAY) {
-    return { status: 'HEALTH_HOLD' as const, reason: 'Refresh domain checks and confirm SPF, DKIM and DMARC before sending.' };
+  const domain = account.domain;
+  const hold = (reason: string) => ({ status: 'HEALTH_HOLD' as const, reason });
+  if (!domain) return hold('This mailbox has no linked sending domain. Reconnect the mailbox or check its domain under Mailboxes.');
+  if (!domain.lastCheckedAt || now.getTime() - domain.lastCheckedAt.getTime() > 3 * DAY) {
+    return hold(`Run Check now for ${domain.name}. Warm-up requires a domain check from the past three days.`);
   }
+  const checks = [['SPF', domain.spfStatus], ['DKIM', domain.dkimStatus], ['DMARC', domain.dmarcStatus]];
+  const issues = checks.filter(([, status]) => status !== 'PASS');
+  if (issues.length) return hold(`${domain.name}: ${issues.map(([name, status]) => `${name} ${status}`).join(', ')}. Correct the DNS records or DKIM selector, then run Check now.`);
   const workspace = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
   if (readSettings(workspace.settings).emergencyPause || await mailboxBounceRisk(workspaceId, mailboxId, account.sendingWindow, workspace.settings)) {
     return { status: 'HEALTH_HOLD' as const, reason: 'Workspace emergency pause or mailbox bounce safety threshold.' };
@@ -207,12 +211,8 @@ export function evaluateProgress(config: WarmupConfig, target: number, elapsedDa
   return 'OBSERVE';
 }
 
-function warmupWorkspaceScope(): Prisma.WarmupProgramWhereInput {
-  return { workspace: { slug: process.env.OUTVEXA_WARMUP_TEST === 'dev' ? WARMUP_DEV_WORKSPACE : { not: WARMUP_DEV_WORKSPACE } } };
-}
-
-export async function processWarmup(id: string, now = new Date()) {
-  const p = await db().warmupProgram.findFirst({ where: { ...warmupWorkspaceScope(), id, status: 'ACTIVE', nextAt: { lte: now } }, include: { emailAccount: true, workspace: true } });
+export async function processWarmup(workspaceId: string, id: string, now = new Date()) {
+  const p = await db().warmupProgram.findFirst({ where: { workspaceId, id, status: 'ACTIVE', nextAt: { lte: now } }, include: { emailAccount: true, workspace: true } });
   if (!p) return;
   if (await db().warmupMessage.count({ where: { programId: id, status: 'RESERVED' } })) return;
   const c = WarmupConfig.parse(p.config);
@@ -346,13 +346,13 @@ export async function processWarmup(id: string, now = new Date()) {
 }
 
 export async function tickWarmup(now = new Date()) {
-  const stale = await db().warmupMessage.findMany({ where: { program: warmupWorkspaceScope(), status: 'RESERVED', reservedAt: { lt: new Date(+now - 15 * 60_000) } }, take: 100 });
+  const stale = await db().warmupMessage.findMany({ where: { status: 'RESERVED', reservedAt: { lt: new Date(+now - 15 * 60_000) } }, take: 100 });
   for (const row of stale) {
     const result = await db().warmupMessage.updateMany({ where: { id: row.id, status: 'RESERVED' }, data: { status: 'UNCERTAIN', reason: 'Interrupted after reservation; confirm through the provider.' } });
     if (result.count) await transition(row.programId, row.workspaceId, 'HEALTH_HOLD', 'Interrupted submission requires reconciliation.');
   }
-  const due = await db().warmupProgram.findMany({ where: { ...warmupWorkspaceScope(), status: 'ACTIVE', nextAt: { lte: now } }, orderBy: { nextAt: 'asc' }, select: { id: true }, take: 100 });
-  return Promise.allSettled(due.map(row => processWarmup(row.id, now)));
+  const due = await db().warmupProgram.findMany({ where: { status: 'ACTIVE', nextAt: { lte: now } }, orderBy: { nextAt: 'asc' }, select: { id: true, workspaceId: true }, take: 100 });
+  return Promise.allSettled(due.map(row => processWarmup(row.workspaceId, row.id, now)));
 }
 
 export async function ingestWarmup(workspaceId: string, emailAccountId: string, m: NormalizedMessage, outbound: boolean) {

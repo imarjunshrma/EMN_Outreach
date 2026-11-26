@@ -10,7 +10,7 @@ import { Badge, Button, Empty, Field, Input, Modal, PageHeader, Pagination, Quer
 
 import { LEAD_STATUSES, LAWFUL_BASES as BASES } from '@/lib/constants';
 
-interface Lead { id: string; email: string; firstName: string | null; lastName: string | null; title: string | null; status: string; emailVerificationStatus: string; verifications?: Array<{ rawResult: string | null; provider: string; createdAt: string }>;  currentScore: number | null; qualificationReview?: string | null; qualificationReviewReason?: string | null; country: string | null; createdAt: string; company: { id: string; name: string } | null; source: { name: string } | null; tags: string[] }
+interface Lead { id: string; email: string; firstName: string | null; lastName: string | null; title: string | null; status: string; emailVerificationStatus: string; verifications?: Array<{ provider: string; createdAt: string }>;  currentScore: number | null; qualificationReview?: string | null; qualificationReviewReason?: string | null; country: string | null; createdAt: string; company: { id: string; name: string } | null; source: { name: string } | null; tags: string[] }
 
 export default function LeadsPage() {
   const ws = useWs();
@@ -87,8 +87,8 @@ export default function LeadsPage() {
                   <td className="td"><Link className="font-medium text-brand-700 hover:underline" href={`/w/${ws}/leads/${l.id}`}>{fullName(l)}</Link><div className="text-xs text-slate-500">{l.email}</div>{l.title && <div className="text-xs text-slate-400">{l.title}</div>}</td>
                   <td className="td">{l.company ? <Link className="hover:underline" href={`/w/${ws}/companies/${l.company.id}`}>{l.company.name}</Link> : '—'}</td>
                   <td className="td"><Badge>{l.status}</Badge></td>
-                  <td className="td"><Badge>{l.emailVerificationStatus}</Badge>
-                    {l.verifications?.[0] && <div className="text-xs text-slate-500">{l.verifications[0].rawResult ?? l.verifications[0].provider} · {fmtDay(l.verifications[0].createdAt)}</div>}
+                  <td className="td"><Badge>{l.emailVerificationStatus.replaceAll('_', ' ')}</Badge>
+                    {l.verifications?.[0] && <div className="text-xs text-slate-500">{l.verifications[0].provider === 'first-party-dns' ? 'Outvexa verification' : l.verifications[0].provider} · {fmtDay(l.verifications[0].createdAt)}</div>}
                   </td>
                   <td className="td">{l.currentScore ?? '—'}{l.qualificationReview && <div title={l.qualificationReviewReason ?? undefined}><Badge>{l.qualificationReview.replaceAll('_', ' ')}</Badge></div>}</td>
                   <td className="td">{l.country ?? '—'}</td>

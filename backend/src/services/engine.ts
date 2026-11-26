@@ -1,3 +1,4 @@
+import { CampaignSendingPolicy, domainAuthenticationReason, mailboxSendingPolicy, providerFailureClass } from './deliverability.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { db, Prisma } from '../core/db.js';
@@ -33,6 +34,7 @@ export const CampaignSettingsSchema = z.object({
   sendingWindow: SendingWindowSchema.default(DEFAULT_WINDOW),
   dailyNewLeadLimit: z.number().int().min(1).max(1000).default(25),
   dailySendLimit: z.number().int().min(1).max(5000).default(100),
+  sendingPolicy: CampaignSendingPolicy.nullable().optional(),
   stopOnReply: z.boolean().default(true),
   stopOnAutoReply: z.boolean().default(false),
   reviewMode: z.enum(['NONE', 'AI_CONTENT_ONLY', 'ALL']).default('AI_CONTENT_ONLY'),
@@ -82,7 +84,7 @@ export async function createCampaign(workspaceId: string, input: z.infer<typeof 
   ];
   const c = await db().campaign.create({
     data: {
-      workspaceId, ...input, sendingWindow: input.sendingWindow as Prisma.InputJsonValue,
+      workspaceId, ...input, sendingPolicy: input.sendingPolicy ?? Prisma.DbNull, sendingWindow: input.sendingWindow as Prisma.InputJsonValue,
       sequence: { create: { workspaceId, steps: { create: defaultSteps.map((step) => ({ workspaceId, order: step.order, delayDays: step.delayDays, threadMode: step.threadMode, variants: { create: { workspaceId, label: 'A', subject: step.subject, body: step.body } } })) } } },
     },
   });
@@ -101,7 +103,7 @@ async function invalidateApproval(campaignId: string) {
 export async function updateCampaign(workspaceId: string, id: string, input: Partial<z.infer<typeof CampaignSettingsSchema>>, actor: Actor) {
   const c = await getCampaignOr404(workspaceId, id);
   if (!EDITABLE_STATES.includes(c.status)) throw new AppError('CAMPAIGN_STATE', `Cannot edit a ${c.status} campaign`, 409);
-  await db().campaign.update({ where: { id }, data: { ...input, sendingWindow: input.sendingWindow as Prisma.InputJsonValue | undefined } });
+  await db().campaign.update({ where: { id }, data: { ...input, sendingPolicy: input.sendingPolicy === null ? Prisma.DbNull : input.sendingPolicy, sendingWindow: input.sendingWindow as Prisma.InputJsonValue | undefined } });
   await invalidateApproval(id);
   await audit(workspaceId, actor, 'campaign.updated', { type: 'campaign', id }, { fields: Object.keys(input) });
   return getCampaign(workspaceId, id);
@@ -195,6 +197,7 @@ type FullCampaign = Awaited<ReturnType<typeof getCampaign>>;
 export function contentHash(c: FullCampaign): string {
   const payload = {
     settings: [c.name, c.timezone, c.useLeadTimezone, c.sendingWindow, c.dailyNewLeadLimit, c.dailySendLimit, c.stopOnReply, c.stopOnAutoReply, c.reviewMode, c.requireFactCheck, c.trackOpens, c.trackClicks, c.requireVerifiedEmail, c.minLeadScore, c.maxBounceRatePct, c.maxComplaints],
+    ...(c.sendingPolicy ? { sendingPolicy: CampaignSendingPolicy.parse(c.sendingPolicy) } : {}),
     steps: c.sequence?.steps.map((s) => [s.order, s.delayDays, s.threadMode, s.personalizationMode, s.condition, s.aiInstructions, s.variants.map((v) => [v.label, v.subject, v.body, v.weight, v.aiInstructions])]),
     ai: [c.aiProfileId, c.icpId, c.aiOverrides, c.maxAiCostPerLeadUsd?.toString() ?? null, c.usePregeneratedAi, c.scheduledStartAt?.toISOString() ?? null],
     lists: c.lists.map((l) => l.listId).sort(),
@@ -504,10 +507,17 @@ export async function tick(now = new Date(), onlyCampaignId?: string) {
   return summary;
 }
 
+async function eligibleCampaignMailboxes(c: FullCampaign) {
+  const connected = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
+    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false);
+  const domainRows = await db().domain.findMany({ where: { workspaceId: c.workspaceId }, select: { name: true, spfStatus: true, dkimStatus: true, dmarcStatus: true, lastCheckedAt: true, sendingHoldReason: true } });
+  const domains = new Map(domainRows.map(domain => [domain.name.toLowerCase(), domain]));
+  return connected.filter(({ emailAccount }) => !domainAuthenticationReason(domains.get(emailAccount.emailAddress.split('@').at(-1)?.toLowerCase() ?? '') ?? null));
+}
+
 async function enrollNew(c: FullCampaign, now: Date): Promise<number> {
   if (c.scheduledStartAt && c.scheduledStartAt > now) return 0; // campaign scheduled to start later
-  const accounts = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
-    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false).map(a => a.emailAccountId);
+  const accounts = (await eligibleCampaignMailboxes(c)).map(account => account.emailAccountId);
   if (!accounts.length) return 0;
   const enrolledToday = await db().sequenceEnrollment.count({ where: { campaignId: c.id, enrolledAt: { gte: startOfDayIn(c.timezone, now) } } });
   let capacity = c.dailyNewLeadLimit - enrolledToday;
@@ -826,11 +836,12 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   if (o.status === 'UNCERTAIN' && o.resolvedAt) return { outcome: 'skipped', detail: 'operator decision recorded' };
   if (['SENT', 'CANCELLED', 'SKIPPED', 'FAILED', 'PENDING', 'AWAITING_APPROVAL'].includes(o.status)) return { outcome: 'skipped', detail: o.status };
 
-  const recordSubmission = (submission: string, retryDecision: string, status?: number, suppressed = false) => audit(
+  const recordSubmission = (submission: string, retryDecision: string, status?: number, suppressed = false, code?: string) => audit(
     workspaceId, WORKER_ACTOR, 'outbound.submission_decision', { type: 'outbound_email', id: o.id }, {
       provider: o.emailAccount.provider, mailboxId: o.emailAccountId, campaignId: o.campaignId,
       prospectId: o.enrollment.leadId, attempt: o.attempts + (o.status === 'QUEUED' ? 1 : 0),
-      submission, providerStatus: status, retryDecision, failoverDecision: 'DISABLED', suppressed, mailboxStatus: o.emailAccount.status,
+      submission, providerStatus: status, providerCode: code && /^[A-Za-z_][A-Za-z_0-9.-]{0,49}$/.test(code) ? code : undefined,
+      failureClass: submission === 'ACCEPTED' ? undefined : providerFailureClass(status, code), retryDecision, failoverDecision: 'DISABLED', suppressed, mailboxStatus: o.emailAccount.status,
     },
   ).catch(() => logger.warn({ workspaceId, outboundId }, 'could not persist submission audit'));
 
@@ -941,6 +952,12 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     const readiness = (o.emailAccount.connectionConfig as { readiness?: { enabled?: boolean; currentDailyCap?: number } } | null)?.readiness;
     const useReadiness = globalAutomation.mailboxReadinessManagement && readiness?.enabled === true;
     const effectiveMailboxLimit = useReadiness ? Math.min(o.emailAccount.dailySendLimit, readiness.currentDailyCap ?? 5) : o.emailAccount.dailySendLimit;
+    const dayZone = accWin.timezone ?? ws.timezone;
+    const protection = await mailboxSendingPolicy(workspaceId, o.emailAccountId, o.emailAccount.emailAddress, dayZone, now);
+    if (protection.blocked) return defer(new Date(+now + 15 * 60_000), protection.reason ?? 'Mailbox protection hold');
+    if (protection.target !== null && protection.target < effectiveMailboxLimit && accountToday >= protection.target) {
+      return defer(nextWindowStart(startOfNextDayIn(dayZone, now), window, zone), protection.reason ?? 'Shared mailbox sending policy reached');
+    }
     if (accountToday >= effectiveMailboxLimit) return defer(nextWindowStart(startOfNextDayIn(accWin.timezone ?? ws.timezone, now), window, zone), useReadiness ? 'mailbox readiness daily cap reached' : 'mailbox daily limit reached');
     const campaignToday = await reservedSendCountSince({ workspaceId, campaignId: o.campaignId }, startOfDayIn(o.campaign.timezone, now));
     if (campaignToday >= o.campaign.dailySendLimit) return defer(nextWindowStart(startOfNextDayIn(o.campaign.timezone, now), window, zone), 'campaign daily limit reached');
@@ -1023,7 +1040,7 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     if (status === 401 || (err instanceof Error && /invalid_grant/.test(err.message))) {
       await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'QUEUED', lastError: err.message.slice(0, 500) } });
       await markNeedsReauth(workspaceId, o.emailAccountId, err.message);
-      await recordSubmission(submission, 'REAUTHORIZE', status);
+      await recordSubmission(submission, 'REAUTHORIZE', status, false, err.code);
       return { outcome: 'deferred', detail: 'mailbox needs re-authorization' };
     }
     if (status && status >= 400 && status < 500 && status !== 429 && status !== 408) {
@@ -1034,7 +1051,7 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
       await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'FAILED', lastError: err.message.slice(0, 500) } });
       await db().emailEvent.create({ data: { workspaceId, type: 'FAILED', leadId: lead.id, campaignId: o.campaignId, enrollmentId: o.enrollmentId, outboundEmailId: o.id, emailAccountId: o.emailAccountId, metadata: { error: err.message.slice(0, 300) } } });
       await db().sequenceEnrollment.updateMany({ where: { id: o.enrollmentId, status: 'ACTIVE' }, data: { status: 'FAILED', stopReason: err.message.slice(0, 200) } });
-      await recordSubmission(submission, 'BLOCKED', status, suppressed);
+      await recordSubmission(submission, 'BLOCKED', status, suppressed, err.code);
       return { outcome: 'failed', detail: err.message };
     }
     if (submission === 'DEFINITELY_NOT_SENT' || (submission === 'PROVIDER_REJECTED' && err.retryable)) {
@@ -1050,11 +1067,11 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
         }
       });
       await maybePauseMailboxAfterProviderErrors(workspaceId, o.emailAccountId, now, err.message);
-      await recordSubmission(submission, exhausted ? 'EXHAUSTED' : 'SAME_MAILBOX', status);
+      await recordSubmission(submission, exhausted ? 'EXHAUSTED' : 'SAME_MAILBOX', status, false, err.code);
       if (exhausted) return { outcome: 'failed', detail: message };
       throw e;
     }
-    await recordSubmission(submission, 'RECONCILE_ONLY', status);
+    await recordSubmission(submission, 'RECONCILE_ONLY', status, false, err.code);
     // The provider may have accepted the message. Subsequent jobs can reconcile but cannot resubmit.
     await holdUncertain(workspaceId, o.id, o.enrollmentId, now);
     if (status === undefined || status === 408 || status === 429 || status >= 500) await maybePauseMailboxAfterProviderErrors(workspaceId, o.emailAccountId, now, (err as Error).message);
@@ -1114,8 +1131,7 @@ export async function enrollLeadManually(workspaceId: string, campaignId: string
   if (!lead) throw NotFound('Lead');
   const ok = await canContact(workspaceId, lead, { requireVerified: c.requireVerifiedEmail, icpId: c.icpId });
   if (!ok.allowed) throw new AppError('NOT_ELIGIBLE', `Lead not eligible: ${ok.reasons.join('; ')}`, 400);
-  const accounts = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
-    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false);
+  const accounts = await eligibleCampaignMailboxes(c);
   if (!accounts.length) throw new AppError('CAMPAIGN_INVALID', 'No connected mailbox on this campaign', 400);
   const existing = await db().sequenceEnrollment.findUnique({ where: { campaignId_leadId: { campaignId, leadId } } });
   if (existing) return 'already enrolled';

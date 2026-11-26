@@ -160,7 +160,7 @@ export async function listLeads(workspaceId: string, q: z.infer<typeof LeadQuery
   const orderBy: Prisma.LeadOrderByWithRelationInput =
     q.sort === 'score' ? { currentScore: { sort: 'desc', nulls: 'last' } } : q.sort === 'lastRepliedAt' ? { lastRepliedAt: { sort: 'desc', nulls: 'last' } } : q.sort === 'email' ? { emailNormalized: 'asc' } : { createdAt: 'desc' };
   const [items, total] = await Promise.all([
-    db().lead.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { company: { select: { id: true, name: true, domain: true } }, source: { select: { name: true } }, verifications: { where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 1, select: { result: true, rawResult: true, provider: true, createdAt: true } } } }),
+    db().lead.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { company: { select: { id: true, name: true, domain: true } }, source: { select: { name: true } }, verifications: { where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 1, select: { result: true, provider: true, createdAt: true } } } }),
     db().lead.count({ where }),
   ]);
   return { items, total };

@@ -72,7 +72,7 @@ export async function oauthCallback(provider: OAuthProvider, code: string, state
   const account = await db().$transaction(async tx => {
     const account = await tx.emailAccount.upsert({
       where: { workspaceId_emailAddress: { workspaceId: ws.id, emailAddress: email } },
-      update: { provider, providerAccountId: t.profile.providerAccountId, displayName: t.profile.displayName, lastError: null },
+      update: { provider, domainId: domain.id, providerAccountId: t.profile.providerAccountId, displayName: t.profile.displayName, lastError: null },
       create: { workspaceId: ws.id, provider, emailAddress: email, displayName: t.profile.displayName, providerAccountId: t.profile.providerAccountId, domainId: domain.id, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
     });
     const cred = { encryptedAccessToken: encryptSecret(t.accessToken), encryptedRefreshToken: encryptSecret(refreshToken), accessTokenExpiresAt: t.expiresAt, scopes: t.scopes };
@@ -144,7 +144,7 @@ export async function connectSmtp(workspaceId: string, input: z.infer<typeof Smt
   const account = await db().$transaction(async tx => {
     const account = await tx.emailAccount.upsert({
       where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } },
-      update: { provider: 'SMTP_IMAP', lastError: null, lastErrorAt: null, connectionConfig: persistedConfig, displayName: input.displayName },
+      update: { provider: 'SMTP_IMAP', domainId: domain.id, lastError: null, lastErrorAt: null, connectionConfig: persistedConfig, displayName: input.displayName },
       create: { workspaceId, provider: 'SMTP_IMAP', emailAddress: email, displayName: input.displayName, domainId: domain.id, connectionConfig: persistedConfig, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
     });
     await tx.providerCredential.upsert({ where: { emailAccountId: account.id }, update: { encryptedPassword: encryptSecret(input.password ?? smtpPassword) }, create: { workspaceId, emailAccountId: account.id, encryptedPassword: encryptSecret(input.password ?? smtpPassword), scopes: [] } });

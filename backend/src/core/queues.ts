@@ -5,6 +5,7 @@ import { newRedis } from './redis.js';
 
 export const QUEUES = {
   scheduler: 'scheduler',
+  warmup: 'warmup',
   prepare: 'outbound-prepare',
   send: 'send',
   replySend: 'reply-send',

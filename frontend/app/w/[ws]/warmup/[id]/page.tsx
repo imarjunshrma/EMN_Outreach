@@ -1,16 +1,17 @@
 'use client';
 
+import Link from 'next/link';
 import { useState } from 'react';
 import { useParams } from 'next/navigation';
-import { useWsMutation, useWsQuery } from '@/lib/hooks';
+import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate } from '@/lib/format';
-import { Card, ConfirmButton, Field, Input, PageHeader, QueryView, Select, Table, Textarea } from '@/components/ui';
+import { Button, Card, ConfirmButton, Field, Input, PageHeader, QueryView, Select, Table, Textarea } from '@/components/ui';
 
 import { WarmupConfiguration } from '@/components/warmup-configuration';
 
 interface Program {
   status: string; reason: string | null; dailyTarget: number; nextAt: string | null;
-  emailAccount: { emailAddress: string; status: string; provider: string; domain: { spfStatus: string; dkimStatus: string; dmarcStatus: string } | null };
+  emailAccount: { emailAddress: string; status: string; provider: string; domain: { id?: string; name?: string; lastCheckedAt?: string | null; spfStatus: string; dkimStatus: string; dmarcStatus: string } | null };
   config: { subject: string; body: string; durationDays: number; maximumTarget: number; observationDays: number; window: { timezone: string; days: number[]; start: string; end: string } };
   recipients: { id: string; email: string; dailyLimit: number; enabled: boolean; authorizedAt: string }[];
   messages: { id: string; status: string; reservedAt: string; resolvedAt: string | null; reason: string | null; providerMessageId: string | null; recipient: { email: string } }[];
@@ -37,6 +38,8 @@ function Review({ programId, messageId }: { programId: string; messageId: string
 }
 
 export default function WarmupProgramPage() {
+  const ws = useWs();
+  const checkDomain = useWsMutation<string>(domainId => ({ path: `/domains/${domainId}/check`, body: {} }), { success: 'Domain check complete' });
   const { id } = useParams<{ id: string }>();
   const q = useWsQuery<Program>(`/warmup/${id}`, { refetchInterval: 30_000 });
   const [emails, setEmails] = useState('');
@@ -64,7 +67,15 @@ export default function WarmupProgramPage() {
     {p.status === 'READY_TO_START' && <WarmupConfiguration program={{ id, config: p.config }} />}
     <Card title="Authentication and mailbox health">
       <p>Connection {p.emailAccount.status} · SPF {p.emailAccount.domain?.spfStatus ?? 'UNKNOWN'} · DKIM {p.emailAccount.domain?.dkimStatus ?? 'UNKNOWN'} · DMARC {p.emailAccount.domain?.dmarcStatus ?? 'UNKNOWN'}</p>
-      <p className="text-sm">TLS and per-message alignment require provider evidence. Refresh domain checks under Domains before starting.</p>
+      <p className="text-sm">Warm-up requires SPF, DKIM and DMARC to pass on a domain check from the past three days.</p>
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <span className="text-sm">Last checked {fmtDate(p.emailAccount.domain?.lastCheckedAt ?? null)}</span>
+        {p.emailAccount.domain?.id && <Button variant="secondary" loading={checkDomain.isPending} onClick={() => {
+          const domainId = p.emailAccount.domain?.id;
+          if (domainId) checkDomain.mutate(domainId);
+        }}>Check now</Button>}
+        <Link className="text-sm underline" href={`/w/${ws}/domains${p.emailAccount.domain?.id ? `/${p.emailAccount.domain.id}` : ''}`}>Open domain settings</Link>
+      </div>
     </Card>
     <Card title="Authorized recipients">
       <Field label="Recipient addresses, separated by newline or comma"><Textarea value={emails} onChange={e => setEmails(e.target.value)} /></Field>

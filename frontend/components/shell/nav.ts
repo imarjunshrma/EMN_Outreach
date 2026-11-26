@@ -48,8 +48,10 @@ export const NAV: NavGroup[] = [
     { href: '/reports', label: 'Reports & alerts', icon: FileBarChart, keywords: 'slack scheduled' },
   ] },
   { group: 'Deliverability', items: [
+    { href: '/intelligent-sending', label: 'Intelligent Sending', icon: SlidersHorizontal, minRole: 'ADMIN' },
     { href: '/email-accounts', label: 'Mailboxes', icon: Mail, keywords: 'gmail outlook smtp connect' },
     { href: '/mailbox-health', label: 'Mailbox health', icon: HeartPulse },
+    { href: '/warmup', label: 'Warm-up', icon: MailCheck, minRole: 'ADMIN', keywords: 'mailbox health controlled sending' },
     { href: '/domains', label: 'Domains', icon: Globe, keywords: 'dns spf dkim dmarc' },
     { href: '/settings/suppression', label: 'Suppression list', icon: ShieldBan, keywords: 'unsubscribe blocklist' },
     { href: '/settings/compliance', label: 'Compliance', icon: Scale, keywords: 'countries gdpr' },

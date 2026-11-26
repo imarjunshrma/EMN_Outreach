@@ -23,6 +23,7 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
   [QUEUES.research]: 2,
   [QUEUES.imports]: 1,
   [QUEUES.scheduler]: 1,
+  [QUEUES.warmup]: 1,
   [QUEUES.webhooks]: 4,
   [QUEUES.replySend]: 2,
   [QUEUES.personalize]: 3,
@@ -35,7 +36,7 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
 const warmupTest = process.env.OUTVEXA_EMAIL_MODE === 'mock';
 const workers: Worker[] = [];
 for (const name of Object.keys(HANDLERS) as QueueName[]) {
-  if (Object.keys(HANDLERS[name]).length === 0 || (warmupTest && name !== QUEUES.scheduler)) continue;
+  if (Object.keys(HANDLERS[name]).length === 0 || (warmupTest && name !== QUEUES.warmup)) continue;
   const processJob = processorFor(name);
   const w = new Worker(name, job => {
     if (warmupTest && job.name !== 'warmup.tick') throw new Error('Only warm-up tick jobs are allowed in the local test worker.');
@@ -59,8 +60,9 @@ for (const name of Object.keys(HANDLERS) as QueueName[]) {
 
 // Repeatable schedules (idempotent upserts)
 async function schedules() {
-  await queue(QUEUES.scheduler).upsertJobScheduler('warmup-tick', { every: 60_000 }, { name: 'warmup.tick', data: {} });
+  await queue(QUEUES.warmup).upsertJobScheduler('warmup-tick', { every: 60_000 }, { name: 'warmup.tick', data: {} });
   if (warmupTest) return;
+  await queue(QUEUES.scheduler).removeJobScheduler('warmup-tick');
   await queue(QUEUES.scheduler).upsertJobScheduler('campaign-tick', { every: 60_000 }, { name: 'campaign.tick', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('mailbox-poll', { every: 120_000 }, { name: 'sync.pollAll', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('graph-renew', { every: 12 * 3600_000 }, { name: 'graph.renew', data: {} });

@@ -127,7 +127,7 @@ function SequenceBuilder({ campaign }: { campaign: any }) {
 
 function SettingsForm({ campaign }: { campaign: any }) {
   const [f, setF] = useState<any>(null);
-  useEffect(() => setF({ name: campaign.name, timezone: campaign.timezone, useLeadTimezone: campaign.useLeadTimezone, sendingWindow: campaign.sendingWindow, dailyNewLeadLimit: campaign.dailyNewLeadLimit, dailySendLimit: campaign.dailySendLimit, stopOnReply: campaign.stopOnReply, stopOnAutoReply: campaign.stopOnAutoReply, reviewMode: campaign.reviewMode, requireFactCheck: true, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, requireVerifiedEmail: campaign.requireVerifiedEmail, minLeadScore: campaign.minLeadScore, maxBounceRatePct: campaign.maxBounceRatePct, maxComplaints: campaign.maxComplaints, usePregeneratedAi: true, scheduledStartAt: campaign.scheduledStartAt }), [campaign]);
+  useEffect(() => setF({ name: campaign.name, timezone: campaign.timezone, useLeadTimezone: campaign.useLeadTimezone, sendingWindow: campaign.sendingWindow, dailyNewLeadLimit: campaign.dailyNewLeadLimit, dailySendLimit: campaign.dailySendLimit, sendingPolicy: campaign.sendingPolicy ?? null, stopOnReply: campaign.stopOnReply, stopOnAutoReply: campaign.stopOnAutoReply, reviewMode: campaign.reviewMode, requireFactCheck: true, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, requireVerifiedEmail: campaign.requireVerifiedEmail, minLeadScore: campaign.minLeadScore, maxBounceRatePct: campaign.maxBounceRatePct, maxComplaints: campaign.maxComplaints, usePregeneratedAi: true, scheduledStartAt: campaign.scheduledStartAt }), [campaign]);
   const save = useWsMutation(() => ({ path: `/campaigns/${campaign.id}`, method: 'PATCH', body: f }), { success: 'Settings saved' });
   if (!f) return null;
   const w = f.sendingWindow;
@@ -142,6 +142,23 @@ function SettingsForm({ campaign }: { campaign: any }) {
         <Field label="Window end"><Input type="time" value={w.end} onChange={(e) => setF({ ...f, sendingWindow: { ...w, end: e.target.value } })} /></Field>
         <Field label="New prospects per day"><Input type="number" min={1} value={f.dailyNewLeadLimit} onChange={(e) => setF({ ...f, dailyNewLeadLimit: Number(e.target.value) })} /></Field>
         <Field label="Max emails per day (campaign)" hint="Each mailbox also has its own daily limit"><Input type="number" min={1} value={f.dailySendLimit} onChange={(e) => setF({ ...f, dailySendLimit: Number(e.target.value) })} /></Field>
+        <Field label="Mailbox sending strategy" hint="The strictest running campaign policy applies to every campaign sharing a mailbox. Existing mailbox and workspace limits still apply.">
+          <Select value={f.sendingPolicy?.mode ?? 'STANDARD'} options={[
+            { value: 'STANDARD', label: 'Standard' }, { value: 'GRADUAL', label: 'Gradual ramp-up' }, { value: 'MANUAL', label: 'Manual cap' },
+          ]} onChange={event => {
+            const mode = event.target.value;
+            setF({ ...f, sendingPolicy: mode === 'STANDARD' ? null : mode === 'MANUAL' ? { mode, maximum: f.dailySendLimit } : {
+              mode, starting: 1, maximum: Math.min(f.dailySendLimit, 2000), increase: 1, qualifyingDays: 3, minimumDailySample: 1,
+            } });
+          }} />
+        </Field>
+        {f.sendingPolicy && <Field label="Maximum daily sends per mailbox"><Input type="number" min={1} max={2000} value={f.sendingPolicy.maximum}
+          onChange={event => setF({ ...f, sendingPolicy: { ...f.sendingPolicy, maximum: Number(event.target.value) } })} /></Field>}
+        {f.sendingPolicy?.mode === 'GRADUAL' && ([
+          ['starting', 'Starting daily target'], ['increase', 'Increase per qualifying period'],
+          ['qualifyingDays', 'Healthy sending days per increase'], ['minimumDailySample', 'Minimum accepted submissions per qualifying day'],
+        ] as const).map(([key, label]) => <Field key={key} label={label}><Input type="number" min={1} value={f.sendingPolicy[key]}
+          onChange={event => setF({ ...f, sendingPolicy: { ...f.sendingPolicy, [key]: Number(event.target.value) } })} /></Field>)}
         <Field label="Minimum lead score (optional)"><Input type="number" min={0} max={100} value={f.minLeadScore ?? ''} onChange={(e) => setF({ ...f, minLeadScore: e.target.value === '' ? null : Number(e.target.value) })} /></Field>
         <Field label="Human review"><Select value={f.reviewMode} onChange={(e) => setF({ ...f, reviewMode: e.target.value })} options={[{ value: 'AI_CONTENT_ONLY', label: 'Review AI-written emails' }, { value: 'ALL', label: 'Review every email' }, { value: 'NONE', label: 'No review (fact-check still applies)' }]} /></Field>
         <Field label="Auto-pause if bounce rate above (%)"><Input type="number" step="0.5" value={f.maxBounceRatePct} onChange={(e) => setF({ ...f, maxBounceRatePct: Number(e.target.value) })} /></Field>

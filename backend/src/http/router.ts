@@ -1,4 +1,3 @@
-import { WARMUP_DEV_WORKSPACE } from '../core/warmup-test-safety.js';
 import type { Express, Request, Response } from 'express';
 import { z, type ZodType } from 'zod';
 import { hasRole, type Role } from '../../../shared/src/permissions.js';
@@ -143,10 +142,6 @@ export function mountRoutes(app: Express) {
         let viaSupport = false;
         if (def.auth === 'workspace') {
           const wsId = String(req.params.workspaceId ?? '');
-          if (process.env.OUTVEXA_WARMUP_TEST === 'dev') {
-            const testWorkspace = await db().workspace.findUnique({ where: { slug: WARMUP_DEV_WORKSPACE }, select: { id: true } });
-            if (testWorkspace?.id !== wsId) throw new AppError('NOT_FOUND', 'Workspace not found', 404);
-          }
           const membership = res.locals.resolveMembership ? await res.locals.resolveMembership(wsId) : null;
           if (!membership) throw new AppError('NOT_FOUND', 'Workspace not found', 404); // never reveal existence
           ctx.workspaceId = wsId;
