@@ -73,7 +73,7 @@ export function checkServiceEligibility(service: ServiceEligibilityRule, prospec
       if (rule.missingBehavior === 'HOLD') hold(`${rule.code}_FACT_MISSING`, `${rule.explanation} Required prospect information is missing.`);
       continue;
     }
-    let matches = false;
+    let matches;
     if (['LT', 'LTE', 'GT', 'GTE'].includes(rule.operator)) {
       const a = actual as number; const b = rule.values[0] as number;
       matches = rule.operator === 'LT' ? a < b : rule.operator === 'LTE' ? a <= b : rule.operator === 'GT' ? a > b : a >= b;

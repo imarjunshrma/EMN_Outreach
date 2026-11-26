@@ -138,7 +138,7 @@ async function main() {
   const filePath = path.resolve(args.file!);
   const raw = await readFile(filePath, 'utf8');
   let json: unknown;
-  try { json = JSON.parse(raw); } catch (e) { throw new Error(`Seed file is not valid JSON: ${(e as Error).message}`); }
+  try { json = JSON.parse(raw); } catch (e) { throw new Error(`Seed file is not valid JSON: ${(e as Error).message}`, { cause: e }); }
   const parsed = SeedSchema.safeParse(json);
   if (!parsed.success) throw new Error(`Seed file does not match the expected EMN seed structure: ${parsed.error.issues.slice(0, 8).map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   const seed = parsed.data;

@@ -8,7 +8,6 @@ import { Badge, Button, Card, ErrorState, Field, Input, Loading, Modal, Notice, 
 import { useToast } from '@/components/toast';
 import { usePlatform } from '@/components/platform/shell';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 type Staff = { id: string; email: string; name: string; platformRole: string; mfaEnabled: boolean; status: string; lastLoginAt: string | null };
 type Data = { staff: Staff[]; roles: Array<{ role: string; permissions: string[] }> };
 

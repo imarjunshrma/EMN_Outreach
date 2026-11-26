@@ -2,20 +2,26 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { db, Prisma } from '../core/db.js';
 import { adapters } from '../core/container.js';
-import { pkcePair, randomToken, sha256 } from '../core/crypto.js';
+import { pkcePair, randomToken, safeEqual, sha256 } from '../core/crypto.js';
 import { AppError, NotFound } from '../core/errors.js';
 import { acquireLock, redis } from '../core/redis.js';
-import { audit, notifyWorkspace, publish, type Actor } from '../core/audit.js';
+import { audit, notifyWorkspace, publish, WORKER_ACTOR, type Actor } from '../core/audit.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { ProviderError } from '../../../integrations/src/http.js';
 import type { AuthHandle, ConnectionCheck, SmtpImapConfig } from '../../../integrations/src/email/types.js';
 import { decryptSecret, encryptSecret, readSettings } from './workspace.js';
-import { SendingWindowSchema, startOfDayIn } from '../../../shared/src/schedule.js';
+import { isValidZone, SendingWindowSchema, startOfDayIn } from '../../../shared/src/schedule.js';
 
 type OAuthProvider = 'GMAIL' | 'MICROSOFT';
 
-export const AccountWindowSchema = SendingWindowSchema.extend({ enabled: z.boolean().default(false), timezone: z.string().default('UTC') });
+export const AccountWindowSchema = SendingWindowSchema.extend({ enabled: z.boolean().default(false), timezone: z.string().refine(isValidZone, 'Unknown IANA timezone').default('UTC'), hourlySendLimit: z.number().int().min(1).max(2000).nullable().optional(), maxSecondsBetweenSends: z.number().int().min(30).max(3600).nullable().optional(),
+  temporaryFailureLimit: z.number().int().min(1).max(20).optional(),
+  bouncePauseRatePct: z.number().min(0.1).max(100).nullable().optional(),
+  bounceMinimumSends: z.number().int().min(5).max(10000).nullable().optional(),
+  bounceWindowDays: z.number().int().min(1).max(90).optional(),
+  participateInRotation: z.boolean().optional(),
+  recoveryCooldownMinutes: z.number().int().min(5).max(1440).optional() });
 
 // connectionConfig contains SMTP/IMAP usernames and host details. Keep it inside
 // the service boundary; API callers receive only the mailbox's public metadata.
@@ -58,17 +64,22 @@ export async function oauthCallback(provider: OAuthProvider, code: string, state
   const client = adapters().oauth[provider]!;
   const t = await client.exchangeCode({ code, codeVerifier: st.verifier, redirectUri: redirectUri(provider) });
   if (!t.refreshToken) throw new AppError('OAUTH_NO_REFRESH', 'The provider did not return a refresh token. Remove the app from your account permissions and connect again.', 400);
+  const refreshToken = t.refreshToken;
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: st.workspaceId } });
   const email = t.profile.email;
   const domainName = email.split('@')[1];
   const domain = await db().domain.upsert({ where: { workspaceId_name: { workspaceId: ws.id, name: domainName } }, update: {}, create: { workspaceId: ws.id, name: domainName } });
-  const account = await db().emailAccount.upsert({
-    where: { workspaceId_emailAddress: { workspaceId: ws.id, emailAddress: email } },
-    update: { provider, status: 'CONNECTED', statusReason: null, providerAccountId: t.profile.providerAccountId, displayName: t.profile.displayName, lastError: null },
-    create: { workspaceId: ws.id, provider, emailAddress: email, displayName: t.profile.displayName, providerAccountId: t.profile.providerAccountId, domainId: domain.id, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
+  const account = await db().$transaction(async tx => {
+    const account = await tx.emailAccount.upsert({
+      where: { workspaceId_emailAddress: { workspaceId: ws.id, emailAddress: email } },
+      update: { provider, providerAccountId: t.profile.providerAccountId, displayName: t.profile.displayName, lastError: null },
+      create: { workspaceId: ws.id, provider, emailAddress: email, displayName: t.profile.displayName, providerAccountId: t.profile.providerAccountId, domainId: domain.id, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
+    });
+    const cred = { encryptedAccessToken: encryptSecret(t.accessToken), encryptedRefreshToken: encryptSecret(refreshToken), accessTokenExpiresAt: t.expiresAt, scopes: t.scopes };
+    await tx.providerCredential.upsert({ where: { emailAccountId: account.id }, update: cred, create: { workspaceId: ws.id, emailAccountId: account.id, ...cred } });
+    const held = account.operatorPaused || account.status === 'PAUSED' || !!account.autoPauseUntil;
+    return tx.emailAccount.update({ where: { id: account.id }, data: { status: held ? 'PAUSED' : 'CONNECTED', statusReason: held ? 'Paused after reconnect. Resume to verify recovery.' : null, lastErrorAt: null } });
   });
-  const cred = { encryptedAccessToken: encryptSecret(t.accessToken), encryptedRefreshToken: encryptSecret(t.refreshToken), accessTokenExpiresAt: t.expiresAt, scopes: t.scopes };
-  await db().providerCredential.upsert({ where: { emailAccountId: account.id }, update: cred, create: { workspaceId: ws.id, emailAccountId: account.id, ...cred } });
   await audit(ws.id, { type: 'USER', userId: st.userId }, 'email_account.connected', { type: 'email_account', id: account.id }, { provider, email });
   await enqueue(QUEUES.sync, 'sync.account', { workspaceId: ws.id, accountId: account.id }, { jobId: `sync-initial-${account.id}-${Date.now()}` });
   await enqueue(QUEUES.domain, 'domain.check', { workspaceId: ws.id, domainId: domain.id });
@@ -124,18 +135,22 @@ export async function connectSmtp(workspaceId: string, input: z.infer<typeof Smt
     throw new AppError('PROVIDER_ERROR', safeMessage, 400, connectionCheck ? { connection: connectionCheck } : undefined);
   }
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-  const priorAccount = await db().emailAccount.findUnique({ where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } }, select: { id: true, status: true, statusReason: true, connectionConfig: true } });
+  const priorAccount = await db().emailAccount.findUnique({ where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } }, select: { id: true, status: true, connectionConfig: true } });
   const verifiedHealth = connectionCheck ?? { smtp: { ok: true, error: null }, imap: { ok: true, error: null } };
   const priorReadiness = (priorAccount?.connectionConfig as { readiness?: unknown } | null)?.readiness;
   const persistedConfig = { ...config, username: encryptSecret(smtpUsername), smtpUsername: encryptSecret(smtpUsername), imapUsername: encryptSecret(imapUsername), usernameEncrypted: true, smtpUsernameEncrypted: true, imapUsernameEncrypted: true, smtpPasswordEncrypted: encryptSecret(smtpPassword), imapPasswordEncrypted: encryptSecret(imapPassword), connectionHealth: { ...verifiedHealth, checkedAt: new Date().toISOString() }, ...(priorReadiness ? { readiness: priorReadiness } : {}) } as unknown as Prisma.InputJsonValue;
   const domainName = email.split('@')[1];
   const domain = await db().domain.upsert({ where: { workspaceId_name: { workspaceId, name: domainName } }, update: {}, create: { workspaceId, name: domainName } });
-  const account = await db().emailAccount.upsert({
-    where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } },
-    update: { provider: 'SMTP_IMAP', status: priorAccount?.status === 'PAUSED' ? 'PAUSED' : 'CONNECTED', statusReason: priorAccount?.status === 'PAUSED' ? priorAccount.statusReason : null, lastError: null, lastErrorAt: null, connectionConfig: persistedConfig, displayName: input.displayName },
-    create: { workspaceId, provider: 'SMTP_IMAP', emailAddress: email, displayName: input.displayName, domainId: domain.id, connectionConfig: persistedConfig, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
+  const account = await db().$transaction(async tx => {
+    const account = await tx.emailAccount.upsert({
+      where: { workspaceId_emailAddress: { workspaceId, emailAddress: email } },
+      update: { provider: 'SMTP_IMAP', lastError: null, lastErrorAt: null, connectionConfig: persistedConfig, displayName: input.displayName },
+      create: { workspaceId, provider: 'SMTP_IMAP', emailAddress: email, displayName: input.displayName, domainId: domain.id, connectionConfig: persistedConfig, sendingWindow: { enabled: false, days: [1, 2, 3, 4, 5], start: '08:00', end: '18:00', timezone: ws.timezone } },
+    });
+    await tx.providerCredential.upsert({ where: { emailAccountId: account.id }, update: { encryptedPassword: encryptSecret(input.password ?? smtpPassword) }, create: { workspaceId, emailAccountId: account.id, encryptedPassword: encryptSecret(input.password ?? smtpPassword), scopes: [] } });
+    const held = account.operatorPaused || account.status === 'PAUSED' || !!account.autoPauseUntil;
+    return tx.emailAccount.update({ where: { id: account.id }, data: { status: held ? 'PAUSED' : 'CONNECTED', statusReason: held ? 'Paused after reconnect. Resume to verify recovery.' : null } });
   });
-  await db().providerCredential.upsert({ where: { emailAccountId: account.id }, update: { encryptedPassword: encryptSecret(input.password ?? smtpPassword) }, create: { workspaceId, emailAccountId: account.id, encryptedPassword: encryptSecret(input.password ?? smtpPassword), scopes: [] } });
   await audit(workspaceId, actor, 'email_account.connected', { type: 'email_account', id: account.id }, { provider: 'SMTP_IMAP', email });
   await enqueue(QUEUES.sync, 'sync.account', { workspaceId, accountId: account.id });
   return publicAccount(account);
@@ -208,14 +223,28 @@ export async function markNeedsReauth(workspaceId: string, accountId: string, re
 export async function listAccounts(workspaceId: string) {
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
   const accounts = await db().emailAccount.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' }, include: { domain: { select: { name: true, healthStatus: true } } } });
-  const today = startOfDayIn(ws.timezone);
-  const sent = await db().outboundEmail.groupBy({ by: ['emailAccountId'], where: { workspaceId, status: 'SENT', sentAt: { gte: today } }, _count: { _all: true } });
+  const now = new Date();
+  const accountGroups = new Map<number, string[]>();
+  for (const account of accounts) {
+    const zone = (account.sendingWindow as { timezone?: string } | null)?.timezone ?? ws.timezone;
+    const today = startOfDayIn(zone, now).getTime();
+    accountGroups.set(today, [...(accountGroups.get(today) ?? []), account.id]);
+  }
+  const [sentByDay, sentLastHour] = await Promise.all([
+    Promise.all([...accountGroups].map(([day, ids]) => db().outboundEmail.groupBy({
+      by: ['emailAccountId'], where: { workspaceId, emailAccountId: { in: ids }, status: 'SENT', sentAt: { gte: new Date(day) } }, _count: { _all: true },
+    }))),
+    db().outboundEmail.groupBy({
+      by: ['emailAccountId'], where: { workspaceId, status: 'SENT', sentAt: { gte: new Date(now.getTime() - 3600_000) } }, _count: { _all: true },
+    }),
+  ]);
+  const sent = sentByDay.flat();
   const bounces = await db().emailEvent.groupBy({ by: ['emailAccountId'], where: { workspaceId, type: 'BOUNCED_HARD', occurredAt: { gte: new Date(Date.now() - 30 * 86400_000) } }, _count: { _all: true } });
   const sent30 = await db().emailEvent.groupBy({ by: ['emailAccountId'], where: { workspaceId, type: 'SENT', occurredAt: { gte: new Date(Date.now() - 30 * 86400_000) } }, _count: { _all: true } });
   return accounts.map((a) => {
     const s30 = sent30.find((x) => x.emailAccountId === a.id)?._count._all ?? 0;
     const b30 = bounces.find((x) => x.emailAccountId === a.id)?._count._all ?? 0;
-    return { ...publicAccount(a), sentToday: sent.find((x) => x.emailAccountId === a.id)?._count._all ?? 0, sent30d: s30, bounces30d: b30, bounceRate30d: s30 ? b30 / s30 : null };
+    return { ...publicAccount(a), sentToday: sent.find((x) => x.emailAccountId === a.id)?._count._all ?? 0, sentLastHour: sentLastHour.find((x) => x.emailAccountId === a.id)?._count._all ?? 0, sent30d: s30, bounces30d: b30, bounceRate30d: s30 ? b30 / s30 : null };
   });
 }
 
@@ -226,7 +255,7 @@ export const AccountUpdateSchema = z.object({
   dailySendLimit: z.number().int().min(1).max(2000).optional(),
   minSecondsBetweenSends: z.number().int().min(30).max(3600).optional(),
   sendingWindow: AccountWindowSchema.optional(),
-  readiness: z.object({ enabled: z.boolean(), initialDailyCap: z.number().int().min(1).max(500).default(5), dailyIncrease: z.number().int().min(1).max(500).default(5), reviewIntervalDays: z.number().int().min(3).max(30).default(7) }).optional(),
+  readiness: z.object({ enabled: z.boolean(), initialDailyCap: z.number().int().min(1).max(500).default(5), dailyIncrease: z.number().int().min(1).max(500).default(5), reviewIntervalDays: z.number().int().min(3).max(30).default(7), approvedDailyCap: z.number().int().min(1).max(2000).optional() }).optional(),
 });
 
 export async function updateAccount(workspaceId: string, id: string, input: z.infer<typeof AccountUpdateSchema>, actor: Actor) {
@@ -235,20 +264,27 @@ export async function updateAccount(workspaceId: string, id: string, input: z.in
   // Hard ceilings from provider published limits; workspace limits should be far lower.
   const ceiling = a.provider === 'GMAIL' ? 2000 : a.provider === 'MICROSOFT' ? 10000 : 2000;
   if (input.dailySendLimit && input.dailySendLimit > ceiling) throw new AppError('VALIDATION_FAILED', `Daily limit cannot exceed the provider maximum (${ceiling})`, 400);
+  const nextWindow = input.sendingWindow ?? (a.sendingWindow as { maxSecondsBetweenSends?: number | null } | null);
+  if (nextWindow?.maxSecondsBetweenSends != null && nextWindow.maxSecondsBetweenSends < (input.minSecondsBetweenSends ?? a.minSecondsBetweenSends)) {
+    throw new AppError('VALIDATION_FAILED', 'Maximum send gap must be at least the minimum gap.', 400);
+  }
   const { readiness, ...fields } = input;
   const config = (a.connectionConfig ?? {}) as Record<string, unknown>;
   let connectionConfig: Prisma.InputJsonValue | undefined;
   if (readiness) {
     const previous = config.readiness as { enabled?: boolean; currentDailyCap?: number; startedAt?: string; lastProgressAt?: string | null; lastReviewedAt?: string | null } | undefined;
     const enabling = readiness.enabled && !previous?.enabled;
+    if (readiness.approvedDailyCap !== undefined && readiness.approvedDailyCap > (fields.dailySendLimit ?? a.dailySendLimit)) {
+      throw new AppError('VALIDATION_FAILED', 'Reviewed sending cap cannot exceed the configured daily limit.', 400);
+    }
     config.readiness = {
       enabled: readiness.enabled,
       initialDailyCap: readiness.initialDailyCap,
-      currentDailyCap: readiness.enabled ? Math.min(previous?.currentDailyCap ?? readiness.initialDailyCap, fields.dailySendLimit ?? a.dailySendLimit) : null,
+      currentDailyCap: readiness.enabled ? Math.min(readiness.approvedDailyCap ?? previous?.currentDailyCap ?? readiness.initialDailyCap, fields.dailySendLimit ?? a.dailySendLimit) : null,
       dailyIncrease: readiness.dailyIncrease,
       reviewIntervalDays: readiness.reviewIntervalDays,
       startedAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.startedAt ?? new Date().toISOString()) : null,
-      lastProgressAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.lastProgressAt ?? null) : null,
+      lastProgressAt: readiness.enabled ? (enabling || readiness.approvedDailyCap !== undefined ? new Date().toISOString() : previous?.lastProgressAt ?? null) : null,
       lastReviewedAt: readiness.enabled ? (enabling ? new Date().toISOString() : previous?.lastReviewedAt ?? null) : null,
       status: readiness.enabled ? 'OBSERVING' : 'DISABLED',
       holdReason: readiness.enabled ? null : null,
@@ -260,7 +296,7 @@ export async function updateAccount(workspaceId: string, id: string, input: z.in
   return publicAccount(updated);
 }
 
-/** Increase actual-send capacity only after a stable observation period with real volume and healthy signals. */
+/** Review sending capacity using measured health signals. Only administrators can increase the effective cap. */
 export async function advanceMailboxReadiness() {
   const workspaces = await db().workspace.findMany({ select: { id: true, settings: true } });
   const now = new Date();
@@ -296,12 +332,11 @@ export async function advanceMailboxReadiness() {
           : null;
         const nextState = holdReason
           ? { ...state, status: 'HOLD', holdReason, lastReviewedAt: now.toISOString() }
-          : { ...state, currentDailyCap: Math.min(account.dailySendLimit, cap + Number(state.dailyIncrease ?? 5)), status: cap + Number(state.dailyIncrease ?? 5) >= account.dailySendLimit ? 'AT_CONFIGURED_LIMIT' : 'PROGRESSED', holdReason: null, lastProgressAt: now.toISOString(), lastReviewedAt: now.toISOString() };
+          : { ...state, status: cap >= account.dailySendLimit ? 'AT_CONFIGURED_LIMIT' : 'READY_FOR_REVIEW', holdReason: null, lastReviewedAt: now.toISOString() };
         await db().emailAccount.update({ where: { id: account.id }, data: { connectionConfig: { ...config, readiness: nextState } as Prisma.InputJsonValue } });
-        if (!holdReason && nextState.status === 'PROGRESSED') {
-          const effectiveCap = Number((nextState as Record<string, unknown>).currentDailyCap ?? cap);
-          await audit(workspace.id, { type: 'WORKER', userId: null }, 'email_account.readiness_increased', { type: 'email_account', id: account.id }, { previousDailyCap: cap, currentDailyCap: effectiveCap, sentInPeriod: sent.length, hardBounceRatePct: +hardRate.toFixed(2) });
-          await notifyWorkspace(workspace.id, 'ADMIN', { type: 'account.readiness_increased', title: 'Mailbox sending cap increased', body: `${account.emailAddress} passed its readiness review using actual sending and health history.`, link: '/mailbox-health' });
+        if (!holdReason && nextState.status === 'READY_FOR_REVIEW' && state.status !== 'READY_FOR_REVIEW') {
+          await audit(workspace.id, WORKER_ACTOR, 'email_account.readiness_review_ready', { type: 'email_account', id: account.id }, { currentDailyCap: cap, sentInPeriod: sent.length, hardBounceRatePct: +hardRate.toFixed(2) });
+          await notifyWorkspace(workspace.id, 'ADMIN', { type: 'account.readiness_review_ready', title: 'Mailbox is ready for a cap review', body: `${account.emailAddress} passed its observation checks. An administrator can review and set the cap.`, link: '/mailbox-health' });
         } else if (holdReason && (state.holdReason !== holdReason)) {
           await notifyWorkspace(workspace.id, 'ADMIN', { type: 'account.readiness_hold', title: 'Mailbox readiness progression paused', body: `${account.emailAddress}: ${holdReason}. Review Mailbox Health before increasing volume.`, link: '/mailbox-health' });
         }
@@ -312,11 +347,46 @@ export async function advanceMailboxReadiness() {
   }
 }
 
+export async function mailboxBounceRisk(workspaceId: string, accountId: string, sendingWindow: unknown, workspaceSettings: unknown) {
+  const settings = readSettings(workspaceSettings);
+  const limits = sendingWindow as { bouncePauseRatePct?: number | null; bounceMinimumSends?: number | null; bounceWindowDays?: number; recoveryCooldownMinutes?: number } | null;
+  const threshold = limits?.bouncePauseRatePct ?? settings.mailboxAutoPauseBounceRatePct;
+  if (threshold === null) return null;
+  const windowDays = limits?.bounceWindowDays ?? 30;
+  const since = new Date(Date.now() - windowDays * 86400_000);
+  const where = { workspaceId, emailAccountId: accountId, occurredAt: { gte: since } };
+  const [sent, bounced] = await Promise.all([
+    db().emailEvent.count({ where: { ...where, type: 'SENT' } }),
+    db().emailEvent.count({ where: { ...where, type: 'BOUNCED_HARD' } }),
+  ]);
+  if (!sent || sent < (limits?.bounceMinimumSends ?? settings.mailboxAutoPauseMinSends) || 100 * bounced / sent < threshold) return null;
+  return { sent, bounced, threshold, windowDays, cooldownMinutes: limits?.recoveryCooldownMinutes ?? 30 };
+}
+
 export async function setPaused(workspaceId: string, id: string, paused: boolean, actor: Actor) {
   const a = await db().emailAccount.findFirst({ where: { id, workspaceId } });
   if (!a) throw NotFound('Email account');
-  if (!paused && a.status !== 'PAUSED') throw new AppError('CONFLICT', `Account is ${a.status}; reconnect it instead`, 409);
-  const updated = await db().emailAccount.update({ where: { id }, data: { status: paused ? 'PAUSED' : 'CONNECTED', statusReason: paused ? 'Paused by user' : null } });
+  if (!paused) {
+    if (a.status !== 'PAUSED') throw new AppError('CONFLICT', `Account is ${a.status}; reconnect it instead`, 409);
+    if (a.autoPauseUntil && a.autoPauseUntil > new Date()) throw new AppError('MAILBOX_COOLDOWN', `This mailbox is cooling down until ${a.autoPauseUntil.toISOString()}.`, 409);
+    const workspace = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
+    if (await mailboxBounceRisk(workspaceId, id, a.sendingWindow, workspace.settings)) {
+      throw new AppError('MAILBOX_REPUTATION_RISK', 'The recent hard-bounce rate still exceeds the mailbox threshold.', 409);
+    }
+    const health = await testAccount(workspaceId, id);
+    if (!health.ok) throw new AppError('MAILBOX_UNHEALTHY', 'Mailbox connectivity must pass before resuming.', 409);
+  }
+  const transition = await db().emailAccount.updateMany({
+    where: { id, workspaceId, status: a.status, operatorPaused: a.operatorPaused },
+    data: {
+      operatorPaused: paused,
+      status: paused && a.status !== 'CONNECTED' ? a.status : paused ? 'PAUSED' : 'CONNECTED',
+      statusReason: paused ? a.statusReason ?? 'Paused by user' : null,
+      autoPauseUntil: paused ? a.autoPauseUntil : null,
+    },
+  });
+  if (!transition.count) throw new AppError('CONFLICT', 'Mailbox status changed. Refresh and try again.', 409);
+  const updated = await db().emailAccount.findFirstOrThrow({ where: { id, workspaceId } });
   await audit(workspaceId, actor, paused ? 'email_account.paused' : 'email_account.resumed', { type: 'email_account', id });
   return publicAccount(updated);
 }
@@ -324,6 +394,9 @@ export async function setPaused(workspaceId: string, id: string, paused: boolean
 export async function testAccount(workspaceId: string, id: string) {
   const a = await db().emailAccount.findFirst({ where: { id, workspaceId } });
   if (!a) throw NotFound('Email account');
+  if (a.status === 'NEEDS_REAUTH' || a.status === 'DISCONNECTED') {
+    return { ok: false, provider: a.provider, emailAddress: a.emailAddress, error: 'Reconnect this mailbox before testing or resuming it.' };
+  }
   try {
     const provider = adapters().email[a.provider];
     const auth = await getAuth(id);
@@ -331,20 +404,20 @@ export async function testAccount(workspaceId: string, id: string) {
     if (details && (!details.smtp.ok || !details.imap.ok)) {
       const safeError = [!details.smtp.ok && details.smtp.error, !details.imap.ok && details.imap.error].filter(Boolean).join('; ');
       const oldConfig = a.connectionConfig as Record<string, unknown>;
-      await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date(), connectionConfig: { ...oldConfig, connectionHealth: { ...details, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
+      await db().emailAccount.updateMany({ where: { id, workspaceId, status: a.status, operatorPaused: a.operatorPaused }, data: { status: (a.status === 'PAUSED' || a.operatorPaused) ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date(), connectionConfig: { ...oldConfig, connectionHealth: { ...details, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
       return { ok: false, provider: a.provider, emailAddress: a.emailAddress, error: safeError, connection: details };
     }
     if (!details) await provider.testConnection(auth);
     const oldConfig = a.connectionConfig as Record<string, unknown>;
     const connection = details ?? { smtp: { ok: true, error: null }, imap: { ok: true, error: null } };
-    await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'CONNECTED', statusReason: a.status === 'PAUSED' ? a.statusReason : null, lastError: null, lastErrorAt: null, connectionConfig: { ...oldConfig, connectionHealth: { ...connection, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
+    await db().emailAccount.updateMany({ where: { id, workspaceId, status: a.status, operatorPaused: a.operatorPaused }, data: { status: (a.status === 'PAUSED' || a.operatorPaused) ? 'PAUSED' : 'CONNECTED', statusReason: a.status === 'PAUSED' ? a.statusReason : null, lastError: null, lastErrorAt: null, connectionConfig: { ...oldConfig, connectionHealth: { ...connection, checkedAt: new Date().toISOString() } } as Prisma.InputJsonValue } });
     return { ok: true, provider: a.provider, emailAddress: a.emailAddress, connection };
   } catch (e) {
     const safeError = e instanceof ProviderError && e.status === 401 ? 'Mailbox authentication failed. Recheck credentials and provider access.' : 'Mailbox connection verification failed. Check provider settings and try again.';
     if (a.provider !== 'SMTP_IMAP' && e instanceof ProviderError && (e.status === 401 || e.status === 403)) {
       await markNeedsReauth(workspaceId, id, safeError);
     } else {
-      await db().emailAccount.update({ where: { id }, data: { status: a.status === 'PAUSED' ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date() } });
+      await db().emailAccount.updateMany({ where: { id, workspaceId, status: a.status, operatorPaused: a.operatorPaused }, data: { status: (a.status === 'PAUSED' || a.operatorPaused) ? 'PAUSED' : 'ERROR', statusReason: a.status === 'PAUSED' ? a.statusReason : safeError, lastError: safeError, lastErrorAt: new Date() } });
     }
     return { ok: false, provider: a.provider, emailAddress: a.emailAddress, error: safeError };
   }
@@ -402,44 +475,46 @@ export async function resync(workspaceId: string, id: string, actor: Actor) {
 
 /** Worker: incremental sync for one mailbox, then ingest. */
 export async function syncAccount(accountId: string) {
-  const a = await db().emailAccount.findUnique({ where: { id: accountId } });
-  if (!a || !['CONNECTED', 'PAUSED'].includes(a.status)) return { skipped: true };
   const releaseSyncLock = await acquireLock(`mailbox-sync:${accountId}`, 10 * 60_000);
   if (!releaseSyncLock) return { skipped: true, reason: 'sync already running' };
-  const provider = adapters().email[a.provider];
   try {
-    const auth = await getAuth(accountId);
-    const since = new Date(Date.now() - 14 * 86400_000);
-    let result = await provider.sync(auth, a.syncCursor, since);
-    if (result.fullResyncRequired) result = await provider.sync(auth, null, a.lastSyncedAt ? new Date(a.lastSyncedAt.getTime() - 86400_000) : since);
-    const { ingestMessages } = await import('./inbox.js');
-    const stats = await ingestMessages(a.workspaceId, accountId, result.messages);
-    await db().emailAccount.update({ where: { id: accountId }, data: { syncCursor: result.nextCursor || null, lastSyncedAt: new Date(), lastError: null } });
-    if (stats.inbound) await publish(a.workspaceId, 'inbox.updated', { accountId, ...stats });
-    return stats;
-  } catch (e) {
-    const authFailure = e instanceof ProviderError && (e.status === 401 || e.status === 403);
-    const safeMessage = authFailure ? 'Mailbox authentication failed during synchronization. Reconnect this mailbox.' : e instanceof AppError ? e.message : 'Mailbox synchronization failed. The worker will retry; check provider settings if this persists.';
-    const failedAt = new Date();
-    await db().emailAccount.update({ where: { id: accountId }, data: { lastError: safeMessage.slice(0, 500), lastErrorAt: failedAt } });
-    if (authFailure) {
-      if (a.status !== 'NEEDS_REAUTH') await markNeedsReauth(a.workspaceId, accountId, safeMessage);
-    } else if (!a.lastErrorAt || failedAt.getTime() - a.lastErrorAt.getTime() >= 6 * 3600_000) {
-      await notifyWorkspace(a.workspaceId, 'ADMIN', { type: 'account.sync_error', title: 'Mailbox synchronization is failing', body: 'EMN could not complete mailbox synchronization. Check Mailbox Health and the provider connection settings.', link: '/mailbox-health' });
+    const a = await db().emailAccount.findUnique({ where: { id: accountId } });
+    if (!a || !['CONNECTED', 'PAUSED'].includes(a.status)) return { skipped: true };
+    const provider = adapters().email[a.provider];
+    try {
+      const auth = await getAuth(accountId);
+      const since = new Date(Date.now() - 14 * 86400_000);
+      let result = await provider.sync(auth, a.syncCursor, since);
+      if (result.fullResyncRequired) result = await provider.sync(auth, null, a.lastSyncedAt ? new Date(a.lastSyncedAt.getTime() - 86400_000) : since);
+      const { ingestMessages } = await import('./inbox.js');
+      const stats = await ingestMessages(a.workspaceId, accountId, result.messages);
+      await db().emailAccount.update({ where: { id: accountId }, data: { syncCursor: result.nextCursor || null, lastSyncedAt: new Date(), lastError: null } });
+      if (stats.inbound) await publish(a.workspaceId, 'inbox.updated', { accountId, ...stats });
+      return stats;
+    } catch (e) {
+      const authFailure = e instanceof ProviderError && (e.status === 401 || e.status === 403);
+      const safeMessage = authFailure ? 'Mailbox authentication failed during synchronization. Reconnect this mailbox.' : e instanceof AppError ? e.message : 'Mailbox synchronization failed. The worker will retry; check provider settings if this persists.';
+      const failedAt = new Date();
+      await db().emailAccount.update({ where: { id: accountId }, data: { lastError: safeMessage.slice(0, 500), lastErrorAt: failedAt } });
+      if (authFailure) {
+        if (a.status !== 'NEEDS_REAUTH') await markNeedsReauth(a.workspaceId, accountId, safeMessage);
+      } else if (!a.lastErrorAt || failedAt.getTime() - a.lastErrorAt.getTime() >= 6 * 3600_000) {
+        await notifyWorkspace(a.workspaceId, 'ADMIN', { type: 'account.sync_error', title: 'Mailbox synchronization is failing', body: 'EMN could not complete mailbox synchronization. Check Mailbox Health and the provider connection settings.', link: '/mailbox-health' });
+      }
+      throw new ProviderError('mailbox-sync', safeMessage, authFailure ? 401 : 503, !authFailure);
     }
-    throw new ProviderError('mailbox-sync', safeMessage, authFailure ? 401 : 503, !authFailure);
   } finally {
     await releaseSyncLock();
   }
 }
 
-export async function ensureGraphSubscription(accountId: string) {
+export async function ensureGraphSubscription(accountId: string, forceRecreate = false) {
   const a = await db().emailAccount.findUniqueOrThrow({ where: { id: accountId } });
   const subs = adapters().graphSubscriptions;
   if (!subs || a.provider !== 'MICROSOFT') return;
   const auth = await getAuth(accountId);
-  if (a.subscriptionId && a.watchExpiresAt && a.watchExpiresAt.getTime() > Date.now() + 12 * 3600_000) return;
-  if (a.subscriptionId) {
+  if (!forceRecreate && a.subscriptionId && a.watchExpiresAt && a.watchExpiresAt.getTime() > Date.now() + 12 * 3600_000) return;
+  if (!forceRecreate && a.subscriptionId) {
     try {
       const r = await subs.renew(auth, a.subscriptionId);
       await db().emailAccount.update({ where: { id: accountId }, data: { watchExpiresAt: r.expiresAt } });
@@ -453,10 +528,15 @@ export async function ensureGraphSubscription(accountId: string) {
 
 /** Handle a Graph change notification batch: verify clientState, queue a sync per account. */
 export async function handleGraphNotifications(body: { value?: Array<{ subscriptionId: string; clientState?: string; lifecycleEvent?: string }> }) {
-  for (const n of body.value ?? []) {
-    const a = await db().emailAccount.findFirst({ where: { subscriptionId: n.subscriptionId } });
-    if (!a || !n.clientState || a.subscriptionSecretHash !== sha256(n.clientState)) continue;
-    if (n.lifecycleEvent === 'reauthorizationRequired' || n.lifecycleEvent === 'subscriptionRemoved') await ensureGraphSubscription(a.id).catch(() => undefined);
-    await enqueue(QUEUES.sync, 'sync.account', { workspaceId: a.workspaceId, accountId: a.id }, { jobId: `sync-${a.id}-${Math.floor(Date.now() / 15000)}` });
+  if (!Array.isArray(body.value)) return;
+  const bucket = Math.floor(Date.now() / 15_000);
+  for (const n of body.value) {
+    if (typeof n?.subscriptionId !== 'string' || typeof n.clientState !== 'string') continue;
+    const a = await db().emailAccount.findFirst({ where: { subscriptionId: n.subscriptionId, provider: 'MICROSOFT', status: { in: ['CONNECTED', 'PAUSED'] } } });
+    if (!a?.subscriptionSecretHash || !safeEqual(a.subscriptionSecretHash, sha256(n.clientState))) continue;
+    if (n.lifecycleEvent === 'reauthorizationRequired' || n.lifecycleEvent === 'subscriptionRemoved') {
+      await enqueue(QUEUES.sync, 'graph.renewAccount', { workspaceId: a.workspaceId, accountId: a.id, recreate: n.lifecycleEvent === 'subscriptionRemoved' }, { jobId: `graph-renew-${a.id}-${n.lifecycleEvent}-${bucket}` });
+    }
+    await enqueue(QUEUES.sync, 'sync.account', { workspaceId: a.workspaceId, accountId: a.id }, { jobId: `sync-${a.id}-${bucket}` });
   }
 }

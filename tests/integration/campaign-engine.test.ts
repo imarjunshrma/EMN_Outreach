@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { encryptSecret } from '../../backend/src/services/workspace.js';
 import { db } from '../../backend/src/core/db.js';
+import { bulkAction, BulkActionSchema } from '../../backend/src/services/leads.js';
 import * as engine from '../../backend/src/services/engine.js';
+import * as business from '../../backend/src/services/business-knowledge.js';
+import * as personalization from '../../backend/src/services/personalization.js';
+import { sha256 } from '../../backend/src/core/crypto.js';
 import { ProviderError } from '../../integrations/src/http.js';
 import { resetDb, installFakes, createUserSession, addMailbox, addLead, addAiProvider, MONDAY_10_UTC, type Session } from '../helpers/harness.js';
 import type { FakeEmailProvider, FakeAi } from '../helpers/fakes.js';
@@ -147,6 +151,39 @@ describe('sending engine', () => {
     expect(third.lastError).toMatch(/daily limit/);
   });
 
+  it('reserves mailbox spacing and the rolling hourly cap across queued sends', async () => {
+    const s = await createUserSession('mailbox-slot@x.com');
+    const { campaignId, mailbox } = await setupCampaign(s);
+    await db().emailAccount.update({
+      where: { id: mailbox.id },
+      data: { minSecondsBetweenSends: 30, sendingWindow: { ...ALWAYS, enabled: false, timezone: 'UTC', hourlySendLimit: 1, maxSecondsBetweenSends: 75 } },
+    });
+    const secondCampaign = await engine.duplicateCampaign(s.workspaceId, campaignId, 'Second campaign', { type: 'SYSTEM' });
+    const lead = await addLead(s.workspaceId, 'second-slot@client.com', { timezone: 'UTC' });
+    const list = await db().leadList.create({
+      data: { workspaceId: s.workspaceId, name: 'Second targets', members: { create: { workspaceId: s.workspaceId, leadId: lead.id } } },
+    });
+    await engine.setCampaignLists(s.workspaceId, secondCampaign.id, [list.id], { type: 'SYSTEM' });
+    await approveAndStart(s, campaignId);
+    await approveAndStart(s, secondCampaign.id);
+    const now = MONDAY_10_UTC;
+    await engine.tick(now);
+    const rows = await db().outboundEmail.findMany({ where: { campaignId: { in: [campaignId, secondCampaign.id] }, status: 'PENDING' } });
+    expect(new Set(rows.map(row => row.campaignId)).size).toBe(2);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) await engine.prepareOutbound(s.workspaceId, row.id);
+    await engine.sendOutbound(s.workspaceId, rows[0].id, now);
+    expect(await engine.sendOutbound(s.workspaceId, rows[1].id, now)).toMatchObject({ outcome: 'deferred', detail: 'mailbox spacing between sends' });
+    const held = await db().outboundEmail.findUniqueOrThrow({ where: { id: rows[1].id } });
+    const gapMs = held.scheduledFor.getTime() - now.getTime();
+    expect(gapMs).toBeGreaterThanOrEqual(30_000);
+    expect(gapMs).toBeLessThanOrEqual(75_000);
+    expect(await engine.sendOutbound(s.workspaceId, rows[1].id, held.scheduledFor)).toMatchObject({ outcome: 'deferred', detail: 'mailbox rolling hourly limit reached' });
+    expect(fakes.gmail.sent).toHaveLength(1);
+    expect(await engine.sendOutbound(s.workspaceId, rows[1].id, new Date(now.getTime() + 3600_001))).toMatchObject({ outcome: 'sent' });
+    expect(fakes.gmail.sent).toHaveLength(2);
+  });
+
   it('enforces the optional workspace-wide daily campaign send cap', async () => {
     const s = await createUserSession('workspace-cap@x.com');
     const { campaignId } = await setupCampaign(s, { leads: 3 });
@@ -223,7 +260,7 @@ describe('duplicate-send prevention & crash recovery', () => {
     await engine.prepareOutbound(p.workspaceId, p.id);
     fakes.gmail.failAfterAccept = true; // provider accepted, then the connection dropped
     await expect(engine.sendOutbound(p.workspaceId, p.id, MONDAY_10_UTC)).rejects.toThrow(/network/);
-    expect((await db().outboundEmail.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('SENDING');
+    expect((await db().outboundEmail.findUniqueOrThrow({ where: { id: p.id } })).status).toBe('UNCERTAIN');
     // Retry (BullMQ) → reconciliation finds the sent copy instead of resending
     const retry = await engine.sendOutbound(p.workspaceId, p.id, new Date(MONDAY_10_UTC.getTime() + 60_000));
     expect(retry.outcome).toBe('reconciled');
@@ -249,8 +286,113 @@ describe('duplicate-send prevention & crash recovery', () => {
     expect(retry.outcome).toBe('cancelled');
     expect(fakes.smtp.sent.length).toBe(before);
     const final = await db().outboundEmail.findUniqueOrThrow({ where: { id: p.id } });
-    expect(final.status).toBe('FAILED');
+    expect(final.status).toBe('UNCERTAIN');
     expect(final.lastError).toMatch(/not retried to avoid a duplicate/);
+  });
+
+  it('never resubmits when Gmail submission is ambiguous and Sent lookup is empty', async () => {
+    const s = await createUserSession('owner@x.com');
+    const { campaignId } = await setupCampaign(s);
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'Ambiguous gateway response', 503, true);
+    await expect(engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).rejects.toThrow('Ambiguous gateway response');
+    const later = new Date(MONDAY_10_UTC.getTime() + 180_000);
+    await Promise.all([
+      engine.sendOutbound(s.workspaceId, outbound.id, later),
+      engine.sendOutbound(s.workspaceId, outbound.id, later),
+    ]);
+    expect(fakes.gmail.sent).toHaveLength(0);
+    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: outbound.id } })).toMatchObject({ status: 'UNCERTAIN', attempts: 1 });
+  });
+
+  it('restricts uncertain decisions to workspace admins and never requeues a reviewed submission', async () => {
+    const s = await createUserSession('reconcile-owner@fixture.example');
+    const { campaignId } = await setupCampaign(s);
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const attempt = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, attempt.id);
+    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'Ambiguous gateway response', 503, true);
+    await expect(engine.sendOutbound(s.workspaceId, attempt.id, MONDAY_10_UTC)).rejects.toThrow();
+    const path = `/api/v1/w/${s.workspaceId}/outbound-reconciliation`;
+    const review = (session: typeof s, decision: string, evidence?: string) => session.agent
+      .post(`/api/v1/w/${session.workspaceId}/outbound-reconciliation/${attempt.id}`).set('x-csrf-token', session.csrf)
+      .send({ decision, evidence, reason: 'Checked the provider submission history', confirmed: true });
+    expect((await s.agent.get(path)).body.data[0]).toMatchObject({ id: attempt.id, attempts: 1 });
+    const member = await createUserSession('reconcile-member@fixture.example', 'MEMBER', s.workspaceId);
+    const outsider = await createUserSession('reconcile-outsider@fixture.example');
+    expect((await review(member, 'MANUALLY_CLOSED')).status).toBe(403);
+    expect((await review(outsider, 'MANUALLY_CLOSED')).status).toBe(404);
+    expect((await review(s, 'CONFIRMED_ACCEPTED')).status).toBe(400);
+    expect((await review(s, 'STILL_UNCERTAIN')).status).toBe(200);
+    expect((await s.agent.get(path)).body.total).toBe(1);
+    const concurrent = await Promise.all([
+      review(s, 'CONFIRMED_NOT_SUBMITTED', 'Provider ticket TEST-123'),
+      review(s, 'CONFIRMED_NOT_SUBMITTED', 'Provider ticket TEST-123'),
+    ]);
+    expect(concurrent.map(result => result.status).sort()).toEqual([200, 409]);
+    expect((await s.agent.get(`${path}?resolved=true`)).body.data[0].reconciliation).toMatchObject({ reviewedBy: s.userId, decision: 'CONFIRMED_NOT_SUBMITTED' });
+    expect((await engine.sendOutbound(s.workspaceId, attempt.id)).outcome).toBe('skipped');
+    expect((await db().sequenceEnrollment.findUniqueOrThrow({ where: { id: attempt.enrollmentId } })).status).toBe('FAILED');
+    expect(await db().emailEvent.count({ where: { outboundEmailId: attempt.id, type: 'SENT' } })).toBe(0);
+    expect(fakes.gmail.sent).toHaveLength(0);
+  });
+
+  it('suppresses a confirmed nonexistent SMTP recipient without trying another mailbox', async () => {
+    const s = await createUserSession('owner@x.com');
+    const { campaignId } = await setupCampaign(s);
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    await db().emailAccount.update({ where: { id: outbound.emailAccountId }, data: {
+      provider: 'SMTP_IMAP',
+      connectionConfig: { smtpHost: 'smtp.example.com', smtpPort: 587, imapHost: 'imap.example.com', imapPort: 993, username: 'u' },
+      credential: { update: { encryptedPassword: encryptSecret('pw') } },
+    } });
+    fakes.smtp.failBeforeSend = new ProviderError('smtp', 'SMTP rejected the recipient as nonexistent', 400, false, undefined, 'RECIPIENT_NOT_FOUND', 'PROVIDER_REJECTED');
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).outcome).toBe('failed');
+    expect(await db().suppressionEntry.findFirst({ where: { workspaceId: s.workspaceId, value: outbound.toAddress } })).toMatchObject({ reason: 'HARD_BOUNCE' });
+    expect(await db().sequenceEnrollment.findUniqueOrThrow({ where: { id: outbound.enrollmentId } })).toMatchObject({ status: 'STOPPED_BOUNCED' });
+    expect(fakes.smtp.sent).toHaveLength(0);
+    expect(fakes.gmail.sent).toHaveLength(0);
+  });
+
+  it('caps proven non-submission retries and keeps them in the mailbox health threshold', async () => {
+    const s = await createUserSession('owner@x.com');
+    const { campaignId } = await setupCampaign(s);
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    await db().outboundEmail.update({ where: { id: outbound.id }, data: { attempts: 4 } });
+    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'Synthetic failure before submission', 503, true, undefined, undefined, 'DEFINITELY_NOT_SENT');
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).outcome).toBe('failed');
+    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: outbound.id } })).toMatchObject({ status: 'FAILED', attempts: 5 });
+    expect(await db().emailAccount.findUniqueOrThrow({ where: { id: outbound.emailAccountId } })).toMatchObject({ status: 'PAUSED' });
+    expect(fakes.gmail.sent).toHaveLength(0);
+  });
+
+  it('honors Retry-After and records submission decisions without provider payloads', async () => {
+    const s = await createUserSession('owner@x.com');
+    const { campaignId } = await setupCampaign(s);
+    await approveAndStart(s, campaignId);
+    await engine.tick(MONDAY_10_UTC);
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'fixture payload marker', 429, true, 120_000);
+    await expect(engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).rejects.toThrow();
+    const decision = await db().auditLog.findFirstOrThrow({
+      where: { workspaceId: s.workspaceId, entityId: outbound.id, action: 'outbound.submission_decision' },
+    });
+    expect(JSON.stringify(decision)).not.toContain('fixture payload marker');
+    expect(decision.metadata).toMatchObject({ provider: 'GMAIL', campaignId, attempt: 1, submission: 'PROVIDER_REJECTED', retryDecision: 'SAME_MAILBOX', failoverDecision: 'DISABLED' });
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, new Date(MONDAY_10_UTC.getTime() + 60_000))).outcome).toBe('deferred');
+    expect(fakes.gmail.sent).toHaveLength(0);
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, new Date(MONDAY_10_UTC.getTime() + 120_000))).outcome).toBe('sent');
   });
 
   it('resends after a failure that never reached the provider, and fails permanently on 4xx', async () => {
@@ -260,7 +402,7 @@ describe('duplicate-send prevention & crash recovery', () => {
     await engine.tick(MONDAY_10_UTC);
     for (const o of await db().outboundEmail.findMany({ where: { status: 'PENDING' } })) await engine.prepareOutbound(o.workspaceId, o.id);
     const [a, b] = await db().outboundEmail.findMany({ where: { status: 'QUEUED' }, orderBy: { createdAt: 'asc' } });
-    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'HTTP 503', 503, true);
+    fakes.gmail.failBeforeSend = new ProviderError('gmail', 'Synthetic failure before submission', 503, true, undefined, undefined, 'DEFINITELY_NOT_SENT');
     await expect(engine.sendOutbound(a.workspaceId, a.id, MONDAY_10_UTC)).rejects.toThrow();
     expect((await engine.sendOutbound(a.workspaceId, a.id, new Date(MONDAY_10_UTC.getTime() + 60_000))).outcome).toBe('sent');
     fakes.gmail.failBeforeSend = new ProviderError('gmail', 'HTTP 400 invalid recipient', 400, false);
@@ -269,28 +411,105 @@ describe('duplicate-send prevention & crash recovery', () => {
   });
 });
 
+const fixtureActor = { type: 'SYSTEM' as const };
+const supportedSignal = 'The company launched a weekly podcast about design.';
+
+async function seedCampaignEvidence(workspaceId: string, campaignId: string, leads: Awaited<ReturnType<typeof setupCampaign>>['leads']) {
+  const service = await business.createService(workspaceId, business.ServiceCreateSchema.parse({
+    name: 'Content distribution', description: 'Turn original shows into short videos and distribute them.',
+  }), fixtureActor);
+  const version = service.versions[0];
+  await expect(business.setCampaignServices(workspaceId, campaignId, [{ serviceVersionId: version.id }], fixtureActor)).rejects.toThrow();
+  await business.approveServiceVersion(workspaceId, version.id, fixtureActor);
+  await business.setCampaignServices(workspaceId, campaignId, [{ serviceVersionId: version.id }], fixtureActor);
+  const icp = await db().idealCustomerProfile.create({ data: { workspaceId, name: 'Fixture ICP', criteria: {} } });
+  const ids = [];
+  for (const lead of leads) {
+    const company = await db().company.create({ data: { workspaceId, name: `Fixture Studio ${lead.firstName}` } });
+    await db().lead.update({ where: { id: lead.id }, data: { companyId: company.id, lastName: 'Example' } });
+    const identity = `${lead.firstName} Example works at ${company.name}.`;
+    const content = `${identity} ${supportedSignal}`;
+    const report = await db().researchReport.create({ data: { workspaceId, leadId: lead.id, status: 'COMPLETED', completedAt: new Date() } });
+    const source = await db().researchEvidence.create({ data: { workspaceId, reportId: report.id, sourceType: 'WEBSITE', url: 'https://fixture.example', content, contentHash: sha256(content) } });
+    const identityClaim = await db().researchClaim.create({ data: { workspaceId, reportId: report.id, evidenceId: source.id, category: 'professional_identity', status: 'SUPPORTED', text: identity, quote: identity, confidence: 0.99 } });
+    const claim = await db().researchClaim.create({ data: { workspaceId, reportId: report.id, evidenceId: source.id, category: 'signal', status: 'SUPPORTED', text: supportedSignal, quote: supportedSignal, confidence: 0.99 } });
+    await db().leadScore.create({ data: { workspaceId, leadId: lead.id, icpId: icp.id, score: 90, tier: 'A', qualified: true, reasons: [{ criterion: 'professional_identity', met: true, identityStatus: 'VERIFIED', claimIds: [identityClaim.id] }] } });
+    ids.push(claim.id);
+  }
+  return { serviceVersionId: version.id, claimIds: ids };
+}
+
+function writerFixture(serviceVersionId: string, claimId: string, body: string) {
+  return {
+    subject: 'An idea for your podcast', subjectAlternatives: [], openingLine: supportedSignal,
+    body, cta: 'Would a short outline help?', usedClaimIds: [claimId], personalizationBasis: supportedSignal, insufficientContext: false,
+    opportunityAnalysis: {
+      qualification: 'POSSIBLE_FIT', businessModel: { statement: null, basis: 'UNKNOWN', claimIds: [] },
+      facts: [{ statement: supportedSignal, claimId }], inferences: [], unknowns: [],
+      opportunity: 'Repurpose existing episodes', serviceFit: 'Distribute short clips', serviceVersionId, serviceMatchClaimIds: [claimId],
+      confidence: 0.9, missingInformation: [], recommendedApproach: 'Offer a short outline.',
+    },
+  };
+}
+
+describe('manual qualification review', () => {
+  it('requires evidence and a current human review before a campaign with an ICP can enroll', async () => {
+    const s = await createUserSession('qualification-review@fixture.example');
+    const { campaignId, leads } = await setupCampaign(s);
+    const review = BulkActionSchema.parse({ action: 'review_qualification', ids: [leads[0].id], review: 'QUALIFIED', reviewReason: 'Reviewed evidence against criteria.' });
+    await expect(bulkAction(s.workspaceId, review, fixtureActor)).rejects.toMatchObject({ code: 'QUALIFICATION_REQUIRED' });
+    await seedCampaignEvidence(s.workspaceId, campaignId, leads);
+    const icp = await db().idealCustomerProfile.findFirstOrThrow({ where: { workspaceId: s.workspaceId } });
+    await engine.updateCampaignAi(s.workspaceId, campaignId, { icpId: icp.id }, fixtureActor);
+    expect((await engine.validateCampaign(s.workspaceId, campaignId)).recipients.eligible).toBe(0);
+    await bulkAction(s.workspaceId, review, fixtureActor);
+    expect((await engine.validateCampaign(s.workspaceId, campaignId)).recipients.eligible).toBe(1);
+    await db().idealCustomerProfile.update({ where: { id: icp.id }, data: { updatedAt: new Date(Date.now() + 60_000), criteria: { mustHave: ['Changed criteria'] } } });
+    expect((await engine.validateCampaign(s.workspaceId, campaignId)).recipients.eligible).toBe(0);
+    await bulkAction(s.workspaceId, { ...review, review: 'DISQUALIFIED' }, fixtureActor);
+    expect(await db().auditLog.count({ where: { workspaceId: s.workspaceId, action: 'lead.qualification_reviewed', entityId: leads[0].id } })).toBe(2);
+    expect((await db().lead.findUniqueOrThrow({ where: { id: leads[0].id } })).qualificationReview).toBe('DISQUALIFIED');
+  });
+});
+
 describe('AI personalization in the send pipeline', () => {
   it('requires review for AI content and blocks approval when the fact-check fails', async () => {
     const s = await createUserSession('owner@x.com');
     await addAiProvider(s.workspaceId);
     const ai = fakes.anthropic as FakeAi;
-    ai.on('EMAIL_WRITING', () => ({ subject: null, firstLine: 'Loved your recent award-winning episode.', body: null, usedClaimIds: [] }));
-    ai.on('FACT_CHECK', (req) => ({ sentences: [{ text: 'Loved your recent award-winning episode.', verdict: req.user.includes('award') ? 'UNSUPPORTED' : 'GENERIC', claimId: null, reason: 'no claim supports an award' }] }));
-    const { campaignId, h } = await setupCampaign(s, { steps: [{ delayDays: 0, personalizationMode: 'AI_FIRST_LINE', variants: [{ label: 'A', subject: 'Hi {{firstName}}', body: '{{aiFirstLine}}\n\nQuick idea for you.' }] }], settings: { reviewMode: 'AI_CONTENT_ONLY', usePregeneratedAi: false } });
+    const { campaignId, leads } = await setupCampaign(s, {
+      steps: [{ delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Hi {{firstName}}', body: 'Write a short and grounded introduction.' }] }],
+      settings: { reviewMode: 'AI_CONTENT_ONLY', usePregeneratedAi: true },
+    });
+    expect((await engine.validateCampaign(s.workspaceId, campaignId)).blocking.join(' ')).toMatch(/approved EMN service/);
+    await expect(engine.startCampaign(s.workspaceId, campaignId, fixtureActor)).rejects.toThrow();
+    const { serviceVersionId, claimIds } = await seedCampaignEvidence(s.workspaceId, campaignId, leads);
+    const [step] = (await engine.getCampaign(s.workspaceId, campaignId)).sequence!.steps;
+    const unsafe = 'Hi there, Congrats on winning an award last month. Would a short outline help?';
+    ai.on('PERSONALIZATION', () => writerFixture(serviceVersionId, claimIds[0], unsafe));
+    ai.on('FACT_CHECK', req => {
+      const unsupported = req.user.split('</untrusted_content>')[0].includes('winning an award');
+      return { sentences: [{ text: unsupported ? 'Congrats on winning an award last month.' : supportedSignal, verdict: unsupported ? 'UNSUPPORTED' : 'SUPPORTED', claimId: unsupported ? null : claimIds[0], reason: unsupported ? 'Not in the source' : 'Backed by the source' }] };
+    });
+    const generated = await personalization.generateForLead(s.workspaceId, campaignId, leads[0].id, step.id);
+    expect(generated.status).toBe('BLOCKED');
+    await expect(personalization.approvePersonalizations(s.workspaceId, [generated.id!], fixtureActor)).rejects.toMatchObject({ code: 'QUALITY_CHECK_FAILED' });
     await approveAndStart(s, campaignId);
     await engine.tick(MONDAY_10_UTC);
-    const p = await db().outboundEmail.findFirstOrThrow({ where: { status: 'PENDING' } });
-    await engine.prepareOutbound(p.workspaceId, p.id);
-    const prepared = await db().outboundEmail.findUniqueOrThrow({ where: { id: p.id } });
-    expect(prepared.status).toBe('AWAITING_APPROVAL');
-    expect(prepared.factCheckStatus).toBe('FAILED');
-    // Approving unchanged content is refused
-    const r1 = await s.agent.post(`/api/v1/w/${s.workspaceId}/outbound/${p.id}/review`).set(h).send({ decision: 'approve' });
-    expect(r1.body.error.code).toBe('FACT_CHECK_FAILED');
-    // Human removes the unverifiable claim → re-check passes → queued and sent
-    const r2 = await s.agent.post(`/api/v1/w/${s.workspaceId}/outbound/${p.id}/review`).set(h).send({ decision: 'approve', bodyText: prepared.bodyText!.replace('Loved your recent award-winning episode.', 'Hope your week is going well.') });
-    expect(r2.status, JSON.stringify(r2.body)).toBe(200);
-    expect((await engine.sendOutbound(p.workspaceId, p.id, MONDAY_10_UTC)).outcome).toBe('sent');
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: outbound.id } })).toMatchObject({ status: 'AWAITING_APPROVAL' });
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).outcome).toBe('skipped');
+    expect(fakes.gmail.sent).toHaveLength(0);
+
+    const edited = await personalization.editPersonalization(s.workspaceId, generated.id!, {
+      body: `Hi there,\n\n${supportedSignal} We help teams repurpose episodes into short videos and distribute them. Would a short outline help?`,
+      rerunFactCheck: true, feedbackScope: 'CAMPAIGN',
+    }, fixtureActor);
+    expect(edited.status).toBe('GENERATED');
+    expect((await personalization.approvePersonalizations(s.workspaceId, [generated.id!], fixtureActor)).approved).toBe(1);
+    await engine.prepareOutbound(s.workspaceId, outbound.id);
+    expect((await engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).outcome).toBe('sent');
     expect(fakes.gmail.sent[0].text).not.toMatch(/award/);
   });
 });
@@ -308,17 +527,24 @@ describe('never sends an email without a message (the "Hi Test, … Best" incide
     const s = await createUserSession('owner@x.com');
     await addAiProvider(s.workspaceId);
     const ai = fakes.anthropic as FakeAi;
+    const { campaignId, leads } = await setupCampaign(s, { leads: 2, steps: [
+      { delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Hi {{firstName}}', body: 'Write a grounded message.' }] },
+    ], settings: { reviewMode: 'AI_CONTENT_ONLY', usePregeneratedAi: true } });
+    const { serviceVersionId, claimIds } = await seedCampaignEvidence(s.workspaceId, campaignId, leads);
+    const [step] = (await engine.getCampaign(s.workspaceId, campaignId)).sequence!.steps;
     ai.on('FACT_CHECK', () => ({ sentences: [] }));
-    const { campaignId } = await setupCampaign(s, { leads: 2, steps: [{ delayDays: 0, personalizationMode: 'AI_FULL', variants: [{ label: 'A', subject: 'Hi {{firstName}}', body: 'Hi {{firstName}},\n\n[Write your message here]\n\nBest,\n{{sender.name}}' }] }], settings: { usePregeneratedAi: false } });
     await approveAndStart(s, campaignId);
     await engine.tick(MONDAY_10_UTC);
-    const [a, b] = await db().outboundEmail.findMany({ where: { status: 'PENDING' }, orderBy: { createdAt: 'asc' } });
-    ai.on('EMAIL_WRITING', () => ({ subject: 'Quick idea', firstLine: null, body: '', usedClaimIds: [] }));
-    await engine.prepareOutbound(a.workspaceId, a.id);
-    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ status: 'FAILED', lastError: expect.stringMatching(/AI returned an empty email/) });
-    ai.on('EMAIL_WRITING', () => ({ subject: 'Quick idea', firstLine: null, body: 'Hi Lead1,\n\n…\n\nBest,\nArjun', usedClaimIds: [] }));
-    await engine.prepareOutbound(b.workspaceId, b.id);
-    expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({ status: 'FAILED', lastError: expect.stringMatching(/placeholder text.*nothing was sent/) });
+    for (const [index, body] of ['', 'Hi Lead1,\n\n…\n\nBest,\nArjun'].entries()) {
+      ai.on('PERSONALIZATION', () => writerFixture(serviceVersionId, claimIds[index], body));
+      const generated = await personalization.generateForLead(s.workspaceId, campaignId, leads[index].id, step.id);
+      expect(['FAILED', 'BLOCKED']).toContain(generated.status);
+      await expect(personalization.approvePersonalizations(s.workspaceId, [generated.id!], fixtureActor)).rejects.toMatchObject({ code: 'QUALITY_CHECK_FAILED' });
+      const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId, enrollment: { leadId: leads[index].id } } });
+      await engine.prepareOutbound(s.workspaceId, outbound.id);
+      expect(await db().outboundEmail.findUniqueOrThrow({ where: { id: outbound.id } })).toMatchObject({ status: 'AWAITING_APPROVAL' });
+      expect((await engine.sendOutbound(s.workspaceId, outbound.id, MONDAY_10_UTC)).outcome).toBe('skipped');
+    }
     expect(fakes.gmail.sent).toHaveLength(0);
   });
 });

@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
-import { adapters } from '../core/container.js';
 import { sha256 } from '../core/crypto.js';
 import { AI_PROVIDER_BASE_URLS } from '../../../integrations/src/ai/openai-compatible.js';
 import { monthSpend } from './ai.js';

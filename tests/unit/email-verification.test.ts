@@ -49,6 +49,14 @@ describe('first-party email verification primitives', () => {
     expect(nx.primaryStatus).toBe('INVALID');
   });
 
+  it('keeps verification unknown if implicit MX cannot be ruled out before the timeout', async () => {
+    const result = await inspectEmail('person@example.com', resolver({
+      resolveMx: vi.fn().mockResolvedValue([]),
+      resolve4: vi.fn().mockImplementation(() => new Promise(() => undefined)),
+    }), 5);
+    expect(result).toMatchObject({ primaryStatus: 'UNKNOWN', dns: { status: 'DNS_ERROR' } });
+  });
+
   it('treats SMTP acceptance as unconfirmed and classifies temporary and permanent replies conservatively', () => {
     expect(classifySmtpReply('250 2.1.5 Recipient OK').classification).toBe('ACCEPTED_BUT_UNCONFIRMED');
     expect(classifySmtpReply('550 5.1.1 User unknown').classification).toBe('USER_UNKNOWN');

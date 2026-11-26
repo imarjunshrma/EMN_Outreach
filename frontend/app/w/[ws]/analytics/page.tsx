@@ -1,5 +1,7 @@
 'use client';
 
+import { TrackingTotals } from '@/components/tracking-totals';
+
 import { useState } from 'react';
 import { useWsQuery } from '@/lib/hooks';
 import { fmtMoney, fmtPct, fmtUsd } from '@/lib/format';
@@ -22,8 +24,8 @@ export default function Analytics() {
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
               <Stat label="Prospects added" value={o.measured.prospectsAdded} /><Stat label="Qualified" value={o.measured.qualified} hint={`${fmtPct(o.rates.qualificationRatePct)} of added`} /><Stat label="Verified emails" value={o.measured.verifiedEmails} />
-              <Stat label="Emails sent" value={o.measured.emailsSent} /><Stat label="Replies" value={o.measured.replies} hint={`${fmtPct(o.rates.replyRatePct)} reply rate`} /><Stat label="Positive replies" value={o.measured.positiveReplies} hint={fmtPct(o.rates.positiveReplyRatePct)} />
-              <Stat label="Meetings booked" value={o.measured.meetingsBooked} hint={fmtPct(o.rates.meetingRatePct)} /><Stat label="Hard bounces" value={o.measured.bounces} hint={`${fmtPct(o.rates.bounceRatePct)} bounce rate`} /><Stat label="Unsubscribes" value={o.measured.unsubscribes} />
+              <Stat label="Provider-accepted emails" value={o.measured.emailsSent} /><Stat label="Replies" value={o.measured.replies} hint={`${fmtPct(o.rates.replyRatePct)} of accepted sends`} /><Stat label="Positive replies" value={o.measured.positiveReplies} hint={fmtPct(o.rates.positiveReplyRatePct)} />
+              <Stat label="Meetings booked" value={o.measured.meetingsBooked} hint={fmtPct(o.rates.meetingRatePct)} /><Stat label="Hard bounces" value={o.measured.bounces} hint={`${fmtPct(o.rates.bounceRatePct)} of accepted sends`} /><Stat label="Unsubscribes" value={o.measured.unsubscribes} />
               <Stat label="Complaints detected" value={o.measured.complaintsDetected} /><Stat label="Send failures" value={o.measured.sendFailures} /><Stat label="Deals won" value={o.measured.wonDeals} />
             </div>
             {o.intelligence && <Card title="Prospect research and email evaluation">
@@ -34,11 +36,12 @@ export default function Analytics() {
                 <Stat label="Embedding tokens" value={o.intelligence.embeddingTokens} />
               </div>
             </Card>}
+            <Card title="Tracking totals across all dates"><TrackingTotals totals={o.lifetimeTracking} /></Card>
             <Card title="Estimates (not directly measured)">
               <Table head={['Metric', 'Value', 'Why it is an estimate']}>
-                <tr><td className="td">Delivered emails</td><td className="td">{o.estimates.deliveredEmails.value}</td><td className="td text-xs text-slate-500">{o.estimates.deliveredEmails.note}</td></tr>
-                <tr><td className="td">Opens</td><td className="td">{o.estimates.opens.value}</td><td className="td text-xs text-slate-500">{o.estimates.opens.note}</td></tr>
-                <tr><td className="td">Clicks</td><td className="td">{o.estimates.clicks.value}</td><td className="td text-xs text-slate-500">{o.estimates.clicks.note}</td></tr>
+                <tr><td className="td">Provider-confirmed deliveries</td><td className="td">Unavailable</td><td className="td text-xs text-slate-500">Connected mailbox transports do not report delivery confirmation.</td></tr>
+                <tr><td className="td">Estimated unique opens</td><td className="td">{o.estimates.opens.value}</td><td className="td text-xs text-slate-500">{o.estimates.opens.note}</td></tr>
+                <tr><td className="td">Estimated unique link clicks</td><td className="td">{o.estimates.clicks.value}</td><td className="td text-xs text-slate-500">{o.estimates.clicks.note}</td></tr>
                 <tr><td className="td">Won deal value</td><td className="td">{fmtMoney(o.estimates.wonValueCents.value)}</td><td className="td text-xs text-slate-500">{o.estimates.wonValueCents.note}</td></tr>
                 <tr><td className="td">AI cost</td><td className="td">{fmtUsd(o.estimates.aiCostUsd.value)}</td><td className="td text-xs text-slate-500">{o.estimates.aiCostUsd.note}</td></tr>
                 <tr><td className="td">Complaints</td><td className="td">—</td><td className="td text-xs text-slate-500">{o.estimates.complaints.note}</td></tr>
@@ -53,7 +56,7 @@ export default function Analytics() {
       </div>
       <div className="mt-5"><Card title="Campaign performance & attribution">
         <QueryView q={camps} isEmpty={(d) => d.length === 0} empty={<p className="text-sm text-slate-500">No campaigns yet.</p>}>
-          {(rows) => <Table head={['Campaign', 'Status', 'Sent', 'Replies', 'Reply rate', 'Positive', 'Bounces', 'Unsubs', 'Complaints', 'Opportunities', 'Pipeline']}>{rows.map((c) => <tr key={c.id}><td className="td">{c.name}</td><td className="td"><Badge>{c.status}</Badge></td><td className="td">{c.sent}</td><td className="td">{c.replies}</td><td className="td">{fmtPct(c.replyRatePct)}</td><td className="td">{c.positive}</td><td className="td">{c.bounces}</td><td className="td">{c.unsubscribes}</td><td className="td">{c.complaints}</td><td className="td">{c.opportunities}</td><td className="td">{fmtMoney(c.pipelineValueCents)}</td></tr>)}</Table>}
+          {(rows) => <Table head={['Campaign', 'Status', 'Accepted', 'Tracking (all dates)', 'Replies', 'Replies / accepted', 'Positive', 'Bounces', 'Unsubs', 'Complaints in replies', 'Opportunities', 'Pipeline']}>{rows.map((c) => <tr key={c.id}><td className="td">{c.name}</td><td className="td"><Badge>{c.status}</Badge></td><td className="td">{c.sent}</td><td className="td"><TrackingTotals totals={c.lifetimeTracking} /></td><td className="td">{c.replies}</td><td className="td">{fmtPct(c.replyRatePct)}</td><td className="td">{c.positive}</td><td className="td">{c.bounces}</td><td className="td">{c.unsubscribes}</td><td className="td">{c.complaints}</td><td className="td">{c.opportunities}</td><td className="td">{fmtMoney(c.pipelineValueCents)}</td></tr>)}</Table>}
         </QueryView>
       </Card></div>
       <div className="mt-5"><Card title="Mailbox performance">

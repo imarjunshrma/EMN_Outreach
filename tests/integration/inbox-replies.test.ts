@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { db } from '../../backend/src/core/db.js';
+import { campaignPerformance, stepPerformance } from '../../backend/src/services/analytics.js';
+import { getLead } from '../../backend/src/services/leads.js';
 import * as engine from '../../backend/src/services/engine.js';
 import { syncAccount } from '../../backend/src/services/accounts.js';
 import { classifyMessage, heuristicClassify, sendReply } from '../../backend/src/services/inbox.js';
@@ -36,6 +38,71 @@ async function sentCampaign(stopOnAutoReply = false) {
 const raw = (lines: string[]) => Buffer.from(lines.join('\r\n'));
 
 describe('reply synchronization & stop rules', () => {
+  it('attributes unique tracking events and preserves redirects when tracking is disabled', async () => {
+    const { s, mailbox, lead, campaignId } = await sentCampaign();
+    const outbound = await db().outboundEmail.findFirstOrThrow({ where: { campaignId } });
+    await db().campaign.update({ where: { id: campaignId }, data: { trackOpens: true, trackClicks: true } });
+    const link = await db().trackedLink.create({ data: { workspaceId: s.workspaceId, outboundEmailId: outbound.id, token: 'test-tracking-token', url: 'https://example.com/report?q=1' } });
+    const agent = request(getApp());
+    const pixel = `/api/v1/public/t/o/${outbound.id}.gif`;
+    const click = `/api/v1/public/t/c/${link.token}`;
+    expect((await agent.get(pixel).set('Sec-Purpose', 'prefetch')).status).toBe(200);
+    expect((await agent.get(click).set('User-Agent', 'SecurityScanner')).headers.location).toBe(link.url);
+    expect(await db().emailEvent.count({ where: { type: { in: ['OPENED', 'CLICKED'] } } })).toBe(0);
+    for (let i = 0; i < 2; i++) {
+      expect((await agent.get(pixel)).status).toBe(200);
+      expect((await agent.get(click)).status).toBe(302);
+    }
+    const events = await db().emailEvent.findMany({ where: { type: { in: ['OPENED', 'CLICKED'] } } });
+    expect(events).toHaveLength(2);
+    for (const event of events) expect(event).toMatchObject({ workspaceId: s.workspaceId, campaignId, leadId: lead.id, emailAccountId: mailbox.id, outboundEmailId: outbound.id });
+    const totals = { rawPixels: 3, uniquePixels: 1, automatedPixels: 1, estimatedOpens: 1, rawClicks: 3, uniqueLinks: 1, automatedClicks: 1, estimatedClicks: 1 };
+    expect((await getLead(s.workspaceId, lead.id)).lifetimeTracking).toEqual(totals);
+    expect((await getLead(s.workspaceId, lead.id)).events.filter(e => ['OPENED', 'CLICKED'].includes(e.type))).toHaveLength(2);
+    expect((await campaignPerformance(s.workspaceId)).find(c => c.id === campaignId)).toMatchObject({ estimatedOpens: 1, estimatedClicks: 1, lifetimeTracking: totals });
+    const history = await s.agent.get(`/api/v1/w/${s.workspaceId}/campaigns/${campaignId}/activity`);
+    expect(history.status).toBe(200);
+    expect(history.body.lifetimeTracking).toEqual(totals);
+    const outsider = await createUserSession('tracking-outsider@fixture.example');
+    const otherActivity = await outsider.agent.get(`/api/v1/w/${outsider.workspaceId}/campaigns/${campaignId}/activity`);
+    expect(otherActivity.status).toBe(404);
+    const mailboxHealth = await s.agent.get(`/api/v1/w/${s.workspaceId}/mailbox-health`);
+    expect(mailboxHealth.status).toBe(200);
+    expect(mailboxHealth.body.find((row: { id: string }) => row.id === mailbox.id)).toMatchObject({ lifetimeTracking: totals });
+    expect(history.body.data.map((event: { type: string }) => event.type)).toEqual(expect.arrayContaining(['OPENED', 'CLICKED', 'SENT']));
+    await db().campaign.update({ where: { id: campaignId }, data: { trackClicks: false, trackOpens: false } });
+    expect((await agent.get(click)).headers.location).toBe(link.url);
+    expect((await agent.get(pixel)).status).toBe(200);
+    expect((await getLead(s.workspaceId, lead.id)).lifetimeTracking).toEqual(totals);
+    expect((await db().trackedLink.findUniqueOrThrow({ where: { id: link.id } })).clickCount).toBe(3);
+    const token = unsubscribeToken(s.workspaceId, lead.emailNormalized, lead.id, outbound.id);
+    expect((await agent.post(`/api/v1/public/unsubscribe/${token}`)).status).toBe(200);
+    expect(await db().emailEvent.findFirst({ where: { type: 'UNSUBSCRIBED', leadId: lead.id } })).toMatchObject({ campaignId, outboundEmailId: outbound.id });
+  });
+
+  it('resumes reply effects when the message was already stored before an interruption', async () => {
+    const { s, mailbox, lead, campaignId, sentMsg } = await sentCampaign();
+    const conversation = await db().conversation.findFirstOrThrow({ where: { workspaceId: s.workspaceId, campaignId } });
+    const providerMessageId = 'interrupted-inbound-message';
+    const m = await parseRawMessage(raw([
+      'From: Jane <jane@acme.io>', 'To: sender@ourco.com', 'Subject: Re: Hello',
+      'Message-ID: <interrupted-inbound-message@acme.io>', `In-Reply-To: ${sentMsg.messageId}`, '', 'Please send more details.',
+    ]), { providerMessageId });
+    const stored = await db().emailMessage.create({ data: {
+      workspaceId: s.workspaceId, emailAccountId: mailbox.id, conversationId: conversation.id, direction: 'INBOUND',
+      providerMessageId, internetMessageId: m.internetMessageId, references: [], fromAddress: lead.emailNormalized,
+      toAddresses: [mailbox.emailAddress], ccAddresses: [], sentAt: m.date, ingestPending: true,
+    } });
+    fakes.gmail.inbox.push(m, m);
+    await syncAccount(mailbox.id);
+    expect((await db().emailMessage.findUniqueOrThrow({ where: { id: stored.id } })).ingestPending).toBe(false);
+    expect(await db().emailEvent.count({ where: { type: 'REPLIED', campaignId, emailMessageId: stored.id } })).toBe(1);
+    expect((await db().sequenceEnrollment.findFirstOrThrow({ where: { campaignId } })).status).toBe('STOPPED_REPLIED');
+    const firstReply = await db().emailEvent.findFirstOrThrow({ where: { type: 'REPLIED', campaignId } });
+    await db().emailEvent.create({ data: { workspaceId: s.workspaceId, campaignId, enrollmentId: firstReply.enrollmentId, type: 'REPLIED' } });
+    expect(await stepPerformance(s.workspaceId, campaignId)).toMatchObject([{ step: 1, sent: 1, replied: 2 }]);
+  });
+
   it('threads a reply to the original email, stops the sequence and classifies it (AI)', async () => {
     const { s, mailbox, lead, campaignId, sentMsg } = await sentCampaign();
     await addAiProvider(s.workspaceId);

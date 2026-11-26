@@ -209,6 +209,37 @@ describe('AI personalization engine', () => {
     expect((await pz.approvePersonalizations(s.workspaceId, [r.id!], ACTOR)).approved).toBe(1);
   });
 
+  it('generates three alternatives and selects one without skipping draft approval', async () => {
+    const s = await createUserSession('draft-variants@fixture.example');
+    const { campaignId, leads, steps } = await setup(s);
+    ai.on('PERSONALIZATION', honestWriter()).on('FACT_CHECK', factChecker);
+    const base = await pz.generateForLead(s.workspaceId, campaignId, leads[0].id, steps[0].id);
+    expect(base.status).toBe('GENERATED');
+    const baseRow = await db().leadPersonalization.findUniqueOrThrow({ where: { id: base.id! } });
+    ai.on('PERSONALIZATION', honestWriter(req => {
+      const body = req.user.includes('Start with a verified recent development')
+        ? 'Hi there, Saw that Studio A launched a weekly podcast on hiring designers. We help teams distribute short clips from each episode. Would an outline help?'
+        : req.user.includes('Lead with one useful educational idea')
+          ? 'Hi there, A simple way to build a short video is to open with a client question. Studio A launched a weekly podcast on hiring designers. Could I send a practical outline for repurposing an episode?'
+          : 'Hi there, How are you deciding what to share beyond each episode? Studio A launched a weekly podcast on hiring designers. We help with short clip distribution. Open to a quick idea?';
+      return { body };
+    }));
+    const { variants } = await pz.generateDraftVariants(s.workspaceId, baseRow.id, ACTOR);
+    expect(variants.map(v => v.label)).toEqual(['Recent development', 'Educational idea', 'Discovery question']);
+    expect(new Set(variants.map(v => v.body)).size).toBe(3);
+    expect(new Set(variants.map(v => v.variantContextHash)).size).toBe(1);
+    expect((await db().leadPersonalization.findUniqueOrThrow({ where: { id: baseRow.id } })).body).toBe(baseRow.body);
+    const index = variants.findIndex(v => v.selectable);
+    expect(index).toBeGreaterThanOrEqual(0);
+    await expect(pz.selectDraftVariant(s.workspaceId, baseRow.id, '0'.repeat(64), baseRow.revision, ACTOR)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(pz.selectDraftVariant(s.workspaceId, baseRow.id, variants[index].selectionId, baseRow.revision, ACTOR)).resolves.toMatchObject({ status: 'GENERATED' });
+    const selected = await db().leadPersonalization.findUniqueOrThrow({ where: { id: baseRow.id } });
+    expect(selected.body).toBe(variants[index].body);
+    expect(selected.approvedContentHash).toBeNull();
+    expect(await db().personalizationRevision.count({ where: { personalizationId: baseRow.id } })).toBe(2);
+    await expect(pz.selectDraftVariant(s.workspaceId, baseRow.id, variants[index].selectionId, baseRow.revision, ACTOR)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
   it('6. missing research never produces fabricated personalization', async () => {
     const s = await createUserSession('owner@x.com');
     ai.on('PERSONALIZATION', honestWriter()).on('FACT_CHECK', factChecker);

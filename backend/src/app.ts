@@ -104,10 +104,12 @@ export function createApp(): Express {
   });
 
   // ---------------- Microsoft Graph change notifications
-  app.post('/api/v1/webhooks/graph', async (req, res) => {
+  app.post('/api/v1/webhooks/graph', async (req, res, next) => {
     if (typeof req.query.validationToken === 'string') { res.type('text/plain').send(req.query.validationToken); return; }
-    res.status(202).end(); // respond quickly; work is queued
-    accounts.handleGraphNotifications(req.body ?? {}).catch((e) => logger.error({ err: e }, 'graph notification handling failed'));
+    try {
+      await accounts.handleGraphNotifications(req.body ?? {});
+      res.status(202).end();
+    } catch (error) { next(error); }
   });
 
   // ---------------- Public unsubscribe (RFC 8058 one-click POST + link-based confirmation)
@@ -122,12 +124,12 @@ export function createApp(): Express {
 
   // ---------------- Optional tracking endpoints (only record when the campaign enabled tracking)
   app.get('/api/v1/public/t/o/:id.gif', async (req, res) => {
-    await ops.recordOpen(String(req.params.id)).catch(() => undefined);
+    await ops.recordOpen(String(req.params.id), req.method === 'HEAD' || ops.isAutomatedTrackingRequest(req.headers)).catch(() => undefined);
     res.setHeader('cache-control', 'no-store, private');
     res.type('image/gif').send(ops.PIXEL);
   });
   app.get('/api/v1/public/t/c/:token', async (req, res) => {
-    const url = await ops.recordClick(String(req.params.token)).catch(() => null);
+    const url = await ops.recordClick(String(req.params.token), req.method === 'HEAD' || ops.isAutomatedTrackingRequest(req.headers)).catch(() => null);
     if (!url || !/^https?:\/\//.test(url)) { res.status(404).send('Link not found'); return; }
     res.redirect(302, url);
   });

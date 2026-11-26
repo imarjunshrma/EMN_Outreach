@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { LAWFUL_BASES } from '@/lib/constants';
-import { Badge, Button, Card, Checkbox, ConfirmButton, Field, Input, Modal, Notice, PageHeader, QueryView, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Checkbox, ConfirmButton, Field, Input, Modal, Notice, PageHeader, QueryView, Table, Textarea } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const BLANK = { countryCode: '', label: '', sendingAllowed: false, allowedLawfulBases: ['CONSENT'], requirePostalAddress: true, requireUnsubscribeLink: true, reviewedByOwner: false, notes: '' };

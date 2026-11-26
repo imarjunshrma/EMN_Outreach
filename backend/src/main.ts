@@ -1,3 +1,4 @@
+import { requireDatabaseExtensions } from './core/database-preflight.js';
 import { config } from './core/config.js';
 import { createApp } from './app.js';
 import { logger } from './core/logger.js';
@@ -9,6 +10,7 @@ import { keyring } from './core/crypto.js';
 process.env.EMN_SERVICE ??= 'emn-api';
 const cfg = config(); // validates env and exits on misconfiguration
 keyring(); // validates encryption keys at boot
+await requireDatabaseExtensions();
 
 const server = createApp().listen(cfg.API_PORT, cfg.API_HOST, () => logger.info({ port: cfg.API_PORT }, 'Outvexa API listening'));
 server.headersTimeout = 65_000;

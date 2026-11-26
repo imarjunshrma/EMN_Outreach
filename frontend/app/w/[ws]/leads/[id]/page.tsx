@@ -1,5 +1,7 @@
 'use client';
 
+import { TrackingTotals } from '@/components/tracking-totals';
+
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
@@ -79,6 +81,7 @@ function LeadDetailInner() {
                 {l.scores[0] ? (
                   <div className="text-sm">
                     <p className="text-3xl font-semibold">{l.scores[0].score}<span className="text-base text-slate-500"> /100 · tier {l.scores[0].tier}</span></p>
+                    <p className="mt-2 text-sm"><Badge>{l.qualificationReview?.replaceAll('_', ' ') ?? 'NEEDS REVIEW'}</Badge> {l.qualificationReviewReason}</p>
                     <p className="mt-1">{l.scores[0].qualified ? <Badge color="green">Qualified</Badge> : <Badge color="red">Not qualified</Badge>} <span className="text-xs text-slate-500">vs {l.scores[0].icp?.name}</span></p>
                     <ul className="mt-3 space-y-1">{(l.scores[0].reasons as any[]).map((r, i) => <li key={i}>{r.met ? '✅' : '❌'} <b>{r.criterion}</b>: {r.explanation}</li>)}</ul>
                     {(l.scores[0].risks as string[]).length > 0 && <p className="mt-2 text-xs text-amber-700">Risks: {(l.scores[0].risks as string[]).join('; ')}</p>}
@@ -104,11 +107,12 @@ function LeadDetailInner() {
               </Card>
             ))}</div>
           )}
-          {tab === 'activity' && (
+          {tab === 'activity' && (<>
+            <Card title="Email tracking across all dates"><TrackingTotals totals={l.lifetimeTracking} /></Card>
             <Card title="Email events">
               {l.events.length === 0 ? <p className="text-sm text-slate-500">No email activity yet.</p> : <Table head={['When', 'Event', 'Details']}>{l.events.map((e: any) => <tr key={e.id}><td className="td text-xs">{fmtDate(e.occurredAt)}</td><td className="td"><Badge>{e.type}</Badge></td><td className="td text-xs text-slate-500">{JSON.stringify(e.metadata) === '{}' ? '' : JSON.stringify(e.metadata)}</td></tr>)}</Table>}
             </Card>
-          )}
+          </>)}
           {tab === 'crm' && (
             <div className="grid gap-4 lg:grid-cols-3">
               <Card title="Notes">

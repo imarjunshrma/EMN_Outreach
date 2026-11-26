@@ -231,6 +231,9 @@ export function LeadReviewModal({ campaignId, leadId, onClose }: { campaignId: s
   const ws = useWs();
   const research = useWsMutation(() => ({ path: `/leads/${leadId}/research`, body: { campaignId } }), { success: 'Research queued' });
   const q = useWsQuery<any>(`/campaigns/${campaignId}/personalizations/lead/${leadId}`);
+  const exclude = useWsMutation<string>((reason) => ({
+    path: '/leads/bulk', body: { ids: [leadId], action: 'review_qualification', review: 'DISQUALIFIED', reviewReason: reason },
+  }), { success: 'Prospect excluded from outreach' });
   const [instr, setInstr] = useState<string | null>(null);
   const saveInstr = useWsMutation(() => ({ path: `/leads/${leadId}/ai-instructions`, method: 'PUT', body: { aiInstructions: instr } }), { success: 'Prospect instructions saved' });
   return (
@@ -239,8 +242,17 @@ export function LeadReviewModal({ campaignId, leadId, onClose }: { campaignId: s
         {(d) => (
           <div className="space-y-4">
             <div className="text-sm"><b>{fullName(d.lead) || d.lead.email}</b> · {d.lead.title ?? 'no title'} · {d.lead.company?.name ?? 'no company'} · {d.lead.email} · AI cost for this lead {usd(d.aiCostUsd)}</div>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <Badge>{d.lead.emailVerificationStatus}</Badge>
+              <Badge>{d.lead.qualificationReview?.replaceAll('_', ' ') ?? 'Qualification not reviewed'}</Badge>
+              <span>ICP score {d.lead.currentScore ?? 'unavailable'}</span>
+            </div>
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="secondary" loading={research.isPending} onClick={() => research.mutate()}>Research this prospect</Button>
+              {d.lead.qualificationReview !== 'DISQUALIFIED' && <Button variant="secondary" loading={exclude.isPending} onClick={() => {
+                const reason = window.prompt('Exclude this prospect from outreach across the workspace. Enter a reason.');
+                if (reason && reason.trim().length >= 3) exclude.mutate(reason);
+              }}>Exclude from outreach</Button>}
               <Link className="text-sm underline" href={`/w/${ws}/copilot?leadId=${leadId}&campaignId=${campaignId}`}>Research with Copilot</Link>
             </div>
             <Card title={`Research used (${d.research.claims.length} evidence-backed claims${d.research.excludedByRules ? `, ${d.research.excludedByRules} excluded by research rules` : ''})`}>
@@ -266,6 +278,10 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
   const [rejectReasonCode, setRejectReasonCode] = useState('OTHER');
   const [rejectReason, setRejectReason] = useState('');
   const gen = useWsMutation<{ force: boolean }>((b) => ({ path: `/campaigns/${campaignId}/personalizations/generate`, body: { leadId, stepId: step.id, force: b.force, note: note || undefined } }), { success: (r: any) => (r.preserved ? `Preserved: ${r.preserved}` : `Result: ${r.status}`) });
+  const variants = useWsMutation(() => ({ path: `/personalizations/${row.id}/variants`, body: {} }), { success: 'Alternatives generated for review' });
+  const selectVariant = useWsMutation<string>((selectionId) => ({
+    path: `/personalizations/${row.id}/variants/select`, body: { selectionId, revision: row.revision },
+  }), { success: 'Alternative selected. Approval is still required.' });
   const save = useWsMutation(() => ({ path: `/personalizations/${row.id}`, method: 'PATCH', body: { ...edit, rerunFactCheck: true } }), { success: (r: any) => `Saved (revision ${r.revision}, ${r.status})`, onSuccess: () => setEdit(null) });
   const approve = useWsMutation(() => ({ path: '/personalizations/approve', body: { ids: [row.id] } }), { success: 'Approved' });
   const reject = useWsMutation(() => ({ path: `/personalizations/${row.id}/reject`, body: { reason: rejectReason || rejectReasonCode.replaceAll('_', ' ').toLowerCase(), reasonCode: rejectReasonCode } }), { success: 'Rejected' });
@@ -315,6 +331,18 @@ function StepReview({ campaignId, leadId, step, row }: { campaignId: string; lea
           ? <Button variant="secondary" loading={gen.isPending} onClick={() => gen.mutate({ force: false })}>{row ? 'Regenerate' : 'Generate'}</Button>
           : <ConfirmButton variant="secondary" confirm="Regenerate and replace approved / manually edited content? The current text stays in the revision history and approval is reset." onConfirm={() => gen.mutate({ force: true })}>Force regenerate</ConfirmButton>}
       </div>
+      {row?.body && row.status !== 'APPROVED' && !edit && <div className="mt-3">
+        <Button variant="secondary" loading={variants.isPending} onClick={() => variants.mutate()}>Generate three alternatives</Button>
+      </div>}
+      {Array.isArray(row?.draftVariants) && row.draftVariants.length > 0 && <div className="mt-3 grid gap-3 lg:grid-cols-3">
+        {row.draftVariants.map((draft: any) => <Card key={draft.label} title={draft.label}>
+          <p className="text-sm font-medium">{draft.subject}</p>
+          <p className="my-2 whitespace-pre-wrap text-sm">{draft.body}</p>
+          <CheckList quality={draft.quality} />
+          {row.status !== 'APPROVED' && draft.selectable && <Button variant="secondary" loading={selectVariant.isPending} onClick={() => selectVariant.mutate(draft.selectionId)}>Select for review</Button>}
+          {!draft.selectable && <p className="text-xs text-slate-500">This draft did not pass the quality or distinctness checks.</p>}
+        </Card>)}
+      </div>}
       {compare && detail.data && <RevisionCompare revisions={detail.data.revisions} />}
       {showPrompt && prompt.data && (
         <div className="mt-3 rounded border border-slate-200 p-2 text-xs">

@@ -4,7 +4,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate } from '@/lib/format';
-import { Badge, Button, Card, Checkbox, ConfirmButton, Empty, Field, Input, Modal, Notice, PageHeader, QueryView, Table, TimezoneSelect } from '@/components/ui';
+import { Badge, Button, Checkbox, ConfirmButton, Empty, Field, Input, Modal, Notice, PageHeader, QueryView, Table, TimezoneSelect } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const DAYS = [1, 2, 3, 4, 5, 6, 7];
@@ -32,8 +32,11 @@ function Mailboxes() {
                 <tr key={a.id}>
                   <td className="td"><b>{a.emailAddress}</b><div className="text-xs text-slate-500">{a.displayName}</div>{a.lastError && <div className="max-w-xs text-xs text-red-600">{a.lastError}</div>}</td>
                   <td className="td text-sm">{a.provider}{a.provider === 'SMTP_IMAP' && <div className="mt-1 flex gap-1 text-xs"><Badge color={a.connectionHealth?.smtp?.ok ? 'green' : a.connectionHealth?.smtp ? 'red' : 'gray'}>SMTP {a.connectionHealth?.smtp?.ok ? 'OK' : a.connectionHealth?.smtp ? 'Error' : '—'}</Badge><Badge color={a.connectionHealth?.imap?.ok ? 'green' : a.connectionHealth?.imap ? 'red' : 'gray'}>IMAP {a.connectionHealth?.imap?.ok ? 'OK' : a.connectionHealth?.imap ? 'Error' : '—'}</Badge></div>}</td>
-                  <td className="td"><Badge>{a.status}</Badge>{a.statusReason && <div className="max-w-xs text-xs text-slate-500">{a.statusReason}</div>}</td>
-                  <td className="td text-sm">{a.sentToday} / {a.dailySendLimit}</td>
+                  <td className="td"><Badge>{a.status}</Badge>{a.operatorPaused && a.status !== 'PAUSED' && <div className="text-xs">Operator hold</div>}{a.statusReason && <div className="max-w-xs text-xs text-slate-500">{a.statusReason}</div>}</td>
+                  <td className="td text-sm">
+                    <div>{a.sentToday} / {a.dailySendLimit} today</div>
+                    <div className="text-xs text-slate-500">{a.sentLastHour} {a.sendingWindow?.hourlySendLimit ? `/ ${a.sendingWindow.hourlySendLimit} ` : ''}in the last hour</div>
+                  </td>
                   <td className="td text-xs">{a.sent30d} sent · {a.bounces30d} bounces{a.bounceRate30d !== null && ` (${(a.bounceRate30d * 100).toFixed(1)}%)`}</td>
                   <td className="td">{a.domain ? <Badge>{a.domain.healthStatus}</Badge> : '—'}</td>
                   <td className="td text-xs">{fmtDate(a.lastSyncedAt)}</td>
@@ -42,7 +45,7 @@ function Mailboxes() {
                     <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'test' })}>Test connection</Button>
                     {a.status === 'CONNECTED' && <ConfirmButton variant="ghost" confirm={`Send one clearly labeled diagnostic email from ${a.emailAddress} back to the same mailbox? It will not contact a prospect or generate a reply.`} onConfirm={() => diagnostic.mutate(a.id)}>Send self-test</ConfirmButton>}
                     <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'resync' })}>Resync</Button>
-                    {a.status === 'PAUSED' ? <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'resume' })}>Resume</Button> : a.status === 'CONNECTED' && <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'pause' })}>Pause</Button>}
+                    {a.status === 'PAUSED' ? <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'resume' })}>Resume</Button> : !a.operatorPaused && ['CONNECTED', 'NEEDS_REAUTH', 'ERROR'].includes(a.status) && <Button variant="ghost" onClick={() => act.mutate({ id: a.id, a: 'pause' })}>Pause</Button>}
                     {['NEEDS_REAUTH', 'DISCONNECTED'].includes(a.status) && a.provider !== 'SMTP_IMAP' && <Button variant="secondary" onClick={() => oauth.mutate(a.provider === 'GMAIL' ? 'google' : 'microsoft')}>Reconnect</Button>}
                     {a.status !== 'DISCONNECTED' && <ConfirmButton variant="ghost" confirm="Disconnect this mailbox? Its active sequences will pause." onConfirm={() => disconnect.mutate(a.id)}>Disconnect</ConfirmButton>}
                   </td>
@@ -69,6 +72,15 @@ function EditModal({ account, onClose }: { account: any; onClose: () => void }) 
         <Field label="Reply-to (optional)"><Input value={f.replyTo} onChange={(e) => setF({ ...f, replyTo: e.target.value })} /></Field>
         <Field label="Daily send limit (this mailbox)"><Input type="number" min={1} value={f.dailySendLimit} onChange={(e) => setF({ ...f, dailySendLimit: Number(e.target.value) })} /></Field>
         <Field label="Minimum seconds between sends"><Input type="number" min={30} value={f.minSecondsBetweenSends} onChange={(e) => setF({ ...f, minSecondsBetweenSends: Number(e.target.value) })} /></Field>
+        <Field label="Hourly send limit" hint="Rolling 60 minutes across campaigns"><Input type="number" min={1} value={w.hourlySendLimit ?? ''} onChange={(e) => setF({ ...f, sendingWindow: { ...w, hourlySendLimit: e.target.value ? Number(e.target.value) : null } })} /></Field>
+        <Field label="Maximum seconds between sends" hint="Optional upper bound for randomized spacing. Quotas and schedules can delay sends further."><Input type="number" min={f.minSecondsBetweenSends} value={w.maxSecondsBetweenSends ?? ''} onChange={(e) => setF({ ...f, sendingWindow: { ...w, maxSecondsBetweenSends: e.target.value ? Number(e.target.value) : null } })} /></Field>
+        <Field label="Mailbox time zone" hint="Controls when the daily limit resets"><TimezoneSelect value={w.timezone} onChange={(e) => setF({ ...f, sendingWindow: { ...w, timezone: e.target.value } })} /></Field>
+        <Field label="Temporary-failure pause threshold"><Input type="number" min={1} max={20} value={w.temporaryFailureLimit ?? 3} onChange={e => setF({ ...f, sendingWindow: { ...w, temporaryFailureLimit: Number(e.target.value) } })} /></Field>
+        <Field label="Hard-bounce pause rate (%)" hint="Leave blank to inherit the workspace threshold."><Input type="number" min={0.1} max={100} step={0.1} value={w.bouncePauseRatePct ?? ''} onChange={e => setF({ ...f, sendingWindow: { ...w, bouncePauseRatePct: e.target.value ? Number(e.target.value) : null } })} /></Field>
+        <Field label="Bounce minimum sample" hint="Leave blank to inherit the workspace minimum."><Input type="number" min={5} max={10000} value={w.bounceMinimumSends ?? ''} onChange={e => setF({ ...f, sendingWindow: { ...w, bounceMinimumSends: e.target.value ? Number(e.target.value) : null } })} /></Field>
+        <Field label="Bounce lookback (days)"><Input type="number" min={1} max={90} value={w.bounceWindowDays ?? 30} onChange={e => setF({ ...f, sendingWindow: { ...w, bounceWindowDays: Number(e.target.value) } })} /></Field>
+        <Checkbox label="Assign new campaign recipients to this mailbox" checked={w.participateInRotation !== false} onChange={enabled => setF({ ...f, sendingWindow: { ...w, participateInRotation: enabled } })} />
+        <Field label="Automatic pause cooldown (minutes)"><Input type="number" min={5} max={1440} value={w.recoveryCooldownMinutes ?? 30} onChange={e => setF({ ...f, sendingWindow: { ...w, recoveryCooldownMinutes: Number(e.target.value) } })} /></Field>
         <div className="md:col-span-2"><Field label="Signature (plain text)"><textarea className="input" rows={3} value={f.signatureText} onChange={(e) => setF({ ...f, signatureText: e.target.value })} /></Field></div>
       </div>
       <div className="mt-3 rounded border border-slate-200 p-3">
@@ -77,7 +89,6 @@ function EditModal({ account, onClose }: { account: any; onClose: () => void }) 
           <Field label="Days">{DAYS.map((d) => <label key={d} className="mr-2 text-xs"><input type="checkbox" checked={w.days.includes(d)} onChange={(e) => setF({ ...f, sendingWindow: { ...w, days: e.target.checked ? [...w.days, d].sort() : w.days.filter((x: number) => x !== d) } })} /> {['', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'][d]}</label>)}</Field>
           <Field label="From"><Input type="time" value={w.start} onChange={(e) => setF({ ...f, sendingWindow: { ...w, start: e.target.value } })} /></Field>
           <Field label="To"><Input type="time" value={w.end} onChange={(e) => setF({ ...f, sendingWindow: { ...w, end: e.target.value } })} /></Field>
-          <Field label="Time zone"><TimezoneSelect value={w.timezone} onChange={(e) => setF({ ...f, sendingWindow: { ...w, timezone: e.target.value } })} /></Field>
         </div>}
       </div>
     </Modal>

@@ -88,7 +88,7 @@ export async function importSuppressions(workspaceId: string, csv: Buffer, actor
 
 /** Public unsubscribe (link click or RFC 8058 one-click POST). Idempotent. */
 export async function processUnsubscribe(token: string, secret: string) {
-  const p = verifyPayload<{ w: string; e: string; l: string | null }>(secret, token);
+  const p = verifyPayload<{ w: string; e: string; l: string | null; o?: string }>(secret, token);
   if (!p) throw new AppError('INVALID_TOKEN', 'This unsubscribe link is invalid', 400);
   const ws = await db().workspace.findUnique({ where: { id: p.w } });
   if (!ws) throw new AppError('INVALID_TOKEN', 'This unsubscribe link is invalid', 400);
@@ -98,7 +98,14 @@ export async function processUnsubscribe(token: string, secret: string) {
     if (lead.status !== 'UNSUBSCRIBED') {
       await db().lead.update({ where: { id: lead.id }, data: { status: 'UNSUBSCRIBED', statusChanges: { create: { workspaceId: p.w, fromStatus: lead.status, toStatus: 'UNSUBSCRIBED', reason: 'unsubscribe link' } } } });
     }
-    await db().emailEvent.upsert({ where: { dedupeKey: `UNSUBSCRIBED:${lead.id}` }, update: {}, create: { workspaceId: p.w, type: 'UNSUBSCRIBED', leadId: lead.id, dedupeKey: `UNSUBSCRIBED:${lead.id}`, metadata: { source: 'link' } } });
+    const outbound = p.o ? await db().outboundEmail.findFirst({
+      where: { id: p.o, workspaceId: p.w, toAddress: p.e, enrollment: { leadId: lead.id } },
+      select: { id: true, campaignId: true, enrollmentId: true, emailAccountId: true },
+    }) : null;
+    const attribution = outbound ? { outboundEmailId: outbound.id, campaignId: outbound.campaignId, enrollmentId: outbound.enrollmentId, emailAccountId: outbound.emailAccountId } : {};
+    await db().emailEvent.upsert({ where: { dedupeKey: `UNSUBSCRIBED:${lead.id}` }, update: {}, create: {
+      workspaceId: p.w, type: 'UNSUBSCRIBED', leadId: lead.id, ...attribution, dedupeKey: `UNSUBSCRIBED:${lead.id}`, metadata: { source: 'link' },
+    } });
   }
   await publish(p.w, 'lead.unsubscribed', { email: p.e });
   return { workspaceName: ws.senderLegalName ?? ws.name };
@@ -140,10 +147,21 @@ export async function deleteRule(workspaceId: string, id: string, actor: Actor) 
 }
 
 /** Full eligibility check used at enrollment AND again right before every send. */
-export async function canContact(workspaceId: string, lead: { emailNormalized: string; country: string | null; lawfulBasis: LawfulBasisValue; status: string; emailVerificationStatus: string; emailVerifiedAt?: Date | null }, opts: { requireVerified: boolean }) {
-  void opts; // retained for API compatibility; verification is a workspace-wide safety gate.
+export async function canContact(workspaceId: string, lead: { id?: string; emailNormalized: string; country: string | null; lawfulBasis: LawfulBasisValue; status: string; emailVerificationStatus: string; emailVerifiedAt?: Date | null; qualificationReview?: string | null; qualificationReviewScoreId?: string | null }, opts: { requireVerified: boolean; icpId?: string | null }) {
   if (lead.emailNormalized.startsWith('research-only:')) return { allowed: false, reasons: ['No email address has been supplied for this prospect.'] };
   const reasons: string[] = [];
+  if (lead.qualificationReview === 'DISQUALIFIED' || lead.qualificationReview === 'NEEDS_REVIEW') reasons.push('held by qualification review');
+  if (opts.icpId) {
+    const score = lead.id && lead.qualificationReview === 'QUALIFIED' && lead.qualificationReviewScoreId
+      ? await db().leadScore.findFirst({
+          where: { workspaceId, leadId: lead.id, icpId: opts.icpId, icp: { isActive: true, workspaceId } },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: { id: true, qualified: true, createdAt: true, icp: { select: { updatedAt: true } } },
+        }) : null;
+    if (!score?.qualified || score.id !== lead.qualificationReviewScoreId || !score.icp || score.createdAt < score.icp.updatedAt) {
+      reasons.push('current campaign ICP qualification requires human review');
+    }
+  }
   const sup = await isSuppressed(workspaceId, lead.emailNormalized);
   if (sup.suppressed) reasons.push(`suppressed (${sup.reason})`);
   if (['UNSUBSCRIBED', 'BOUNCED', 'CUSTOMER', 'DISQUALIFIED', 'NOT_INTERESTED'].includes(lead.status)) reasons.push(`lead status ${lead.status}`);

@@ -10,7 +10,6 @@ import { SetupLinkNotice, type SetupResult } from '@/components/platform/setup-l
 import { LoginAsButton } from '@/components/platform/login-as';
 import Link from 'next/link';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 type Member = { id: string; role: string; user: { id: string; name: string; email: string; mfaEnabled: boolean; emailVerifiedAt: string | null; lastLoginAt: string | null; status?: string; platformRole?: string | null }; workspaces: Array<{ id: string; name: string; role: string }> };
 type Data = { members: Member[]; workspaces: Array<{ id: string; name: string }>; orgRoles: string[]; workspaceRoles: string[] };
 type Pending =

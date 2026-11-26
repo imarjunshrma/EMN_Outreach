@@ -1,3 +1,4 @@
+import { emptyTracking, trackingTotals } from './tracking-analytics.js';
 import { Resolver } from 'node:dns/promises';
 import { z } from 'zod';
 import { db } from '../core/db.js';
@@ -9,6 +10,7 @@ import { PROVIDER_REGISTRY } from '../../../shared/src/provider-registry.js';
 import { classifyMailboxHealth } from '../../../shared/src/mailbox-health.js';
 import { getSecret, requireSecret } from './integrations.js';
 import { readSettings } from './workspace.js';
+import { listAccounts } from './accounts.js';
 
 // Domain manager: ownership verification (TXT), DNS propagation across public resolvers, recommended
 // records per mailbox provider, optional one-click record creation via a DNS provider adapter
@@ -126,24 +128,37 @@ export async function mailboxHealth(workspaceId: string) {
   const workspace = await db().workspace.findUnique({ where: { id: workspaceId }, select: { settings: true } });
   const readinessManagementEnabled = readSettings(workspace?.settings).mailboxReadinessManagement;
   const since = new Date(Date.now() - 30 * 86400_000);
-  const startDay = new Date(); startDay.setUTCHours(0, 0, 0, 0);
-  const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true, connectionConfig: true } });
-  const events = await db().emailEvent.groupBy({ by: ['emailAccountId', 'type'], where: { workspaceId, occurredAt: { gte: since }, type: { in: ['SENT', 'BOUNCED_HARD', 'COMPLAINED'] } }, _count: { _all: true } });
-  const today = await db().outboundEmail.groupBy({ by: ['emailAccountId'], where: { workspaceId, sentAt: { gte: startDay } }, _count: { _all: true } });
-  const domains = await db().domain.findMany({ where: { workspaceId }, select: { name: true, healthStatus: true, verifiedAt: true } });
+  const accounts = await db().emailAccount.findMany({ where: { workspaceId }, select: { id: true, emailAddress: true, provider: true, status: true, statusReason: true, autoPauseUntil: true, lastSyncedAt: true, lastSentAt: true, lastReceivedAt: true, lastError: true, lastErrorAt: true, dailySendLimit: true, connectionConfig: true } });
+  const [events, usage, domains, history, tracking] = await Promise.all([
+    db().emailEvent.groupBy({
+      by: ['emailAccountId', 'type'], where: { workspaceId, occurredAt: { gte: since }, type: { in: ['SENT', 'BOUNCED_HARD', 'BOUNCED_SOFT', 'FAILED', 'COMPLAINED'] } },
+      _count: { _all: true }, _max: { occurredAt: true },
+    }),
+    listAccounts(workspaceId),
+    db().domain.findMany({ where: { workspaceId }, select: { name: true, healthStatus: true, verifiedAt: true } }),
+    db().auditLog.findMany({
+      where: { workspaceId, entityType: 'email_account', action: { in: ['email_account.paused', 'email_account.resumed', 'email_account.auto_paused_provider_errors', 'email_account.auto_paused_bounce_rate', 'email_account.needs_reauth', 'email_account.disconnected'] } },
+      orderBy: { createdAt: 'desc' }, take: 150, select: { entityId: true, action: true, createdAt: true },
+    }),
+    trackingTotals(workspaceId, 'mailbox'),
+  ]);
   return accounts.map((a) => {
     const n = (t: string) => events.find((e) => e.emailAccountId === a.id && e.type === t)?._count._all ?? 0;
     const sent = n('SENT');
     const dom = domains.find((d) => a.emailAddress.endsWith(`@${d.name}`));
     const hardBounces = n('BOUNCED_HARD');
     const complaints = n('COMPLAINED');
+    const mailboxUsage = usage.find(row => row.id === a.id);
+    const hourlyLimit = (mailboxUsage?.sendingWindow as { hourlySendLimit?: number | null } | null | undefined)?.hourlySendLimit ?? null;
+    const lastAcceptedAt = events.find(event => event.emailAccountId === a.id && event.type === 'SENT')?._max.occurredAt ?? null;
     const health = classifyMailboxHealth({ connectionStatus: a.status, sent30d: sent, hardBounces30d: hardBounces, complaints30d: complaints, domainHealth: dom?.healthStatus ?? null, domainVerified: !!dom?.verifiedAt, lastSyncedAt: a.lastSyncedAt, lastErrorAt: a.lastErrorAt });
     const { connectionConfig, ...publicAccount } = a;
     const privateConfig = connectionConfig as { connectionHealth?: { smtp?: { ok?: boolean; error?: string | null }; imap?: { ok?: boolean; error?: string | null }; checkedAt?: string }; readiness?: Record<string, unknown> } | null;
     const connectionHealth = privateConfig?.connectionHealth;
     const rawReadiness = privateConfig?.readiness;
     const readiness = rawReadiness ? { ...rawReadiness, globallyEnabled: readinessManagementEnabled, effectiveDailyCap: readinessManagementEnabled && rawReadiness.enabled === true ? Math.min(a.dailySendLimit, Number(rawReadiness.currentDailyCap ?? 5)) : a.dailySendLimit } : null;
-    return { ...publicAccount, readiness, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: today.find((t) => t.emailAccountId === a.id)?._count._all ?? 0, quota: { dailyLimit: readiness?.effectiveDailyCap ?? a.dailySendLimit, source: 'mailbox configuration and readiness cap (provider quotas are not exposed)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
+    return { ...publicAccount, lifetimeTracking: tracking.get(a.id) ?? emptyTracking, readiness, smtpConnection: connectionHealth?.smtp ?? null, imapConnection: connectionHealth?.imap ?? null, connectionCheckedAt: connectionHealth?.checkedAt ?? null, sent30d: sent, hardBounces30d: hardBounces, bounceRatePct: sent ? +(100 * hardBounces / sent).toFixed(2) : null, complaints30d: complaints, sentToday: mailboxUsage?.sentToday ?? 0, sentLastHour: mailboxUsage?.sentLastHour ?? 0, hourlyLimit, lastAcceptedAt,
+      softBounces30d: n('BOUNCED_SOFT'), failed30d: n('FAILED'), healthHistory: history.filter(event => event.entityId === a.id).slice(0, 5), quota: { dailyLimit: readiness?.effectiveDailyCap ?? a.dailySendLimit, source: 'mailbox configuration and readiness cap (provider quotas are not exposed)' }, domain: dom ?? null, health, authStatus: a.status === 'NEEDS_REAUTH' ? 'needs re-authentication' : a.status === 'CONNECTED' ? 'ok' : a.status };
   });
 }
 

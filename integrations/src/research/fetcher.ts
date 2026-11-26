@@ -105,7 +105,7 @@ function safeLogUrl(value: string): string | null {
 }
 
 function normalizeRulePath(value: string): string {
-  return value.replace(/%[\da-f]{2}|[^\x00-\x7f]/giu, (part) => {
+  return value.replace(/%[\da-f]{2}|\P{ASCII}/giu, (part) => {
     if (!part.startsWith('%')) return encodeURIComponent(part);
     const char = String.fromCharCode(parseInt(part.slice(1), 16));
     return /^[a-z0-9._~-]$/i.test(char) ? char : part.toUpperCase();
@@ -119,7 +119,7 @@ function evaluateRobots(body: string, url: URL, userAgent: string) {
   let applies = false;
   let hasAgent = false;
   let hasRules = false;
-  let malformed = /[\u0000\ufffd]/u.test(body);
+  let malformed = body.includes('\u0000') || body.includes('\ufffd');
   for (const rawLine of body.split(/\r\n|\r|\n/)) {
     const line = rawLine.split('#', 1)[0].trim();
     if (!line) continue;

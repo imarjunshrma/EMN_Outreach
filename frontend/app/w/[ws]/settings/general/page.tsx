@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
-import { Button, Card, Field, Input, Notice, PageHeader, QueryView, Select, Textarea, TimezoneSelect } from '@/components/ui';
+import { Button, Card, Checkbox, Field, Input, Notice, PageHeader, QueryView, Select, Textarea, TimezoneSelect } from '@/components/ui';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export default function General() {
@@ -34,6 +34,7 @@ export default function General() {
               <Field label="Web search for research"><Select value={s.searchProvider} onChange={(e) => setS('searchProvider', e.target.value)} options={[{ value: 'none', label: 'None (company website only)' }, { value: 'brave', label: 'Brave Search API' }, { value: 'serper', label: 'Serper.dev' }]} /></Field>
               <p className="mt-2 text-xs text-slate-500">Add the keys for selected providers under Integrations.</p>
               <Field label="Booking link (optional)" hint="Available as {{bookingLink}} and offered in AI reply drafts"><Input value={s.bookingLink ?? ''} onChange={(e) => setS('bookingLink', e.target.value)} placeholder="https://cal.com/you/intro" /></Field>
+              <Checkbox label="Allow campaign open and click tracking" checked={s.trackingEnabled !== false} onChange={(enabled) => setS('trackingEnabled', enabled)} />
               <Field label="Tracking base URL (optional)" hint="Only used when a campaign enables open/click tracking"><Input value={s.trackingBaseUrl ?? ''} onChange={(e) => setS('trackingBaseUrl', e.target.value)} /></Field>
             </Card>
             <Card title="Facts about your offer (trusted AI context)">

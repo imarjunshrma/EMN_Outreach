@@ -33,6 +33,57 @@ test('every v1.2 screen renders without errors (integrated navigation)', async (
   expect(errors).toEqual([]);
 });
 
+test('reviews lead qualification and filters excluded prospects', async ({ page }) => {
+  await login(page);
+  const base = await workspaceBase(page);
+  await page.goto(base + '/leads');
+  const email = 'qualification-fixture-' + Date.now() + '@example.test';
+  await page.getByRole('button', { name: 'Add lead' }).click();
+  await page.getByLabel('Email *', { exact: true }).fill(email);
+  await page.getByLabel('First name', { exact: true }).fill('Fixture Lead');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByLabel('Select ' + email).check();
+  await page.locator('select').filter({ has: page.getByRole('option', { name: 'Review qualification' }) }).selectOption('review_qualification');
+  await page.getByLabel('Review decision').selectOption('DISQUALIFIED');
+  await page.getByLabel('Review reason').fill('Isolated browser exclusion test');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect(page.getByRole('row').filter({ hasText: email }).getByText('Disqualified', { exact: true })).toBeVisible();
+  await page.getByLabel('Qualification review').selectOption('DISQUALIFIED');
+  await expect(page.getByText(email, { exact: true })).toBeVisible();
+});
+
+test('uploads a CSV, previews its mapping and queues an isolated import', async ({ page }) => {
+  await login(page);
+  const base = await workspaceBase(page);
+  await page.goto(base + '/leads/import');
+  const fileName = 'fixture-' + Date.now() + '.csv';
+  await page.locator('input[type="file"]').setInputFiles({
+    name: fileName, mimeType: 'text/csv', buffer: Buffer.from('Email,First Name\nfixture-csv@example.test,CSV Fixture'),
+  });
+  await expect(page.getByRole('heading', { name: '2. Map columns' })).toBeVisible();
+  const email = page.getByRole('row').filter({ hasText: 'fixture-csv@example.test' });
+  await expect(email.getByRole('combobox')).toHaveValue('email');
+  await page.getByRole('button', { name: 'Start import' }).click();
+  await expect(page.getByText('Import started', { exact: true })).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: fileName })).toBeVisible();
+});
+
+test('opens campaign activity for an unsent draft', async ({ page }) => {
+  await login(page);
+  const base = await workspaceBase(page);
+  await page.goto(base + '/campaigns');
+  await page.getByRole('button', { name: 'New campaign', exact: true }).click();
+  await page.getByLabel('Name', { exact: true }).fill('Isolated activity draft');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.getByRole('tab', { name: 'Activity', exact: true }).click();
+  await expect(page.getByText('No campaign events yet')).toBeVisible();
+  await page.goto(base + '/analytics');
+  await expect(page.getByText('Tracking totals across all dates')).toBeVisible();
+  await expect(page.getByText('Provider-confirmed deliveries')).toBeVisible();
+  await expect(page.getByText('Connected mailbox transports do not report delivery confirmation.')).toBeVisible();
+});
+
 test('dark theme toggles, persists and applies before paint', async ({ page }) => {
   await login(page);
   const base = await workspaceBase(page);

@@ -1,3 +1,4 @@
+import { emptyTracking, trackingTotals } from './tracking-analytics.js';
 import { z } from 'zod';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
@@ -5,6 +6,7 @@ import { sha256 } from '../core/crypto.js';
 import { db, Prisma } from '../core/db.js';
 import { AppError, BadRequest, NotFound } from '../core/errors.js';
 import { audit, publish, type Actor } from '../core/audit.js';
+import { acquireLock } from '../core/redis.js';
 import { store } from '../core/storage.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { emitEvent } from './automation.js';
@@ -109,6 +111,8 @@ export async function createLead(workspaceId: string, input: LeadInput, actor: A
   }
 }
 
+export const QualificationReviewSchema = z.enum(['QUALIFIED', 'NEEDS_REVIEW', 'DISQUALIFIED']);
+
 export const LeadQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(50),
@@ -116,6 +120,9 @@ export const LeadQuerySchema = z.object({
   status: z.enum(LEAD_STATUSES).optional(),
   listId: z.string().uuid().optional(),
   companyId: z.string().uuid().optional(),
+  qualificationReview: QualificationReviewSchema.optional(),
+  research: z.enum(['NOT_RESEARCHED', 'FAILED']).optional(),
+  selectedIds: z.string().max(7400).transform(value => value.split(',')).pipe(z.array(z.uuid()).min(1).max(200)).optional(),
   verification: z.enum(['UNVERIFIED', 'VALID', 'INVALID', 'RISKY', 'CATCH_ALL', 'UNKNOWN']).optional(),
   minScore: z.coerce.number().int().optional(),
   country: z.string().optional(),
@@ -128,6 +135,12 @@ export function leadWhere(workspaceId: string, q: Partial<z.infer<typeof LeadQue
     workspaceId,
     ...(q.status ? { status: q.status } : {}),
     ...(q.companyId ? { companyId: q.companyId } : {}),
+    ...(q.selectedIds ? { id: { in: q.selectedIds } } : {}),
+    ...(q.qualificationReview === 'NEEDS_REVIEW'
+      ? { AND: [{ OR: [{ qualificationReview: null }, { qualificationReview: 'NEEDS_REVIEW' }] }] }
+      : q.qualificationReview ? { qualificationReview: q.qualificationReview } : {}),
+    ...(q.research === 'NOT_RESEARCHED' ? { researchReports: { none: { status: 'COMPLETED' } } }
+      : q.research === 'FAILED' ? { researchReports: { some: { status: 'FAILED' }, none: { status: 'COMPLETED' } } } : {}),
     ...(q.verification ? { emailVerificationStatus: q.verification } : {}),
     ...(q.minScore !== undefined ? { currentScore: { gte: q.minScore } } : {}),
     ...(q.country ? { country: q.country.toUpperCase() } : {}),
@@ -147,7 +160,7 @@ export async function listLeads(workspaceId: string, q: z.infer<typeof LeadQuery
   const orderBy: Prisma.LeadOrderByWithRelationInput =
     q.sort === 'score' ? { currentScore: { sort: 'desc', nulls: 'last' } } : q.sort === 'lastRepliedAt' ? { lastRepliedAt: { sort: 'desc', nulls: 'last' } } : q.sort === 'email' ? { emailNormalized: 'asc' } : { createdAt: 'desc' };
   const [items, total] = await Promise.all([
-    db().lead.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { company: { select: { id: true, name: true, domain: true } }, source: { select: { name: true } } } }),
+    db().lead.findMany({ where, orderBy, skip: (q.page - 1) * q.pageSize, take: q.pageSize, include: { company: { select: { id: true, name: true, domain: true } }, source: { select: { name: true } }, verifications: { where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 1, select: { result: true, rawResult: true, provider: true, createdAt: true } } } }),
     db().lead.count({ where }),
   ]);
   return { items, total };
@@ -172,7 +185,8 @@ export async function getLead(workspaceId: string, id: string) {
     },
   });
   if (!lead) throw NotFound('Lead');
-  return lead;
+  const tracking = await trackingTotals(workspaceId, 'prospect', lead.id);
+  return { ...lead, lifetimeTracking: tracking.get(lead.id) ?? emptyTracking };
 }
 
 export async function setLeadStatus(workspaceId: string, leadId: string, status: (typeof LEAD_STATUSES)[number], reason: string, actor: Actor) {
@@ -226,11 +240,13 @@ export async function deleteLeads(workspaceId: string, ids: string[], actor: Act
 
 export const BulkActionSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(5000),
-  action: z.enum(['add_to_list', 'remove_from_list', 'add_tag', 'set_status', 'set_lawful_basis', 'research', 'score', 'verify', 'delete']),
+  action: z.enum(['add_to_list', 'remove_from_list', 'add_tag', 'set_status', 'set_lawful_basis', 'research', 'retry_research', 'score', 'verify', 'review_qualification', 'delete']),
   listId: z.string().uuid().optional(),
   tag: z.string().max(50).optional(),
   status: z.enum(LEAD_STATUSES).optional(),
   lawfulBasis: z.enum(LAWFUL_BASES).optional(),
+  review: QualificationReviewSchema.optional(),
+  reviewReason: z.string().trim().min(3).max(500).optional(),
   icpId: z.string().uuid().optional(),
 });
 
@@ -269,12 +285,54 @@ export async function bulkAction(workspaceId: string, input: z.infer<typeof Bulk
     case 'research':
       for (const id of ids) await enqueue(QUEUES.research, 'research.lead', { workspaceId, leadId: id }, { jobId: `research-${id}-${Math.floor(Date.now() / 60000)}` });
       return { queued: ids.length };
+    case 'retry_research': {
+      const intel = await import('./intelligence.js');
+      for (const id of ids) {
+        const report = await db().researchReport.findFirst({
+          where: { workspaceId, leadId: id, status: { in: ['FAILED', 'COMPLETED'] } },
+          orderBy: { createdAt: 'desc' }, select: { id: true },
+        });
+        await intel.queueResearch(workspaceId, { leadId: id }, { retryMissing: !!report, retryReportId: report?.id });
+      }
+      return { queued: ids.length };
+    }
     case 'score':
       for (const id of ids) await enqueue(QUEUES.ai, 'ai.qualify', { workspaceId, leadId: id, icpId: input.icpId ?? null });
       return { queued: ids.length };
     case 'verify':
       for (const id of ids) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId, leadId: id });
       return { queued: ids.length };
+    case 'review_qualification': {
+      if (!input.review || !input.reviewReason) throw BadRequest('VALIDATION_FAILED', 'Select a review decision and provide a reason.');
+      const decision = input.review;
+      const reason = input.reviewReason;
+      if (ids.length !== new Set(input.ids).size) throw NotFound('Lead');
+      const reviewed = await db().$transaction(async tx => {
+        const rows = await tx.lead.findMany({
+          where: { workspaceId, id: { in: ids } },
+          select: { id: true, qualificationReview: true, scores: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 } },
+        });
+        for (const row of rows) {
+          const score = row.scores[0];
+          const verifiedIdentity = Array.isArray(score?.reasons) && score.reasons.some(entry =>
+            entry && typeof entry === 'object' && !Array.isArray(entry) && entry.criterion === 'professional_identity'
+              && entry.identityStatus === 'VERIFIED' && Array.isArray(entry.claimIds) && entry.claimIds.length > 0);
+          if (decision === 'QUALIFIED' && (!score?.qualified || !verifiedIdentity)) {
+            throw BadRequest('QUALIFICATION_REQUIRED', 'Each selected prospect needs a qualifying ICP score backed by verified identity evidence.');
+          }
+          await tx.lead.updateMany({
+            where: { id: row.id, workspaceId },
+            data: { qualificationReview: decision, qualificationReviewReason: reason, qualificationReviewScoreId: decision === 'QUALIFIED' ? score.id : null },
+          });
+        }
+        return rows;
+      });
+      for (const row of reviewed) {
+        await audit(workspaceId, actor, 'lead.qualification_reviewed', { type: 'lead', id: row.id }, { previous: row.qualificationReview, decision, reason });
+        await publish(workspaceId, 'lead.updated', { leadId: row.id });
+      }
+      return { affected: reviewed.length };
+    }
     case 'delete':
       return { affected: await deleteLeads(workspaceId, ids, actor) };
   }
@@ -407,17 +465,65 @@ export async function startImport(workspaceId: string, importId: string, input: 
   return { importId: job.id, status: 'queued' };
 }
 
+const ImportErrorSchema = z.object({ row: z.number().int().min(2), error: z.string(), retryable: z.boolean().optional() });
+
+export async function retryImport(workspaceId: string, importId: string, actor: Actor) {
+  const job = await db().importJob.findFirst({ where: { workspaceId, id: importId } });
+  if (!job) throw NotFound('Import');
+  if (job.status !== 'COMPLETED' && job.status !== 'FAILED') throw new AppError('CONFLICT', 'This import is still pending or running.', 409);
+  const previousOptions = job.options as Record<string, Prisma.InputJsonValue>;
+  if (!previousOptions.sourceName) throw new AppError('CONFLICT', 'The import does not have saved mapping options.', 409);
+  const errors = z.array(ImportErrorSchema).safeParse(job.errors);
+  const rows = errors.success ? errors.data.filter(error => error.retryable).map(error => error.row) : [];
+  if (job.status === 'COMPLETED' && !rows.length) throw new AppError('CONFLICT', 'No retryable rows. Correct invalid data in the source file and import it again.', 409);
+  const retryRows = job.status === 'COMPLETED' ? rows : previousOptions.retryRows;
+  const options = { ...previousOptions, dedupeMode: 'skip', ...(retryRows ? { retryRows } : {}) };
+  const claimed = await db().importJob.updateMany({
+    where: { workspaceId, id: importId, status: job.status, finishedAt: job.finishedAt },
+    data: { status: 'PENDING', options },
+  });
+  if (!claimed.count) throw new AppError('CONFLICT', 'This import already changed. Refresh its status.', 409);
+  try {
+    await enqueue(QUEUES.imports, 'import.csv', { workspaceId, importId }, { jobId: `import-retry-${importId}-${Date.now()}`, attempts: 1 });
+  } catch (error) {
+    await db().importJob.updateMany({ where: { workspaceId, id: importId, status: 'PENDING' }, data: { status: job.status, options: previousOptions } });
+    throw error;
+  }
+  await audit(workspaceId, actor, 'import.retried', { type: 'import', id: importId }, { targetedRows: Array.isArray(retryRows) ? retryRows.length : null });
+  return { importId, status: 'queued' };
+}
+
 /** Worker: process an import job in batches. */
 export async function processImport(workspaceId: string, importId: string) {
+  const release = await acquireLock(`import-csv:${workspaceId}:${importId}`, 15 * 60_000);
+  if (!release) return;
+  try {
+    return await processImportRows(workspaceId, importId);
+  } catch (error) {
+    await db().importJob.updateMany({
+      where: { workspaceId, id: importId, status: 'RUNNING' },
+      data: { status: 'FAILED', finishedAt: new Date() },
+    });
+    throw error;
+  } finally {
+    await release();
+  }
+}
+
+async function processImportRows(workspaceId: string, importId: string) {
   const job = await db().importJob.findFirst({ where: { id: importId, workspaceId } });
   if (!job || job.status === 'COMPLETED') return;
   await db().importJob.update({ where: { id: job.id }, data: { status: 'RUNNING' } });
-  const opts = job.options as { dedupeMode: 'skip' | 'update'; sourceName: string; lawfulBasis: (typeof LAWFUL_BASES)[number]; lawfulBasisNote: string | null; defaultCountry: string | null };
+  const opts = job.options as { dedupeMode: 'skip' | 'update'; sourceName: string; lawfulBasis: (typeof LAWFUL_BASES)[number]; lawfulBasisNote: string | null; defaultCountry: string | null; retryRows?: number[] };
   const mapping = job.mapping as Record<string, string>;
   const source = await db().leadSource.upsert({ where: { workspaceId_name: { workspaceId, name: opts.sourceName } }, update: {}, create: { workspaceId, name: opts.sourceName, type: 'CSV_IMPORT', provider: 'csv' } });
   const records = parse(await store().get(job.storageKey), { bom: true, columns: true, skip_empty_lines: true, relax_column_count: true, trim: true }) as Record<string, string>[];
-  const counters = { imported: 0, updated: 0, skipped: 0, errors: 0 };
-  const errors: Array<{ row: number; error: string }> = [];
+  const targeted = opts.retryRows ? new Set(opts.retryRows) : null;
+  const prior = z.array(ImportErrorSchema).safeParse(job.errors);
+  const errors = targeted && prior.success ? prior.data.filter(error => !targeted.has(error.row)) : [];
+  const counters = targeted ? {
+    imported: job.importedRows, updated: job.updatedRows, skipped: job.skippedRows, errors: Math.max(0, job.errorRows - targeted.size),
+  } : { imported: 0, updated: 0, skipped: 0, errors: 0 };
   // Plan lead limit: computed once, then counted down locally (no per-row count queries).
   const { ws: ent } = await import('./entitlements.js');
   const tstate = await ent.state(workspaceId);
@@ -426,6 +532,7 @@ export async function processImport(workspaceId: string, importId: string) {
   const suppressed = new Set((await db().suppressionEntry.findMany({ where: { workspaceId, type: 'EMAIL' }, select: { value: true } })).map((s) => s.value));
 
   for (let i = 0; i < records.length; i++) {
+    if (targeted && !targeted.has(i + 2)) continue;
     const rec = records[i];
     const row: Record<string, string> = {};
     const custom: Record<string, string> = {};
@@ -458,8 +565,9 @@ export async function processImport(workspaceId: string, importId: string) {
       const existing = await db().lead.findUnique({ where: { workspaceId_emailNormalized: { workspaceId, emailNormalized: key } } });
       const country = (row.country ?? opts.defaultCountry ?? '').toUpperCase().slice(0, 2) || null;
       let leadId: string;
+      let outcome: 'imported' | 'updated' | 'skipped';
       if (existing) {
-        if (opts.dedupeMode === 'skip') { counters.skipped++; leadId = existing.id; }
+        if (opts.dedupeMode === 'skip') { outcome = 'skipped'; leadId = existing.id; }
         else {
           const previousCustom = existing.customFields && typeof existing.customFields === 'object' && !Array.isArray(existing.customFields)
             ? existing.customFields : {};
@@ -468,7 +576,7 @@ export async function processImport(workspaceId: string, importId: string) {
             city: row.city, phone: row.phone, linkedinUrl: row.linkedinUrl, website: row.website,
             ...(Object.keys(custom).length ? { customFields: { ...previousCustom, ...custom } } : {}),
           } });
-          counters.updated++; leadId = existing.id;
+          outcome = 'updated'; leadId = existing.id;
         }
       } else {
         if (leadRoom <= 0) { counters.skipped++; if (errors.length < 500) errors.push({ row: i + 2, error: 'Plan lead limit reached — upgrade to import more' }); continue; }
@@ -483,21 +591,22 @@ export async function processImport(workspaceId: string, importId: string) {
             statusChanges: { create: { workspaceId, toStatus: 'NEW', reason: `import ${job.fileName}` } },
           },
         });
-        counters.imported++; leadId = lead.id;
+        outcome = 'imported'; leadId = lead.id;
       }
       if (job.targetListId) await db().leadListMember.createMany({ data: [{ workspaceId, listId: job.targetListId, leadId }], skipDuplicates: true });
-    } catch (e) {
+      counters[outcome]++;
+    } catch {
       counters.errors++;
-      if (errors.length < 200) errors.push({ row: i + 2, error: (e as Error).message.slice(0, 200) });
+      if (errors.length < 200) errors.push({ row: i + 2, error: 'The row could not be saved. Retry the import row.', retryable: true });
     }
-    if (i % 200 === 0) {
+    if (!targeted && i % 200 === 0) {
       await db().importJob.update({ where: { id: job.id }, data: { totalRows: records.length, importedRows: counters.imported, updatedRows: counters.updated, skippedRows: counters.skipped, errorRows: counters.errors } });
       await publish(workspaceId, 'import.progress', { importId, processed: i + 1, total: records.length });
     }
   }
   await db().importJob.update({
     where: { id: job.id },
-    data: { status: 'COMPLETED', finishedAt: new Date(), totalRows: records.length, importedRows: counters.imported, updatedRows: counters.updated, skippedRows: counters.skipped, errorRows: counters.errors, errors },
+    data: { status: 'COMPLETED', finishedAt: new Date(), totalRows: records.length, importedRows: counters.imported, updatedRows: counters.updated, skippedRows: counters.skipped, errorRows: counters.errors, errors, options: { ...opts, retryRows: null } as Prisma.InputJsonValue },
   });
   await publish(workspaceId, 'import.completed', { importId, ...counters });
   return counters;
@@ -509,9 +618,9 @@ export async function exportLeadsCsv(workspaceId: string, q: Partial<z.infer<typ
     const s = v === null || v === undefined ? '' : String(v);
     return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s; // CSV formula-injection guard
   };
-  const rows = leads.map((l) => [l.email, l.firstName, l.lastName, l.title, l.company?.name, l.company?.domain, l.country, l.city, l.status, l.emailVerificationStatus, l.currentScore, l.lawfulBasis, l.source?.name, l.tags.join(';'), l.createdAt.toISOString()].map(safe));
+  const rows = leads.map((l) => [l.email, l.firstName, l.lastName, l.title, l.company?.name, l.company?.domain, l.country, l.city, l.status, l.emailVerificationStatus, l.currentScore, l.qualificationReview, l.qualificationReviewReason, l.lawfulBasis, l.source?.name, l.tags.join(';'), l.createdAt.toISOString()].map(safe));
   await audit(workspaceId, actor, 'lead.exported', undefined, { count: leads.length });
-  return stringify([['email', 'firstName', 'lastName', 'title', 'company', 'companyDomain', 'country', 'city', 'status', 'verification', 'score', 'lawfulBasis', 'source', 'tags', 'createdAt'], ...rows]);
+  return stringify([['email', 'firstName', 'lastName', 'title', 'company', 'companyDomain', 'country', 'city', 'status', 'verification', 'score', 'qualificationReview', 'qualificationReviewReason', 'lawfulBasis', 'source', 'tags', 'createdAt'], ...rows]);
 }
 
 export async function getImport(workspaceId: string, id: string) {

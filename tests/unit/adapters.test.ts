@@ -75,6 +75,10 @@ describe('SMTP/IMAP safe errors', () => {
     const transient = smtpError(Object.assign(new Error('secret diagnostic'), { responseCode: 451 }));
     expect(transient).toMatchObject({ status: 503, retryable: true });
     expect(transient.message).not.toContain('secret diagnostic');
+    const recipient = smtpError(Object.assign(new Error(), { responseCode: 550, command: 'RCPT TO', response: '550 5.1.1 No such user' }));
+    expect(recipient).toMatchObject({ code: 'RECIPIENT_NOT_FOUND', submissionOutcome: 'PROVIDER_REJECTED' });
+    expect(smtpError(Object.assign(new Error(), { responseCode: 550, command: 'RCPT TO', response: '550 5.7.1 Sender policy' })).code).toBeUndefined();
+    expect(smtpError(Object.assign(new Error(), { code: 'ETIMEDOUT', command: 'DATA' })).submissionOutcome).toBeUndefined();
   });
 });
 

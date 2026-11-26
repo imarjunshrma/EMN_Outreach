@@ -820,6 +820,10 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   await db().$transaction(async (tx) => {
     await tx.leadScore.create({ data: { workspaceId, leadId, icpId: icp.id, score, tier, qualified, reasons: [...reasons, { criterion: 'professional_identity', met: identity.verified, identityStatus, explanation: identity.verified ? identity.reason : `${identity.reason} ${r.data.identityAssessment.reason}`.trim(), claimIds: identity.claimIds }] as Prisma.InputJsonValue, risks } });
     await tx.lead.update({ where: { id: leadId }, data: { currentScore: score } });
+    await tx.lead.updateMany({
+      where: { id: leadId, workspaceId, qualificationReview: 'QUALIFIED' },
+      data: { qualificationReview: 'NEEDS_REVIEW', qualificationReviewScoreId: null, qualificationReviewReason: 'ICP score changed. Review the new assessment.' },
+    });
     if (['NEW', 'RESEARCHED'].includes(lead.status)) {
       const to = !identity.verified || incompleteFit ? 'RESEARCHED' : qualified ? 'QUALIFIED' : 'DISQUALIFIED';
       await tx.lead.update({ where: { id: leadId }, data: { status: to } });

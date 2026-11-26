@@ -12,7 +12,7 @@ import { ProviderError } from '../../../integrations/src/http.js';
 import { OUTBOUND_HEADER, type OutgoingMessage } from '../../../integrations/src/email/types.js';
 import { renderTemplate, lintTemplate, bodyContentProblem } from '../../../shared/src/template.js';
 import { DEFAULT_WINDOW, SendingWindowSchema, computeNextStepAt, isInWindow, isValidZone, nextWindowStart, startOfDayIn, startOfNextDayIn, type SendingWindow } from '../../../shared/src/schedule.js';
-import { canContact } from './compliance.js';
+import { addSuppression, canContact } from './compliance.js';
 import { getAuth, markNeedsReauth } from './accounts.js';
 import { readSettings, unsubscribeToken } from './workspace.js';
 import { factCheck, generateEmail, leadVars } from './intelligence.js';
@@ -172,7 +172,7 @@ export async function getCampaign(workspaceId: string, id: string) {
     include: {
       sequence: { include: { steps: { orderBy: { order: 'asc' }, include: { variants: { orderBy: { label: 'asc' } } } } } },
       lists: { include: { list: { select: { id: true, name: true, _count: { select: { members: true } } } } } },
-      accounts: { include: { emailAccount: { select: { id: true, emailAddress: true, status: true, provider: true } } } },
+      accounts: { include: { emailAccount: { select: { id: true, emailAddress: true, status: true, provider: true, operatorPaused: true, sendingWindow: true } } } },
       serviceSelections: { include: { serviceVersion: { include: { service: { select: { id: true, name: true } } } } } },
     },
   });
@@ -225,10 +225,11 @@ export async function validateCampaign(workspaceId: string, id: string) {
       if (problem) blocking.push(`Step ${s.order} variant ${v.label}: ${problem}. Write the email before submitting.`);
       if (s.personalizationMode === 'AI_FIRST_LINE' && !v.body.includes('aiFirstLine')) warnings.push(`Step ${s.order} variant ${v.label} uses AI first line but the body has no {{aiFirstLine}} placeholder`);
     }
-    if (s.condition !== 'ALWAYS' && !c.trackOpens) warnings.push(`Step ${s.order} condition ${s.condition} needs open tracking; it will behave like ALWAYS`);
+    if (s.condition !== 'ALWAYS') blocking.push(`Step ${s.order} must use an unconditional schedule. Open signals cannot control sending.`);
   }
   if (!c.lists.length) blocking.push('Select at least one lead list');
-  const connected = c.accounts.filter((a) => a.emailAccount.status === 'CONNECTED');
+  const connected = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
+    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false);
   if (!connected.length) blocking.push('Select at least one connected sending mailbox');
   if (c.accounts.length > connected.length) warnings.push(`${c.accounts.length - connected.length} selected mailbox(es) are not connected and will not send`);
   if (!ws.postalAddress?.trim()) blocking.push('Set the sender postal address in Settings → Compliance (required in the email footer)');
@@ -245,7 +246,7 @@ export async function validateCampaign(workspaceId: string, id: string) {
   let eligible = 0;
   const reasons = new Map<string, number>();
   for (const m of members) {
-    const r = await canContact(workspaceId, m.lead, { requireVerified: c.requireVerifiedEmail });
+    const r = await canContact(workspaceId, m.lead, { requireVerified: c.requireVerifiedEmail, icpId: c.icpId });
     if (c.minLeadScore !== null && (m.lead.currentScore ?? -1) < c.minLeadScore) { r.reasons.push(`score below ${c.minLeadScore}`); r.allowed = false; }
     if (r.allowed) eligible++;
     for (const reason of r.reasons) reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
@@ -385,8 +386,8 @@ export async function reviewOutbound(workspaceId: string, id: string, input: { d
     await audit(workspaceId, actor, 'outbound.rejected', { type: 'outbound', id }, { reason: input.reason });
     return { status: 'CANCELLED' };
   }
-  let factCheckStatus = o.factCheckStatus;
-  let factCheckReport = o.factCheckReport;
+  const factCheckStatus = o.factCheckStatus;
+  const factCheckReport = o.factCheckReport;
   const edited = (input.bodyText !== undefined && input.bodyText !== o.bodyText) || (input.subject !== undefined && input.subject !== o.subject);
   const subject = input.subject ?? o.subject;
   const bodyText = input.bodyText ?? o.bodyText;
@@ -505,7 +506,8 @@ export async function tick(now = new Date(), onlyCampaignId?: string) {
 
 async function enrollNew(c: FullCampaign, now: Date): Promise<number> {
   if (c.scheduledStartAt && c.scheduledStartAt > now) return 0; // campaign scheduled to start later
-  const accounts = c.accounts.filter((a) => a.emailAccount.status === 'CONNECTED').map((a) => a.emailAccountId);
+  const accounts = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
+    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false).map(a => a.emailAccountId);
   if (!accounts.length) return 0;
   const enrolledToday = await db().sequenceEnrollment.count({ where: { campaignId: c.id, enrolledAt: { gte: startOfDayIn(c.timezone, now) } } });
   let capacity = c.dailyNewLeadLimit - enrolledToday;
@@ -529,7 +531,7 @@ async function enrollNew(c: FullCampaign, now: Date): Promise<number> {
     if (capacity <= 0) break;
     const lead = m.lead;
     if (c.minLeadScore !== null && (lead.currentScore ?? -1) < c.minLeadScore) continue;
-    const ok = await canContact(c.workspaceId, lead, { requireVerified: c.requireVerifiedEmail });
+    const ok = await canContact(c.workspaceId, lead, { requireVerified: c.requireVerifiedEmail, icpId: c.icpId });
     if (!ok.allowed) {
       // Queue verification only for potentially eligible addresses. The mail is held from
       // enrollment until the result is known; UNKNOWN and risky outcomes remain held.
@@ -565,19 +567,16 @@ async function advanceDue(c: FullCampaign, now: Date) {
   let created = 0;
   let completed = 0;
   for (const e of due) {
-    let order = e.currentStepOrder + 1;
+    const order = e.currentStepOrder + 1;
     if (order > 1 && !automation.automaticFollowups) {
       // Keep the enrollment and its step position intact while pausing follow-up scheduling.
       await db().sequenceEnrollment.update({ where: { id: e.id }, data: { nextActionAt: new Date(now.getTime() + 60 * 60_000) } });
       continue;
     }
-    let step = steps.find((s) => s.order === order);
-    // Evaluate follow-up conditions (open-based conditions only work when tracking is on).
-    while (step && step.condition !== 'ALWAYS' && c.trackOpens) {
-      const opened = (await db().emailEvent.count({ where: { enrollmentId: e.id, type: 'OPENED' } })) > 0;
-      if ((step.condition === 'IF_OPENED' && opened) || (step.condition === 'IF_NOT_OPENED' && !opened)) break;
-      order++;
-      step = steps.find((s) => s.order === order);
+    const step = steps.find((s) => s.order === order);
+    if (step && step.condition !== 'ALWAYS') {
+      await db().sequenceEnrollment.update({ where: { id: e.id }, data: { nextActionAt: new Date(now.getTime() + 60 * 60_000) } });
+      continue;
     }
     if (!step) {
       await db().sequenceEnrollment.update({ where: { id: e.id }, data: { status: 'COMPLETED', completedAt: now, nextActionAt: null } });
@@ -627,7 +626,7 @@ export async function prepareOutbound(workspaceId: string, outboundId: string) {
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
   const settings = readSettings(ws.settings);
   const lead = o.enrollment.lead;
-  const unsubscribeUrl = `${process.env.APP_URL}/u/${unsubscribeToken(workspaceId, lead.emailNormalized, lead.id)}`;
+  const unsubscribeUrl = `${process.env.APP_URL}/u/${unsubscribeToken(workspaceId, lead.emailNormalized, lead.id, o.id)}`;
   const fail = async (msg: string) => {
     await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'FAILED', lastError: msg } });
     await db().sequenceEnrollment.update({ where: { id: o.enrollmentId }, data: { status: 'FAILED', stopReason: msg } });
@@ -760,17 +759,31 @@ async function applyTracking(workspaceId: string, outboundId: string, text: stri
 
 /** Counts accepted sends plus in-flight reservations so concurrent workers cannot overshoot a cap. */
 async function reservedSendCountSince(where: Prisma.OutboundEmailWhereInput, since: Date) {
-  return db().outboundEmail.count({ where: { ...where, OR: [{ status: 'SENT', sentAt: { gte: since } }, { status: 'SENDING', sendStartedAt: { gte: since } }] } });
+  return db().outboundEmail.count({ where: { ...where, OR: [{ status: 'SENT', sentAt: { gte: since } }, { status: { in: ['SENDING', 'UNCERTAIN'] }, sendStartedAt: { gte: since } }] } });
 }
 
 async function maybePauseMailboxAfterProviderErrors(workspaceId: string, accountId: string, now: Date, error: string) {
+  const mailbox = await db().emailAccount.findFirst({ where: { workspaceId, id: accountId, status: 'CONNECTED' }, select: { sendingWindow: true } });
+  if (!mailbox) return;
+  const settings = mailbox.sendingWindow as { temporaryFailureLimit?: number; recoveryCooldownMinutes?: number };
+  const limit = settings.temporaryFailureLimit ?? 3;
+  const lastAccepted = await db().outboundEmail.aggregate({ where: { workspaceId, emailAccountId: accountId, status: 'SENT' }, _max: { sentAt: true } });
+  const since = new Date(Math.max(now.getTime() - 15 * 60_000, lastAccepted._max.sentAt?.getTime() ?? 0));
   const recent = await db().outboundEmail.findMany({
-    where: { workspaceId, emailAccountId: accountId, status: 'SENDING', lastError: { not: null }, updatedAt: { gte: new Date(now.getTime() - 15 * 60_000) } },
+    where: { workspaceId, emailAccountId: accountId, updatedAt: { gt: since }, OR: [
+      { status: 'SENDING', lastError: { not: null } },
+      { status: { in: ['QUEUED', 'FAILED'] }, lastError: { startsWith: 'Temporary submission failure:' } },
+      { status: 'UNCERTAIN' },
+    ] },
     select: { attempts: true },
   });
   const attempts = recent.reduce((n, row) => n + row.attempts, 0);
-  if (attempts < 3) return;
-  const paused = await db().emailAccount.updateMany({ where: { id: accountId, workspaceId, status: 'CONNECTED' }, data: { status: 'PAUSED', statusReason: 'Auto-paused after repeated transient provider send errors (3 attempts within 15 minutes).', lastError: error.slice(0, 500), lastErrorAt: now } });
+  if (attempts < limit) return;
+  const paused = await db().emailAccount.updateMany({
+    where: { id: accountId, workspaceId, status: 'CONNECTED' },
+    data: { status: 'PAUSED', statusReason: `Auto-paused after transient provider errors (${attempts} attempts, threshold ${limit}).`, lastError: error.slice(0, 500), lastErrorAt: now,
+      autoPauseUntil: new Date(now.getTime() + (settings.recoveryCooldownMinutes ?? 30) * 60_000) },
+  });
   if (!paused.count) return;
   await audit(workspaceId, WORKER_ACTOR, 'email_account.auto_paused_provider_errors', { type: 'email_account', id: accountId }, { attempts, windowMinutes: 15 });
   await notifyWorkspace(workspaceId, 'ADMIN', { type: 'account.provider_error_pause', title: 'Mailbox paused after repeated provider errors', body: 'Review mailbox health and provider status before resuming.', link: '/mailbox-health' });
@@ -778,23 +791,67 @@ async function maybePauseMailboxAfterProviderErrors(workspaceId: string, account
 
 export type SendOutcome = 'sent' | 'reconciled' | 'deferred' | 'cancelled' | 'failed' | 'skipped';
 
+const UNCERTAIN_REASON = 'Submission state unknown; not retried to avoid a duplicate. Review provider evidence.';
+
+async function holdUncertain(workspaceId: string, outboundId: string, enrollmentId: string, at: Date) {
+  const newlyHeld = await db().$transaction(async tx => {
+    const held = await tx.outboundEmail.updateMany({
+      where: { id: outboundId, workspaceId, status: 'SENDING' },
+      data: { status: 'UNCERTAIN', uncertainAt: at, lastError: UNCERTAIN_REASON },
+    });
+    if (!held.count) return false;
+    await tx.sequenceEnrollment.updateMany({
+      where: { id: enrollmentId, workspaceId, status: { in: ['ACTIVE', 'PAUSED'] } },
+      data: { status: 'FAILED', stopReason: UNCERTAIN_REASON, nextActionAt: null },
+    });
+    return true;
+  });
+  if (newlyHeld) {
+    try {
+      const recent = await db().outboundEmail.count({ where: { workspaceId, status: 'UNCERTAIN', resolvedAt: null, uncertainAt: { gte: new Date(at.getTime() - 3600_000) } } });
+      if (recent === 1 || recent === 3) await notifyWorkspace(workspaceId, 'ADMIN', {
+        type: 'outbound.uncertain', title: recent === 1 ? 'A send needs reconciliation' : 'Repeated uncertain sends',
+        body: 'Review submission evidence before taking any action. Automatic resend is blocked.', link: '/mailbox-health/reconciliation',
+      });
+    } catch { logger.warn({ workspaceId, outboundId }, 'could not notify operators about an uncertain send'); }
+  }
+}
+
 export async function sendOutbound(workspaceId: string, outboundId: string, now = new Date()): Promise<{ outcome: SendOutcome; detail?: string }> {
   const o = await db().outboundEmail.findFirst({ where: { id: outboundId, workspaceId }, include: { campaign: true, step: true, emailAccount: true, enrollment: { include: { lead: true } } } });
   if (!o) return { outcome: 'skipped', detail: 'not found' };
+  if (o.status === 'UNCERTAIN' && o.resolvedAt) return { outcome: 'skipped', detail: 'operator decision recorded' };
   if (['SENT', 'CANCELLED', 'SKIPPED', 'FAILED', 'PENDING', 'AWAITING_APPROVAL'].includes(o.status)) return { outcome: 'skipped', detail: o.status };
 
+  const recordSubmission = (submission: string, retryDecision: string, status?: number, suppressed = false) => audit(
+    workspaceId, WORKER_ACTOR, 'outbound.submission_decision', { type: 'outbound_email', id: o.id }, {
+      provider: o.emailAccount.provider, mailboxId: o.emailAccountId, campaignId: o.campaignId,
+      prospectId: o.enrollment.leadId, attempt: o.attempts + (o.status === 'QUEUED' ? 1 : 0),
+      submission, providerStatus: status, retryDecision, failoverDecision: 'DISABLED', suppressed, mailboxStatus: o.emailAccount.status,
+    },
+  ).catch(() => logger.warn({ workspaceId, outboundId }, 'could not persist submission audit'));
+
+  if (o.status === 'QUEUED' && o.lastError?.startsWith('Temporary submission failure:') && o.scheduledFor > now) {
+    return { outcome: 'deferred', detail: 'provider retry window has not elapsed' };
+  }
+
   const cancel = async (reason: string, stop?: StopStatus) => {
-    await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'CANCELLED', lastError: reason } });
+    const changed = await db().outboundEmail.updateMany({ where: { id: o.id, workspaceId, status: 'QUEUED' }, data: { status: 'CANCELLED', lastError: reason } });
+    if (!changed.count) return { outcome: 'skipped' as const, detail: 'send state changed' };
     if (stop) await stopEnrollmentsForLead(workspaceId, o.enrollment.leadId, stop, reason, o.campaignId);
     return { outcome: 'cancelled' as const, detail: reason };
   };
   const defer = async (until: Date, reason: string) => {
-    await db().outboundEmail.update({ where: { id: o.id }, data: { scheduledFor: until, lastError: `deferred: ${reason}` } });
+    await db().outboundEmail.updateMany({ where: { id: o.id, workspaceId, status: 'QUEUED' }, data: { scheduledFor: until, lastError: `deferred: ${reason}` } });
     return { outcome: 'deferred' as const, detail: reason };
   };
 
+  if (o.status === 'QUEUED' && o.step.condition !== 'ALWAYS') {
+    return defer(new Date(now.getTime() + 3600_000), 'open-based follow-up is held until the campaign is updated');
+  }
+
   // ---- Tenant gate: suspended/cancelled tenants and exhausted monthly send allowances never send.
-  if (o.status !== 'SENDING') {
+  if (o.status !== 'SENDING' && o.status !== 'UNCERTAIN') {
     const ent = await import('./entitlements.js');
     const st = await ent.tenantStateForWorkspace(workspaceId);
     if (!st.operational) return defer(new Date(now.getTime() + 3600_000), st.reason ?? 'organization inactive');
@@ -805,27 +862,23 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   }
 
   // ---- Crash recovery: a previous attempt may have sent the email before we recorded it.
-  if (o.status === 'SENDING') {
-    if (o.sendStartedAt && now.getTime() - o.sendStartedAt.getTime() < 2 * 60_000) return { outcome: 'skipped', detail: 'send in progress' };
+  if (o.status === 'SENDING' || o.status === 'UNCERTAIN') {
+    if (o.status === 'SENDING' && o.sendStartedAt && now.getTime() - o.sendStartedAt.getTime() < 2 * 60_000) return { outcome: 'skipped', detail: 'send in progress' };
     try {
       const found = await adapters().email[o.emailAccount.provider].findSentByOutboundId(await getAuth(o.emailAccountId), { outboundId: o.id, to: o.toAddress, since: o.sendStartedAt ?? o.createdAt });
       if (found) {
         await finalizeSent(o.id, { providerMessageId: found.providerMessageId, providerThreadId: found.providerThreadId, internetMessageId: found.internetMessageId || o.internetMessageId }, now, true);
+        await recordSubmission('ACCEPTED', 'RECONCILED');
         return { outcome: 'reconciled' };
       }
     } catch (e) {
-      logger.warn({ err: e, outboundId }, 'reconciliation lookup failed; will retry later');
-      throw e; // do not risk a duplicate: retry the whole job later
+      await holdUncertain(workspaceId, o.id, o.enrollmentId, now);
+      logger.warn({ outboundId, workspaceId, provider: o.emailAccount.provider }, 'Sent lookup failed; held for reconciliation');
+      throw e;
     }
-    if (o.emailAccount.provider === 'SMTP_IMAP') {
-      // SMTP servers don't reliably keep a Sent copy, so "not found" doesn't prove the email wasn't sent.
-      // Fail safe instead of risking a duplicate; the user can check the mailbox and re-enroll.
-      const msg = 'Delivery state unknown after an interrupted SMTP send; not retried to avoid a duplicate. Check the mailbox Sent folder.';
-      await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'FAILED', lastError: msg } });
-      await db().sequenceEnrollment.update({ where: { id: o.enrollmentId }, data: { status: 'FAILED', stopReason: msg } });
-      return { outcome: 'cancelled', detail: msg };
-    }
-    await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'QUEUED' } });
+    await holdUncertain(workspaceId, o.id, o.enrollmentId, now);
+    await recordSubmission('UNKNOWN_OUTCOME', 'BLOCKED_SENT_LOOKUP_EMPTY');
+    return { outcome: 'cancelled', detail: UNCERTAIN_REASON };
   }
 
   // ---- Gates (re-evaluated at send time)
@@ -839,9 +892,9 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
   if (o.enrollment.status !== 'ACTIVE') return cancel(`enrollment ${o.enrollment.status}`);
   if (o.approvalStatus === 'PENDING' || o.approvalStatus === 'REJECTED') return { outcome: 'skipped', detail: 'not approved' };
   if (o.factCheckStatus === 'FAILED') return { outcome: 'skipped', detail: 'fact-check failed' };
-  if (o.emailAccount.status !== 'CONNECTED') return defer(new Date(now.getTime() + 15 * 60_000), `mailbox ${o.emailAccount.status}`);
+  if (o.emailAccount.status !== 'CONNECTED' || o.emailAccount.operatorPaused) return defer(new Date(now.getTime() + 15 * 60_000), `mailbox ${o.emailAccount.status}`);
   const lead = o.enrollment.lead;
-  const eligibility = await canContact(workspaceId, lead, { requireVerified: o.campaign.requireVerifiedEmail });
+  const eligibility = await canContact(workspaceId, lead, { requireVerified: o.campaign.requireVerifiedEmail, icpId: o.campaign.icpId });
   if (!eligibility.allowed) return cancel(`not eligible: ${eligibility.reasons.join('; ')}`, 'STOPPED_INELIGIBLE');
   const replied = await db().emailEvent.count({ where: { enrollmentId: o.enrollmentId, type: 'REPLIED' } });
   if (replied && o.campaign.stopOnReply) return cancel('prospect replied', 'STOPPED_REPLIED');
@@ -855,14 +908,32 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     if (w.success && !isInWindow(now, w.data, w.data.timezone ?? 'UTC')) return defer(nextWindowStart(now, w.data, w.data.timezone ?? 'UTC'), 'outside mailbox sending window');
   }
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-  if (o.emailAccount.lastSentAt && now.getTime() - o.emailAccount.lastSentAt.getTime() < o.emailAccount.minSecondsBetweenSends * 1000) {
-    return defer(new Date(o.emailAccount.lastSentAt.getTime() + o.emailAccount.minSecondsBetweenSends * 1000), 'minimum spacing between sends');
-  }
-
   // Serialize quota checks and SENDING reservations per workspace across worker instances.
   const releaseQuotaLock = await acquireLock(`send-quota:${workspaceId}`, 15_000);
   if (!releaseQuotaLock) return defer(new Date(now.getTime() + 2_000), 'workspace send quota is being checked');
   try {
+    const mailbox = await db().emailAccount.findFirst({ where: { workspaceId, id: o.emailAccountId }, select: { status: true, operatorPaused: true, lastSentAt: true, minSecondsBetweenSends: true, sendingWindow: true } });
+    if (mailbox?.status !== 'CONNECTED' || mailbox.operatorPaused) return defer(new Date(now.getTime() + 15 * 60_000), 'mailbox is unavailable');
+    const limits = mailbox.sendingWindow as { hourlySendLimit?: number | null; maxSecondsBetweenSends?: number | null } | null;
+    const minimum = mailbox.minSecondsBetweenSends;
+    const maximum = Math.max(minimum, limits?.maxSecondsBetweenSends ?? minimum);
+    if (mailbox.lastSentAt) {
+      const seed = Number.parseInt(sha256(`${o.emailAccountId}:${mailbox.lastSentAt.toISOString()}`).slice(0, 8), 16);
+      const gap = minimum + seed % (maximum - minimum + 1);
+      const next = new Date(mailbox.lastSentAt.getTime() + gap * 1000);
+      if (now < next) return defer(next, 'mailbox spacing between sends');
+    }
+    if (limits?.hourlySendLimit) {
+      const since = new Date(now.getTime() - 3600_000);
+      const where = { workspaceId, emailAccountId: o.emailAccountId };
+      if (await reservedSendCountSince(where, since) >= limits.hourlySendLimit) {
+        const oldest = await db().outboundEmail.aggregate({
+          where: { ...where, status: 'SENT', sentAt: { gte: since } }, _min: { sentAt: true },
+        });
+        const retryAt = Math.max(now.getTime() + 60_000, (oldest._min.sentAt?.getTime() ?? now.getTime()) + 3600_001);
+        return defer(new Date(retryAt), 'mailbox rolling hourly limit reached');
+      }
+    }
     const accountToday = await reservedSendCountSince({ workspaceId, emailAccountId: o.emailAccountId }, startOfDayIn(accWin.timezone ?? ws.timezone, now));
     const readiness = (o.emailAccount.connectionConfig as { readiness?: { enabled?: boolean; currentDailyCap?: number } } | null)?.readiness;
     const useReadiness = globalAutomation.mailboxReadinessManagement && readiness?.enabled === true;
@@ -889,21 +960,23 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     if (latestAutomation.emergencyPause) return defer(new Date(now.getTime() + 15 * 60_000), 'workspace emergency pause is active');
     if (!latestAutomation.automaticCampaignSending) return defer(new Date(now.getTime() + 60 * 60_000), 'automatic campaign sending is disabled');
     // The reservation is visible to the next lock holder before this lock is released.
-    const claim = await db().outboundEmail.updateMany({ where: { id: o.id, status: 'QUEUED' }, data: { status: 'SENDING', sendStartedAt: now, attempts: { increment: 1 } } });
+    const claim = await db().$transaction(async tx => {
+      const claimed = await tx.outboundEmail.updateMany({ where: { id: o.id, status: 'QUEUED' }, data: { status: 'SENDING', sendStartedAt: now, attempts: { increment: 1 } } });
+      if (claimed.count) await tx.emailAccount.update({ where: { id: o.emailAccountId }, data: { lastSentAt: now } });
+      return claimed;
+    });
     if (claim.count === 0) return { outcome: 'skipped', detail: 'claimed by another worker' };
   } finally {
     await releaseQuotaLock();
   }
-  await db().emailAccount.update({ where: { id: o.emailAccountId }, data: { lastSentAt: now } });
-
   // ---- Build message (threading + compliance headers)
   const previous = await db().outboundEmail.findMany({ where: { enrollmentId: o.enrollmentId, status: 'SENT' }, orderBy: { sentAt: 'asc' } });
   const inThread = o.step.threadMode === 'REPLY_IN_THREAD' && previous.length > 0;
   const lastPrev = previous[previous.length - 1];
   const settings = readSettings(ws.settings);
-  const unsubToken = unsubscribeToken(workspaceId, lead.emailNormalized, lead.id);
+  const unsubToken = unsubscribeToken(workspaceId, lead.emailNormalized, lead.id, o.id);
   const unsubscribeHttp = `${process.env.APP_URL}/api/v1/public/unsubscribe/${unsubToken}`;
-  const html = o.campaign.trackOpens || o.campaign.trackClicks ? await applyTracking(workspaceId, o.id, o.bodyText ?? '', { opens: o.campaign.trackOpens, clicks: o.campaign.trackClicks }, settings.trackingBaseUrl ?? `${process.env.APP_URL}/api/v1/public`) : undefined;
+  const html = settings.trackingEnabled && (o.campaign.trackOpens || o.campaign.trackClicks) ? await applyTracking(workspaceId, o.id, o.bodyText ?? '', { opens: o.campaign.trackOpens, clicks: o.campaign.trackClicks }, settings.trackingBaseUrl ?? `${process.env.APP_URL}/api/v1/public`) : undefined;
   const msg: OutgoingMessage = {
     from: { address: o.emailAccount.emailAddress, name: o.emailAccount.displayName ?? undefined },
     to: o.toAddress,
@@ -922,27 +995,65 @@ export async function sendOutbound(workspaceId: string, outboundId: string, now 
     },
   };
 
+  let submissionStarted = false;
+  let accepted = false;
   try {
-    const result = await adapters().email[o.emailAccount.provider].send(await getAuth(o.emailAccountId), msg);
+    const auth = await getAuth(o.emailAccountId);
+    submissionStarted = true;
+    const result = await adapters().email[o.emailAccount.provider].send(auth, msg);
+    accepted = true;
+    await recordSubmission('ACCEPTED', 'NO_RETRY');
     await finalizeSent(o.id, result, now, false);
     return { outcome: 'sent' };
   } catch (e) {
     const err = e as ProviderError;
+    if (accepted) {
+      await holdUncertain(workspaceId, o.id, o.enrollmentId, now);
+      throw e;
+    }
     const status = err instanceof ProviderError ? err.status : undefined;
+    const submission = !submissionStarted ? 'DEFINITELY_NOT_SENT'
+      : err instanceof ProviderError && err.submissionOutcome ? err.submissionOutcome
+      : status && status >= 400 && status < 500 && status !== 408 ? 'PROVIDER_REJECTED'
+      : 'UNKNOWN_OUTCOME';
     await db().emailAccount.update({ where: { id: o.emailAccountId }, data: { lastError: (err as Error).message.slice(0, 500), lastErrorAt: now } }).catch(() => undefined);
     if (status === 401 || (err instanceof Error && /invalid_grant/.test(err.message))) {
       await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'QUEUED', lastError: err.message.slice(0, 500) } });
       await markNeedsReauth(workspaceId, o.emailAccountId, err.message);
+      await recordSubmission(submission, 'REAUTHORIZE', status);
       return { outcome: 'deferred', detail: 'mailbox needs re-authorization' };
     }
     if (status && status >= 400 && status < 500 && status !== 429 && status !== 408) {
+      const suppressed = o.emailAccount.provider === 'SMTP_IMAP' && err.code === 'RECIPIENT_NOT_FOUND';
+      if (suppressed) {
+        await addSuppression(workspaceId, { type: 'EMAIL', value: o.toAddress, reason: 'HARD_BOUNCE', source: 'smtp_recipient_rejection' }, WORKER_ACTOR);
+      }
       await db().outboundEmail.update({ where: { id: o.id }, data: { status: 'FAILED', lastError: err.message.slice(0, 500) } });
       await db().emailEvent.create({ data: { workspaceId, type: 'FAILED', leadId: lead.id, campaignId: o.campaignId, enrollmentId: o.enrollmentId, outboundEmailId: o.id, emailAccountId: o.emailAccountId, metadata: { error: err.message.slice(0, 300) } } });
-      await db().sequenceEnrollment.update({ where: { id: o.enrollmentId }, data: { status: 'FAILED', stopReason: err.message.slice(0, 200) } });
+      await db().sequenceEnrollment.updateMany({ where: { id: o.enrollmentId, status: 'ACTIVE' }, data: { status: 'FAILED', stopReason: err.message.slice(0, 200) } });
+      await recordSubmission(submission, 'BLOCKED', status, suppressed);
       return { outcome: 'failed', detail: err.message };
     }
-    // Ambiguous/transient (network, 5xx, 429): leave SENDING so the retry reconciles before resending.
-    await db().outboundEmail.update({ where: { id: o.id }, data: { lastError: (err as Error).message.slice(0, 500), sendStartedAt: new Date(now.getTime() - 3 * 60_000) } });
+    if (submission === 'DEFINITELY_NOT_SENT' || (submission === 'PROVIDER_REJECTED' && err.retryable)) {
+      const message = `Temporary submission failure: ${err.message}`.slice(0, 500);
+      const exhausted = o.attempts + 1 >= 5;
+      const retryAfterMs = err instanceof ProviderError ? err.retryAfterMs : undefined;
+      const retryAt = retryAfterMs && Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? new Date(Math.min(8.64e15, now.getTime() + retryAfterMs)) : undefined;
+      await db().$transaction(async tx => {
+        await tx.outboundEmail.update({ where: { id: o.id }, data: { status: exhausted ? 'FAILED' : 'QUEUED', lastError: message, scheduledFor: retryAt } });
+        if (exhausted) {
+          await tx.sequenceEnrollment.updateMany({ where: { id: o.enrollmentId, status: 'ACTIVE' }, data: { status: 'FAILED', stopReason: message.slice(0, 200) } });
+          await tx.emailEvent.upsert({ where: { dedupeKey: `FAILED:${o.id}` }, update: {}, create: { workspaceId, type: 'FAILED', leadId: lead.id, campaignId: o.campaignId, enrollmentId: o.enrollmentId, outboundEmailId: o.id, emailAccountId: o.emailAccountId, dedupeKey: `FAILED:${o.id}`, metadata: { error: message.slice(0, 300) } } });
+        }
+      });
+      await maybePauseMailboxAfterProviderErrors(workspaceId, o.emailAccountId, now, err.message);
+      await recordSubmission(submission, exhausted ? 'EXHAUSTED' : 'SAME_MAILBOX', status);
+      if (exhausted) return { outcome: 'failed', detail: message };
+      throw e;
+    }
+    await recordSubmission(submission, 'RECONCILE_ONLY', status);
+    // The provider may have accepted the message. Subsequent jobs can reconcile but cannot resubmit.
+    await holdUncertain(workspaceId, o.id, o.enrollmentId, now);
     if (status === undefined || status === 408 || status === 429 || status >= 500) await maybePauseMailboxAfterProviderErrors(workspaceId, o.emailAccountId, now, (err as Error).message);
     throw e;
   }
@@ -955,7 +1066,9 @@ async function finalizeSent(outboundId: string, result: { providerMessageId: str
   const next = steps.find((s) => s.order === o.step.order + 1);
   const zone = recipientZone(o.campaign, o.enrollment.lead);
   const threadKey = result.providerThreadId ?? result.internetMessageId;
-  await db().$transaction(async (tx) => {
+  const finalized = await db().$transaction(async (tx) => {
+    const claimed = await tx.outboundEmail.updateMany({ where: { id: outboundId, status: { in: ['SENDING', 'UNCERTAIN'] }, resolvedAt: null }, data: { status: 'SENT' } });
+    if (!claimed.count) return false;
     const conv = await tx.conversation.upsert({
       where: { emailAccountId_providerThreadId: { emailAccountId: o.emailAccountId, providerThreadId: threadKey } },
       update: { lastMessageAt: at },
@@ -973,8 +1086,8 @@ async function finalizeSent(outboundId: string, result: { providerMessageId: str
     });
     await tx.outboundEmail.update({ where: { id: o.id }, data: { status: 'SENT', sentAt: at, providerMessageId: result.providerMessageId, providerThreadId: result.providerThreadId, internetMessageId: result.internetMessageId || o.internetMessageId, emailMessageId: msg.id, lastError: reconciled ? 'reconciled after crash' : null } });
     await tx.emailEvent.upsert({ where: { dedupeKey: `SENT:${o.id}` }, update: {}, create: { workspaceId: o.workspaceId, type: 'SENT', leadId: o.enrollment.leadId, campaignId: o.campaignId, enrollmentId: o.enrollmentId, outboundEmailId: o.id, emailMessageId: msg.id, emailAccountId: o.emailAccountId, dedupeKey: `SENT:${o.id}`, occurredAt: at } });
-    await tx.sequenceEnrollment.update({
-      where: { id: o.enrollmentId },
+    await tx.sequenceEnrollment.updateMany({
+      where: { id: o.enrollmentId, status: 'ACTIVE' },
       data: next
         ? { currentStepOrder: o.step.order, conversationId: conv.id, nextActionAt: computeNextStepAt(at, next.delayDays, windowOf(o.campaign), zone) }
         : { currentStepOrder: o.step.order, conversationId: conv.id, nextActionAt: null, status: 'COMPLETED', completedAt: at },
@@ -982,7 +1095,9 @@ async function finalizeSent(outboundId: string, result: { providerMessageId: str
     const lead = o.enrollment.lead;
     await tx.lead.update({ where: { id: lead.id }, data: { lastContactedAt: at, ...(['NEW', 'RESEARCHED', 'QUALIFIED'].includes(lead.status) ? { status: 'CONTACTED' } : {}) } });
     if (['NEW', 'RESEARCHED', 'QUALIFIED'].includes(lead.status)) await tx.leadStatusChange.create({ data: { workspaceId: o.workspaceId, leadId: lead.id, fromStatus: lead.status, toStatus: 'CONTACTED', reason: `campaign ${o.campaign.name}` } });
+    return true;
   });
+  if (!finalized) return;
   (await import('./usage.js')).meter({ workspaceId: o.workspaceId, metric: 'email_sends', quantity: 1, key: `send:${o.id}`, at });
   await emitEvent(o.workspaceId, 'email.sent', `sent:${o.id}`, { outboundId: o.id, leadId: o.enrollment.leadId, campaignId: o.campaignId });
   await publish(o.workspaceId, 'outbound.sent', { outboundId: o.id, campaignId: o.campaignId });
@@ -994,9 +1109,10 @@ export async function enrollLeadManually(workspaceId: string, campaignId: string
   if (!['APPROVED', 'RUNNING'].includes(c.status)) throw new AppError('CAMPAIGN_STATE', 'Campaign must be approved or running', 409);
   const lead = await db().lead.findFirst({ where: { id: leadId, workspaceId } });
   if (!lead) throw NotFound('Lead');
-  const ok = await canContact(workspaceId, lead, { requireVerified: c.requireVerifiedEmail });
+  const ok = await canContact(workspaceId, lead, { requireVerified: c.requireVerifiedEmail, icpId: c.icpId });
   if (!ok.allowed) throw new AppError('NOT_ELIGIBLE', `Lead not eligible: ${ok.reasons.join('; ')}`, 400);
-  const accounts = c.accounts.filter((a) => a.emailAccount.status === 'CONNECTED');
+  const accounts = c.accounts.filter(({ emailAccount }) => emailAccount.status === 'CONNECTED' && !emailAccount.operatorPaused
+    && (emailAccount.sendingWindow as { participateInRotation?: boolean })?.participateInRotation !== false);
   if (!accounts.length) throw new AppError('CAMPAIGN_INVALID', 'No connected mailbox on this campaign', 400);
   const existing = await db().sequenceEnrollment.findUnique({ where: { campaignId_leadId: { campaignId, leadId } } });
   if (existing) return 'already enrolled';

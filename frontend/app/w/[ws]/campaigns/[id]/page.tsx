@@ -1,5 +1,7 @@
 'use client';
 
+import { TrackingTotals, type TrackingCounts } from '@/components/tracking-totals';
+
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -54,7 +56,7 @@ export default function CampaignDetail() {
             </div>
           )}
           {['APPROVED', 'RUNNING', 'PAUSED'].includes(c.status) && <div className="mb-4"><Notice kind="warning">Editing the sequence or settings sends this campaign back for approval and stops sending until it is re-approved.</Notice></div>}
-          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'sequence', label: 'Sequence builder' }, { id: 'ai', label: 'AI personalization' }, ...(owner.allowed ? [{ id: 'mygen', label: 'Generate with my AI' }] : []), { id: 'preview', label: 'Preview & test' }, { id: 'settings', label: 'Settings & schedule' }, { id: 'audience', label: 'Lists & mailboxes' }, { id: 'recipients', label: 'Recipients' }, { id: 'review', label: 'Review queue' }, { id: 'log', label: 'Send log' }, { id: 'results', label: 'A/B & step results' }, { id: 'versions', label: 'Versions' }]} />
+          <Tabs active={tab} onChange={setTab} tabs={[{ id: 'sequence', label: 'Sequence builder' }, { id: 'ai', label: 'AI personalization' }, ...(owner.allowed ? [{ id: 'mygen', label: 'Generate with my AI' }] : []), { id: 'preview', label: 'Preview & test' }, { id: 'settings', label: 'Settings & schedule' }, { id: 'audience', label: 'Lists & mailboxes' }, { id: 'recipients', label: 'Recipients' }, { id: 'review', label: 'Review queue' }, { id: 'log', label: 'Send log' }, { id: 'activity', label: 'Activity' }, { id: 'results', label: 'A/B & step results' }, { id: 'versions', label: 'Versions' }]} />
           {tab === 'sequence' && <SequenceBuilder campaign={c} />}
           {tab === 'ai' && <CampaignAiPanel campaign={c} />}
           {tab === 'mygen' && owner.allowed && <MyAiGenerate campaignId={c.id} />}
@@ -65,6 +67,7 @@ export default function CampaignDetail() {
           {tab === 'recipients' && <Recipients id={id} canGenerate={owner.allowed} />}
           {tab === 'review' && <ReviewPanel campaignId={id} />}
           {tab === 'log' && <SendLog id={id} />}
+          {tab === 'activity' && <CampaignActivity id={id} />}
           {tab === 'results' && <StepResults id={id} />}
         </>
       )}
@@ -94,7 +97,9 @@ function SequenceBuilder({ campaign }: { campaign: any }) {
                 {i > 0 && <Field label="Delay (days after previous)"><Input type="number" min={0} max={90} value={s.delayDays} onChange={(e) => upd(i, { delayDays: Number(e.target.value) })} /></Field>}
                 {i > 0 && <Field label="Thread"><Select value={s.threadMode} onChange={(e) => upd(i, { threadMode: e.target.value })} options={[{ value: 'REPLY_IN_THREAD', label: 'Reply in same thread' }, { value: 'NEW_THREAD', label: 'New email thread' }]} /></Field>}
                 <Field label="Personalisation"><Select value={s.personalizationMode} onChange={(e) => upd(i, { personalizationMode: e.target.value })} options={[{ value: 'TEMPLATE_ONLY', label: 'Template only' }, { value: 'AI_FIRST_LINE', label: 'AI first line ({{aiFirstLine}})' }, { value: 'AI_FULL', label: 'AI writes full email' }]} /></Field>
-                {i > 0 && <Field label="Send condition"><Select value={s.condition} onChange={(e) => upd(i, { condition: e.target.value })} options={[{ value: 'ALWAYS', label: 'Always (if no reply)' }, { value: 'IF_OPENED', label: 'Only if opened (needs tracking)' }, { value: 'IF_NOT_OPENED', label: 'Only if not opened (needs tracking)' }]} /></Field>}
+                {i > 0 && s.condition !== 'ALWAYS' && <Field label="Legacy open condition" hint="Switch to a scheduled follow-up before requesting approval.">
+                  <Button variant="secondary" onClick={() => upd(i, { condition: 'ALWAYS' })}>Use scheduled follow-up</Button>
+                </Field>}
               </div>
               {s.personalizationMode !== 'TEMPLATE_ONLY' && <div className="mt-3"><Field label="AI instructions for this step" hint="Applied after workspace and campaign instructions; wins on conflict (except hard safety rules). E.g. “Step 2: relevant follow-up with a different business angle.”"><Textarea rows={2} value={s.aiInstructions ?? ''} onChange={(e) => upd(i, { aiInstructions: e.target.value })} /></Field></div>}
               <div className="mt-3 grid gap-3 lg:grid-cols-2">
@@ -246,6 +251,31 @@ function SendLog({ id }: { id: string }) {
   );
 }
 
+function CampaignActivity({ id }: { id: string }) {
+  const ws = useWs();
+  const [page, setPage] = useState(1);
+  const activity = useWsQuery<Paged<{
+    id: string; type: string; occurredAt: string;
+    lead: { id: string; email: string; firstName: string | null; lastName: string | null } | null;
+    emailAccount: { emailAddress: string } | null;
+  }> & { lifetimeTracking: TrackingCounts }>(`/campaigns/${id}/activity${qs({ page, pageSize: 30 })}`);
+  return <Card title="Campaign activity">
+    <QueryView q={activity} isEmpty={data => !data.total} empty={<Empty title="No campaign events yet" />}>
+      {data => <>
+        <p className="mb-2 text-xs font-medium">Tracking across all dates</p>
+        <TrackingTotals totals={data.lifetimeTracking} />
+        <Table head={['When', 'Event', 'Prospect', 'Mailbox']}>{data.data.map(event => <tr key={event.id}>
+          <td className="td">{fmtDate(event.occurredAt)}</td>
+          <td className="td"><Badge>{event.type === 'SENT' ? 'Provider accepted' : event.type === 'OPENED' ? 'Estimated open' : event.type === 'CLICKED' ? 'Estimated click' : event.type === 'COMPLAINED' ? 'Reply complaint signal' : event.type}</Badge></td>
+          <td className="td">{event.lead ? <Link className="underline" href={`/w/${ws}/leads/${event.lead.id}`}>{fullName(event.lead)}</Link> : '—'}</td>
+          <td className="td">{event.emailAccount?.emailAddress ?? '—'}</td>
+        </tr>)}</Table>
+        <Pagination page={data.page} totalPages={data.totalPages} total={data.total} onPage={setPage} />
+      </>}
+    </QueryView>
+  </Card>;
+}
+
 function StepResults({ id }: { id: string }) {
   const q = useWsQuery<Array<{ step: number; variant: string; sent: number; replied: number }>>(`/campaigns/${id}/steps`);
   return (
@@ -255,7 +285,7 @@ function StepResults({ id }: { id: string }) {
           <Table head={['Step', 'Variant', 'Sent', 'Replies after this step', 'Reply rate']}>
             {rows.map((r) => <tr key={`${r.step}${r.variant}`}><td className="td">{r.step}</td><td className="td">{r.variant}</td><td className="td">{r.sent}</td><td className="td">{r.replied}</td><td className="td">{r.sent ? `${Math.round((r.replied / r.sent) * 1000) / 10}%` : '—'}</td></tr>)}
           </Table>
-          <p className="mt-2 text-xs text-slate-500">A reply is credited to every step that was sent before it. Small samples are not statistically meaningful.</p>
+          <p className="mt-2 text-xs text-slate-500">Each reply is attributed to the latest preceding send in its enrollment.</p>
         </Card>
       )}
     </QueryView>

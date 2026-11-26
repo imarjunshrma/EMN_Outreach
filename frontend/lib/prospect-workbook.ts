@@ -30,8 +30,8 @@ export async function workbookToCsv(file: File): Promise<File> {
     const workbook = prepareWorkbook(new Uint8Array(await file.arrayBuffer()));
     rows = await readSheet(workbook, 1);
   } catch (error) {
-    if (error instanceof Error && error.message === 'Expanded workbook is too large') throw new Error('Choose a workbook with less than 40 MB of expanded spreadsheet data.');
-    throw new Error('The first worksheet could not be read. Check that the file is an Excel .xlsx workbook.');
+    if (error instanceof Error && error.message === 'Expanded workbook is too large') throw new Error('Choose a workbook with less than 40 MB of expanded spreadsheet data.', { cause: error });
+    throw new Error('The first worksheet could not be read. Check that the file is an Excel .xlsx workbook.', { cause: error });
   }
   if (!rows.length) throw new Error('The first worksheet is empty.');
 

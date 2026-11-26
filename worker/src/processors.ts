@@ -67,6 +67,13 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
       for (const a of list) await enqueue(QUEUES.sync, 'sync.account', { workspaceId: a.workspaceId, accountId: a.id }, { jobId: `sync-${a.id}-${bucket}`, attempts: 2 });
       return { queued: list.length };
     },
+    'graph.renewAccount': async (j) => {
+      const account = await db().emailAccount.findFirst({
+        where: { id: s(j.data.accountId), workspaceId: s(j.data.workspaceId), provider: 'MICROSOFT', status: { in: ['CONNECTED', 'PAUSED'] } },
+        select: { id: true },
+      });
+      if (account) await accounts.ensureGraphSubscription(account.id, j.data.recreate === true);
+    },
     'graph.renew': async () => {
       const list = await db().emailAccount.findMany({ where: { provider: 'MICROSOFT', status: 'CONNECTED' }, select: { id: true } });
       if (process.env.GRAPH_WEBHOOKS_ENABLED !== 'true') return { skipped: 'GRAPH_WEBHOOKS_ENABLED is false (polling only)' };

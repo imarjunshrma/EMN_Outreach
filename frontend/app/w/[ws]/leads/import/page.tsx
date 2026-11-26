@@ -10,7 +10,7 @@ import { useToast } from '@/components/toast';
 
 const FIELDS = ['ignore', 'email', 'firstName', 'lastName', 'fullName', 'title', 'companyName', 'companyDomain', 'website', 'linkedinUrl', 'custom.youtubeUrl', 'custom.instagramUrl', 'custom.facebookUrl', 'custom.socialUrl', 'custom.transcriptUrl', 'custom.publicProfileUrl', 'custom.notes', 'phone', 'country', 'city', 'timezone', 'tags'];
 interface Upload { importId: string; headers: string[]; sampleRows: string[][]; suggestedMapping: Record<string, string> }
-interface ImportJob { id: string; fileName: string; status: string; totalRows: number; importedRows: number; updatedRows: number; skippedRows: number; errorRows: number; errors: Array<{ row: number; error: string }>; createdAt: string }
+interface ImportJob { id: string; fileName: string; status: string; totalRows: number; importedRows: number; updatedRows: number; skippedRows: number; errorRows: number; errors: Array<{ row: number; error: string; retryable?: boolean }>; createdAt: string }
 
 export default function ImportPage() {
   const ws = useWs();
@@ -25,6 +25,8 @@ export default function ImportPage() {
   const lists = useWsQuery<Array<{ id: string; name: string }>>('/lists');
   const imports = useWsQuery<ImportJob[]>('/imports', { refetchInterval: 5000 });
   const start = useWsMutation(() => ({ path: `/imports/${upload!.importId}/start`, body: { mapping, dedupeMode: opts.dedupeMode, targetListId: opts.targetListId || null, newListName: opts.newListName || undefined, sourceName: opts.sourceName, lawfulBasis: opts.lawfulBasis, lawfulBasisNote: opts.lawfulBasisNote || undefined, defaultCountry: opts.defaultCountry || undefined } }), { success: 'Import started', onSuccess: () => setUpload(null) });
+
+  const retry = useWsMutation<string>((id) => ({ path: `/imports/${id}/retry`, body: {} }), { success: 'Import retry queued' });
 
   async function onFile(file: File) {
     setBusy(true);
@@ -84,7 +86,7 @@ export default function ImportPage() {
               <Table head={['File', 'Status', 'Rows', 'Imported', 'Updated', 'Skipped', 'Errors', 'When']}>
                 {rows.map((j) => (
                   <tr key={j.id}>
-                    <td className="td">{j.fileName}{j.errors.length > 0 && <details className="text-xs text-red-700"><summary>row errors</summary>{j.errors.slice(0, 30).map((e) => <div key={e.row}>row {e.row}: {e.error}</div>)}</details>}</td>
+                    <td className="td">{j.fileName}{(j.status === 'FAILED' || (j.status === 'COMPLETED' && j.errors.some(error => error.retryable))) && <Button variant="ghost" loading={retry.isPending} onClick={() => retry.mutate(j.id)}>Retry import</Button>}{j.errors.length > 0 && <details className="text-xs text-red-700"><summary>row errors</summary>{j.errors.slice(0, 30).map((e) => <div key={e.row}>row {e.row}: {e.error}</div>)}</details>}</td>
                     <td className="td"><Badge>{j.status}</Badge></td><td className="td">{j.totalRows}</td><td className="td">{j.importedRows}</td><td className="td">{j.updatedRows}</td><td className="td">{j.skippedRows}</td><td className="td">{j.errorRows}</td><td className="td text-xs">{fmtDate(j.createdAt)}</td>
                   </tr>
                 ))}

@@ -1,3 +1,5 @@
+import { listUncertainSends, ReconciliationSchema, resolveUncertainSend } from '../services/send-reconciliation.js';
+import { emptyTracking, trackingTotals } from '../services/tracking-analytics.js';
 import { z } from 'zod';
 import { route, Paging, paged } from '../http/router.js';
 import { db } from '../core/db.js';
@@ -18,6 +20,21 @@ import { requireSecret } from '../services/integrations.js';
 route({ method: 'get', path: '/w/:workspaceId/campaigns', tag: 'Campaigns', summary: 'Campaigns with headline stats', auth: 'workspace', role: 'VIEWER', handler: (c) => engine.listCampaigns(c.workspaceId) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns', tag: 'Campaigns', summary: 'Create a campaign (DRAFT)', auth: 'workspace', role: 'MEMBER', body: engine.CampaignSettingsSchema, handler: (c) => engine.createCampaign(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/campaigns/:id', tag: 'Campaigns', summary: 'Campaign with sequence, lists and mailboxes', auth: 'workspace', role: 'VIEWER', handler: (c) => engine.getCampaign(c.workspaceId, c.params.id) });
+route({ method: 'get', path: '/w/:workspaceId/campaigns/:id/activity', tag: 'Campaigns', summary: 'Campaign activity for sent messages, engagement, replies, and opt-outs', auth: 'workspace', role: 'VIEWER', query: Paging,
+  handler: async (c) => {
+    if (!(await db().campaign.findFirst({ where: { id: c.params.id, workspaceId: c.workspaceId }, select: { id: true } }))) throw NotFound('Campaign');
+    const where = { workspaceId: c.workspaceId, campaignId: c.params.id };
+    const [events, total, tracking] = await Promise.all([
+      db().emailEvent.findMany({
+        where, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        skip: (c.query.page - 1) * c.query.pageSize, take: c.query.pageSize,
+        select: { id: true, occurredAt: true, type: true, lead: { select: { id: true, email: true, firstName: true, lastName: true } }, emailAccount: { select: { emailAddress: true } } },
+      }),
+      db().emailEvent.count({ where }),
+      trackingTotals(c.workspaceId, 'campaign', c.params.id),
+    ]);
+    return { ...paged(events, total, c.query.page, c.query.pageSize), lifetimeTracking: tracking.get(c.params.id) ?? emptyTracking };
+  } });
 route({ method: 'patch', path: '/w/:workspaceId/campaigns/:id', tag: 'Campaigns', summary: 'Update settings (invalidates approval)', auth: 'workspace', role: 'MEMBER', body: engine.CampaignSettingsSchema.partial(), handler: (c) => engine.updateCampaign(c.workspaceId, c.params.id, c.body, c.actor) });
 route({ method: 'delete', path: '/w/:workspaceId/campaigns/:id', tag: 'Campaigns', summary: 'Delete a never-sent draft', auth: 'workspace', role: 'MANAGER', handler: async (c) => { await engine.deleteCampaign(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
 route({ method: 'put', path: '/w/:workspaceId/campaigns/:id/sequence', tag: 'Campaigns', summary: 'Save the email sequence (steps, delays, conditions, A/B variants)', auth: 'workspace', role: 'MEMBER', body: engine.SequenceSchema, handler: (c) => engine.saveSequence(c.workspaceId, c.params.id, c.body, c.actor) });
@@ -47,6 +64,14 @@ route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/export-smartlead', 
 // ---------------------------------------------------------------- outbound messages (send history / review queue)
 route({ method: 'get', path: '/w/:workspaceId/outbound', tag: 'Sending', summary: 'Send history and message status', auth: 'workspace', role: 'VIEWER', query: Paging.extend({ campaignId: z.string().uuid().optional(), status: z.string().optional(), awaitingApproval: z.enum(['true', 'false']).transform((v) => v === 'true').optional() }),
   handler: async (c) => { const r = await engine.listOutbound(c.workspaceId, c.query); return paged(r.items, r.total, c.query.page, c.query.pageSize); } });
+route({ method: 'get', path: '/w/:workspaceId/outbound-reconciliation', tag: 'Sending', summary: 'List uncertain sends for operator review', auth: 'workspace', role: 'ADMIN',
+  query: Paging.extend({ resolved: z.enum(['true', 'false']).optional() }),
+  handler: async c => {
+    const { items, total } = await listUncertainSends(c.workspaceId, c.query.page, c.query.pageSize, c.query.resolved === 'true');
+    return paged(items, total, c.query.page, c.query.pageSize);
+  } });
+route({ method: 'post', path: '/w/:workspaceId/outbound-reconciliation/:id', tag: 'Sending', summary: 'Record an uncertain-send decision without resending', auth: 'workspace', role: 'ADMIN', status: 200,
+  body: ReconciliationSchema, handler: c => resolveUncertainSend(c.workspaceId, c.params.id, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/outbound/:id', tag: 'Sending', summary: 'One outbound email with fact-check report and evidence', auth: 'workspace', role: 'VIEWER', handler: (c) => engine.getOutbound(c.workspaceId, c.params.id) });
 route({ method: 'post', path: '/w/:workspaceId/outbound/:id/review', tag: 'Sending', summary: 'Approve (optionally edited) or reject an email awaiting review', auth: 'workspace', role: 'MEMBER', status: 200,
   body: z.object({ decision: z.enum(['approve', 'reject']), subject: z.string().max(300).optional(), bodyText: z.string().max(20000).optional(), reason: z.string().max(300).optional() }),

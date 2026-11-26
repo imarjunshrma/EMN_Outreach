@@ -23,11 +23,16 @@ function creds(auth: AuthHandle): { config: SmtpImapConfig; password: string; sm
  *   4xx (temporary, e.g. 421/450/451/452) → 503  retryable
  *   no code (network/TLS/timeout)        → undefined  ambiguous: reconcile before any retry
  */
-export function smtpError(err: Error & { responseCode?: number; code?: string }): ProviderError {
+type SmtpSubmissionError = Error & { responseCode?: number; code?: string; command?: string; response?: string };
+
+export function smtpError(err: SmtpSubmissionError): ProviderError {
   const c = err.responseCode;
-  if (err.code === 'EAUTH' || c === 530 || c === 534 || c === 535) return new ProviderError('smtp', 'SMTP authentication failed', 401, false);
-  if (c && c >= 500) return new ProviderError('smtp', `SMTP provider rejected the message (${c})`, 400, false);
-  if (c && c >= 400) return new ProviderError('smtp', `SMTP provider temporarily unavailable (${c})`, 503, true);
+  if (err.code === 'EAUTH' || c === 530 || c === 534 || c === 535) return new ProviderError('smtp', 'SMTP authentication failed', 401, false, undefined, undefined, 'PROVIDER_REJECTED');
+  if (c && c >= 500 && err.command === 'RCPT TO' && /\b5\.1\.1\b/.test(err.response ?? '')) {
+    return new ProviderError('smtp', 'SMTP rejected the recipient as nonexistent', 400, false, undefined, 'RECIPIENT_NOT_FOUND', 'PROVIDER_REJECTED');
+  }
+  if (c && c >= 500) return new ProviderError('smtp', `SMTP provider rejected the message (${c})`, 400, false, undefined, undefined, 'PROVIDER_REJECTED');
+  if (c && c >= 400) return new ProviderError('smtp', `SMTP provider temporarily unavailable (${c})`, 503, true, undefined, undefined, 'PROVIDER_REJECTED');
   return new ProviderError('smtp', 'SMTP connection failed or timed out', undefined, true);
 }
 
@@ -63,7 +68,7 @@ export class SmtpImapProvider implements EmailProvider {
     let smtp: ConnectionCheck['smtp'];
     const transport = nodemailer.createTransport({ host: config.smtpHost, port: config.smtpPort, secure: config.smtpSecure, auth: { user: config.smtpUsername ?? config.username, pass: smtpPassword } });
     try { await transport.verify(); smtp = { ok: true, error: null }; }
-    catch (e) { smtp = { ok: false, error: smtpError(e as Error & { responseCode?: number; code?: string }).message }; }
+    catch (e) { smtp = { ok: false, error: smtpError(e as SmtpSubmissionError).message }; }
 
     let imap: ConnectionCheck['imap'];
     const client = this.imap(auth);
@@ -80,15 +85,15 @@ export class SmtpImapProvider implements EmailProvider {
     try {
       await transport.sendMail({ envelope: { from: msg.from.address, to: [msg.to] }, raw });
     } catch (e) {
-      throw smtpError(e as Error & { responseCode?: number; code?: string });
+      throw smtpError(e as SmtpSubmissionError);
     }
     if (config.appendToSent) {
       const client = this.imap(auth);
       try {
         await client.connect();
         await client.append(config.sentFolder ?? 'Sent', raw, ['\\Seen']);
-      } catch (e) {
-        throw imapError(e);
+      } catch {
+        // SMTP has already accepted the message. A failed Sent copy cannot undo submission.
       } finally { await client.logout().catch(() => undefined); }
     }
     return { providerMessageId: msg.messageId, providerThreadId: msg.references?.[0] ?? msg.inReplyTo ?? msg.messageId, internetMessageId: msg.messageId };

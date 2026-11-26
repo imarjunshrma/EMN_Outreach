@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { qs, type Paged } from '@/lib/api';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate, fullName } from '@/lib/format';
-import { Badge, Button, Card, Checkbox, Field, Input, Notice, PageHeader, QueryView, Select, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Checkbox, Field, Input, Notice, PageHeader, QueryView, Select, Table } from '@/components/ui';
 import { CheckList, ScoreBox } from '@/components/personalization';
 
 const opt = (xs: string[]) => [{ value: '', label: '— inherit —' }, ...xs.map((x) => ({ value: x, label: x.replace(/_/g, ' ') }))];

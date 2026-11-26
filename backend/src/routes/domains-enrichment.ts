@@ -42,22 +42,28 @@ route({ method: 'post', path: '/w/:workspaceId/enrichment/verify-bulk', tag: 'En
       db().lead.findMany({ where: { workspaceId: c.workspaceId, id: { in: c.body.leadIds } }, select: { id: true, emailNormalized: true } }),
       db().workspace.findUniqueOrThrow({ where: { id: c.workspaceId }, select: { settings: true } }),
     ]);
+    if (leads.length !== new Set(c.body.leadIds).size) throw NotFound('Lead');
     const settings = readSettings(ws.settings);
+    let queued = 0;
     if (settings.emailVerificationMode === 'external') {
       const providers = [...new Set([...settings.verifierOrder, ...(settings.verifierProvider === 'none' ? [] : [settings.verifierProvider])])];
       let configured = false;
       for (const provider of providers) if (await getSecret(c.workspaceId, provider)) { configured = true; break; }
       if (!configured) throw new AppError('PROVIDER_NOT_CONFIGURED', 'External mode is selected, but no verifier API key is configured. Add one under Settings → Integrations, or switch to Custom Verification.', 400);
-      for (const l of leads) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId: c.workspaceId, leadId: l.id, force: c.body.force, freshDays: settings.verificationFreshnessDays }, { jobId: `verify-${l.id}-${Math.floor(Date.now() / 600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });
+      queued = leads.length;
+      for (const l of leads) await enqueue(QUEUES.verify, 'verify.lead', { workspaceId: c.workspaceId, leadId: l.id, force: c.body.force, freshDays: settings.verificationFreshnessDays }, { jobId: `verify-${l.id}-${c.body.force ? 'retry' : 'normal'}-${Math.floor(Date.now() / 600_000)}`, attempts: 3, backoff: { type: 'exponential', delay: 30_000 } });
     } else {
       for (let i = 0; i < leads.length; i += 20) {
         await Promise.all(leads.slice(i, i + 20).map(async (l) => {
           const v = await firstParty.createVerification(c.workspaceId, l.emailNormalized, { leadId: l.id, force: c.body.force });
-          if (!v.cached) await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+          if (!v.cached) {
+            await enqueue(QUEUES.verify, 'verify.address', { workspaceId: c.workspaceId, verificationId: v.id }, { jobId: `fpv-${v.id}`, attempts: 4, backoff: { type: 'emnVerify' } });
+            queued++;
+          }
         }));
       }
     }
-    return { queued: leads.length, mode: settings.emailVerificationMode === 'external' ? 'external' : 'custom' };
+    return { queued, mode: settings.emailVerificationMode === 'external' ? 'external' : 'custom' };
   } });
 route({ method: 'post', path: '/w/:workspaceId/enrichment/find-email', tag: 'Enrichment', summary: 'Email discovery waterfall (name + company domain)', auth: 'workspace', role: 'MEMBER', status: 200, rateLimit: { limit: 300, windowSec: 3600, key: 'workspace' }, body: enrichment.FindSchema, handler: (c) => enrichment.findEmail(c.workspaceId, c.body, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/enrichment/stats', tag: 'Enrichment', summary: 'Provider comparison: checks, definitive rate, credits', auth: 'workspace', role: 'VIEWER', query: z.object({ days: z.coerce.number().int().min(1).max(365).default(90) }), handler: (c) => enrichment.enrichmentStats(c.workspaceId, c.query.days) });

@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { api } from '@/lib/api';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { fmtDate } from '@/lib/format';
-import { Badge, Button, Card, Checkbox, Empty, Field, Input, PageHeader, QueryView, Table } from '@/components/ui';
+import { Badge, Button, Card, Checkbox, Empty, Input, PageHeader, QueryView, Table } from '@/components/ui';
 
 export default function Profiles() {
   const ws = useWs();

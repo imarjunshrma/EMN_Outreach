@@ -35,6 +35,7 @@ export const WorkspaceSettingsSchema = z.object({
   aiFollowupGeneration: z.boolean().default(true),
   mailboxReadinessManagement: z.boolean().default(false),
   dailyDomainSendLimit: z.number().int().min(1).max(100000).nullable().default(null),
+  trackingEnabled: z.boolean().default(true),
   trackingBaseUrl: z.string().url().nullable().default(null),
   aiMonthlyBudgetUsd: z.number().min(0).max(100000).nullable().default(null),
   aiMaxCostPerLeadUsd: z.number().min(0).max(100).nullable().default(null),
@@ -230,6 +231,6 @@ export async function revokeApiKey(workspaceId: string, id: string, actor: Actor
 export function encryptSecret(plain: string) { return keyring().encrypt(plain); }
 export function decryptSecret(env: string) { return keyring().decrypt(env); }
 
-export function unsubscribeToken(workspaceId: string, email: string, leadId?: string) {
-  return signPayload(process.env.SESSION_SECRET ?? '', { w: workspaceId, e: email.toLowerCase(), l: leadId ?? null, t: Date.now() });
+export function unsubscribeToken(workspaceId: string, email: string, leadId?: string, outboundId?: string) {
+  return signPayload(process.env.SESSION_SECRET ?? '', { w: workspaceId, e: email.toLowerCase(), l: leadId ?? null, o: outboundId, t: Date.now() });
 }

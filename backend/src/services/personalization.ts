@@ -9,7 +9,7 @@ import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { wrapUntrusted, neutralizeTags } from '../../../integrations/src/ai/guard.js';
 import { instructionText, knowledgeText, KnowledgeSchema, type ResolvedConfig } from '../../../shared/src/ai-studio.js';
-import { runQualityChecks, type QualityReport, type FactCheckSentence } from '../../../shared/src/quality.js';
+import { runQualityChecks, similarity, type QualityReport, type FactCheckSentence } from '../../../shared/src/quality.js';
 import type { Personalization } from '../../../shared/src/ai-schemas.js';
 import { checkRuleTriggerTerms, renderOutreachRules, renderRelevantExamples, retrieveRelevantExamples, type OutreachExampleLike } from '../../../shared/src/outreach-brain.js';
 import { filterEligibleServices } from '../../../shared/src/service-eligibility.js';
@@ -313,23 +313,34 @@ async function engagementState(campaignId: string, leadId: string) {
 
 // ------------------------------------------------------------------ eligibility
 
-async function stopReason(workspaceId: string, campaign: { id: string; requireVerifiedEmail: boolean }, lead: LeadWithCompany): Promise<string | null> {
+async function stopReason(workspaceId: string, campaign: { id: string; requireVerifiedEmail: boolean; icpId?: string | null }, lead: LeadWithCompany): Promise<string | null> {
   if (STOP_LEAD_STATUSES.includes(lead.status)) return `lead status is ${lead.status}`;
   const enrollment = await db().sequenceEnrollment.findUnique({ where: { campaignId_leadId: { campaignId: campaign.id, leadId: lead.id } } });
   if (enrollment && !['ACTIVE', 'PAUSED'].includes(enrollment.status)) return `sequence stopped (${enrollment.status}${enrollment.stopReason ? `: ${enrollment.stopReason}` : ''})`;
-  const ok = await canContact(workspaceId, lead, { requireVerified: campaign.requireVerifiedEmail });
+  const ok = await canContact(workspaceId, lead, { requireVerified: campaign.requireVerifiedEmail, icpId: campaign.icpId });
   if (!ok.allowed) return `not contactable: ${ok.reasons.join('; ')}`;
   return null;
 }
 
 // ------------------------------------------------------------------ generation
 
-export interface GenerateOptions { force?: boolean; batchId?: string | null; actor?: Actor; note?: string; preview?: boolean }
+const DRAFT_APPROACHES = [
+  { label: 'Recent development', instruction: 'Start with a verified recent development and connect its next step to the service.' },
+  { label: 'Educational idea', instruction: 'Lead with one useful educational idea based on the evidence and offer a practical outline.' },
+  { label: 'Discovery question', instruction: 'Lead with an open discovery question tied to a verified priority. Do not assert a pain point.' },
+] as const;
+
+function variantContextHash(ctx: BuiltContext) {
+  return configHash({ settings: ctx.hash, vars: ctx.vars });
+}
+
+export interface GenerateOptions { force?: boolean; batchId?: string | null; actor?: Actor; note?: string; preview?: boolean; approach?: (typeof DRAFT_APPROACHES)[number] }
 
 export async function generateForLead(workspaceId: string, campaignId: string, leadId: string, stepId: string, opts: GenerateOptions = {}) {
   const campaign = await loadCampaign(workspaceId, campaignId);
   const lead = await db().lead.findFirst({ where: { id: leadId, workspaceId }, include: { company: true } });
   if (!lead) throw NotFound('Lead');
+  if (!(await campaignAudience(workspaceId, campaignId, [leadId])).includes(leadId)) throw NotFound('Campaign prospect');
   const actor = opts.actor ?? WORKER_ACTOR;
 
   const existing = opts.preview ? null : await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId, leadId, stepId } } });
@@ -402,7 +413,11 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     await save({ status: 'GENERATING', error: null, batchId: opts.batchId ?? undefined });
     const maxLead = campaign.maxAiCostPerLeadUsd !== null ? Number(campaign.maxAiCostPerLeadUsd) : settings.aiMaxCostPerLeadUsd;
     const attribution = { campaignId, leadId, profileVersionId: ctx.snapshot.profile?.versionId ?? null };
-    const vars = opts.note ? { ...ctx.vars, profilePrompt: `${ctx.vars.profilePrompt}\n\nOne-off note for this regeneration: ${neutralizeTags(opts.note).slice(0, 1000)}` } : ctx.vars;
+    const vars = {
+      ...ctx.vars,
+      profilePrompt: opts.note ? `${ctx.vars.profilePrompt}\n\nOne-off note for this regeneration: ${neutralizeTags(opts.note).slice(0, 1000)}` : ctx.vars.profilePrompt,
+      instructions: opts.approach ? `${ctx.vars.instructions}\n\nDraft approach: ${opts.approach.instruction}` : ctx.vars.instructions,
+    };
     const executionIds: string[] = [];
     let out: Personalization;
     try {
@@ -494,7 +509,9 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     const explanation = { rewriteAttempted, decision: quality.passed ? 'PASS' : 'HOLD', factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, basis: out.personalizationBasis, opportunityAnalysis, factCheck: fcSentences, provenance, model: null as string | null, frozenConfig: ctx.frozen, missingPromptVariables: ctx.profilePrompt.missing };
 
     if (opts.preview) {
-      return { status: quality.passed ? 'GENERATED' : 'BLOCKED', preview: true, subject, subjectAlternatives: out.subjectAlternatives, openingLine, body, cta: out.cta, usedClaims: usedClaims.map((c) => ({ id: c.id, text: c.text, url: c.evidence.url, fetchedAt: c.evidence.fetchedAt })), opportunityAnalysis, quality, costUsd: cost, costIsEstimate: unpriced > 0, prompt: { profile: ctx.profilePrompt.text, instructions: ctx.vars.instructions }, explanation };
+      return { status: quality.passed ? 'GENERATED' : 'BLOCKED', preview: true, subject, subjectAlternatives: out.subjectAlternatives, openingLine, body, cta: out.cta, usedClaims: usedClaims.map((c) => ({ id: c.id, text: c.text, url: c.evidence.url, fetchedAt: c.evidence.fetchedAt })), opportunityAnalysis, quality, costUsd: cost, costIsEstimate: unpriced > 0, prompt: { profile: ctx.profilePrompt.text, instructions: ctx.vars.instructions }, explanation, variantContextHash: variantContextHash(ctx), executionIds,
+        selectionData: { configHash: ctx.hash, profileVersionId: ctx.snapshot.profile?.versionId ?? null, variantId: ctx.variant.id, reportIds: ctx.reportIds, ...provenance },
+      };
     }
 
     const prev = await db().leadPersonalization.findUniqueOrThrow({ where: { campaignId_leadId_stepId: { campaignId, leadId, stepId } } });
@@ -522,6 +539,88 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
   } finally {
     await release();
   }
+}
+
+type DraftAlternative = Extract<Awaited<ReturnType<typeof generateForLead>>, { selectionData: object }> & {
+  label: (typeof DRAFT_APPROACHES)[number]['label'];
+  selectable: boolean;
+  selectionId: string;
+};
+
+export async function generateDraftVariants(workspaceId: string, id: string, actor: Actor) {
+  const row = await db().leadPersonalization.findFirst({ where: { id, workspaceId } });
+  if (!row) throw NotFound('Personalization');
+  if (row.status === 'APPROVED') throw new AppError('CONFLICT', 'Approved drafts are preserved. Regenerate explicitly before requesting alternatives.', 409);
+  if (!(await campaignAudience(workspaceId, row.campaignId, [row.leadId])).includes(row.leadId)) throw NotFound('Campaign prospect');
+  const release = await acquireLock(`pz:${row.campaignId}:${row.leadId}:${row.stepId}`, 600_000);
+  if (!release) throw new AppError('CONFLICT', 'Draft generation is already running.', 409);
+  try {
+    const variants: DraftAlternative[] = [];
+    for (const approach of DRAFT_APPROACHES) {
+      const draft = await generateForLead(workspaceId, row.campaignId, row.leadId, row.stepId, { preview: true, actor, approach });
+      if (!('selectionData' in draft) || !draft.selectionData) throw new AppError('QUALITY_CHECK_FAILED', 'Research, identity, qualification and service eligibility are required to generate alternatives.', 409);
+      const duplicate: boolean = variants.some(other => similarity(other.body ?? '', draft.body ?? '') >= 0.72);
+      variants.push({ ...draft, label: approach.label, selectionId: sha256(JSON.stringify([approach.label, draft.variantContextHash, draft.subject, draft.openingLine, draft.body, draft.cta])), selectable: draft.status === 'GENERATED' && !duplicate });
+    }
+    if (new Set(variants.map(draft => draft.variantContextHash)).size !== 1) {
+      throw new AppError('CONFLICT', 'Draft context changed during generation. Retry with the current evidence.', 409);
+    }
+    const updated = await db().leadPersonalization.updateMany({
+      where: { workspaceId, id, revision: row.revision, status: row.status },
+      data: { draftVariants: variants as unknown as Prisma.InputJsonValue },
+    });
+    if (!updated.count) throw new AppError('CONFLICT', 'The draft changed while alternatives were generated.', 409);
+    await audit(workspaceId, actor, 'personalization.variants_generated', { type: 'personalization', id }, { count: variants.length });
+    return { variants };
+  } finally {
+    await release();
+  }
+}
+
+export async function selectDraftVariant(workspaceId: string, id: string, selectionId: string, expectedRevision: number, actor: Actor) {
+  const row = await db().leadPersonalization.findFirst({ where: { id, workspaceId }, include: { lead: { include: { company: true } } } });
+  if (!row) throw NotFound('Personalization');
+  if (row.status === 'APPROVED' || row.revision !== expectedRevision) throw new AppError('CONFLICT', 'The draft was approved or changed. Refresh before selecting an alternative.', 409);
+  const variants = row.draftVariants as unknown as DraftAlternative[] | null;
+  const selected = variants?.find(variant => variant.selectionId === selectionId);
+  if (!selected) throw new AppError('CONFLICT', 'This alternative changed. Refresh and review the current drafts.', 409);
+  if (!selected.selectable || !selected.body || !selected.quality?.passed || !selected.selectionData) {
+    throw new AppError('QUALITY_CHECK_FAILED', 'This alternative did not pass review checks.', 400);
+  }
+  const campaign = await loadCampaign(workspaceId, row.campaignId);
+  if (!(await campaignAudience(workspaceId, row.campaignId, [row.leadId])).includes(row.leadId)) throw NotFound('Campaign prospect');
+  const hold = await stopReason(workspaceId, campaign, row.lead);
+  if (hold) throw new AppError('QUALITY_CHECK_FAILED', hold, 409);
+  const context = await buildContext(workspaceId, campaign, row.lead, row.stepId);
+  if (variantContextHash(context) !== selected.variantContextHash) throw new AppError('CONFLICT', 'Evidence or campaign configuration changed. Regenerate alternatives.', 409);
+  const picked = selected.selectionData;
+  const content = { subject: selected.subject ?? null, openingLine: selected.openingLine ?? null, body: selected.body, cta: selected.cta ?? null };
+  const usedClaimIds = selected.usedClaims?.map(claim => claim.id) ?? [];
+  const quality = selected.quality as unknown as Prisma.InputJsonValue;
+  const revision = row.revision + 1;
+  await db().$transaction(async tx => {
+    const changed = await tx.leadPersonalization.updateMany({
+      where: { workspaceId, id, revision: row.revision, status: row.status },
+      data: {
+        ...content, revision, quality, usedClaimIds, qualityPassed: true, status: 'GENERATED', error: null,
+        score: selected.quality.score, scoreExplanation: { ...selected.explanation, selectedApproach: selected.label } as unknown as Prisma.InputJsonValue,
+        variantId: picked.variantId, profileVersionId: picked.profileVersionId, configHash: picked.configHash,
+        researchReportIds: picked.reportIds, retrievedKnowledgeIds: picked.retrievedKnowledgeIds,
+        retrievedExampleIds: picked.retrievedExampleIds, selectedServiceVersionIds: picked.selectedServiceVersionIds,
+        subjectAlternatives: selected.subjectAlternatives ?? [],
+        approvedAt: null, approvedById: null, approvedContentHash: null,
+        manuallyEdited: false, editedAt: null, editedById: null, generatedAt: new Date(),
+      },
+    });
+    if (!changed.count) throw new AppError('CONFLICT', 'The draft changed while selecting the alternative.', 409);
+    await tx.personalizationRevision.create({ data: {
+      workspaceId, personalizationId: id, revision, source: 'AI', ...content, quality, score: selected.quality?.score,
+      usedClaimIds, retrievedKnowledgeIds: picked.retrievedKnowledgeIds, retrievedExampleIds: picked.retrievedExampleIds,
+      selectedServiceVersionIds: picked.selectedServiceVersionIds, executionIds: selected.executionIds ?? [], createdById: actor.userId ?? null,
+    } });
+  });
+  await audit(workspaceId, actor, 'personalization.variant_selected', { type: 'personalization', id }, { revision, approach: selected.label });
+  return { revision, status: 'GENERATED' };
 }
 
 // ------------------------------------------------------------------ review actions
@@ -635,6 +734,9 @@ export async function approvePersonalizations(workspaceId: string, ids: string[]
     if (r.status === 'APPROVED') { approved.push(r.id); continue; }
     if (!['GENERATED', 'BLOCKED'].includes(r.status) || !r.body) { refused.push({ id: r.id, reason: `status ${r.status}` }); continue; }
     if (!r.qualityPassed) { refused.push({ id: r.id, reason: 'failing quality checks — edit or regenerate first' }); continue; }
+    if (Array.isArray(r.draftVariants) && !(r.scoreExplanation as { selectedApproach?: string } | null)?.selectedApproach) {
+      refused.push({ id: r.id, reason: 'select an evaluated alternative before approving' }); continue;
+    }
     if ((r.quality as { policyVersion?: number } | null)?.policyVersion !== 2) {
       refused.push({ id: r.id, reason: 'quality policy changed — regenerate or revalidate this email before approval' }); continue;
     }

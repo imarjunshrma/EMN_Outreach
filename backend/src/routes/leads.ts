@@ -56,6 +56,7 @@ route({ method: 'get', path: '/w/:workspaceId/imports', tag: 'Imports', summary:
 route({ method: 'post', path: '/w/:workspaceId/imports', tag: 'Imports', summary: 'Upload a CSV (multipart field "file"); returns headers, sample rows and suggested mapping', auth: 'workspace', role: 'MEMBER', rateLimit: { limit: 30, windowSec: 3600, key: 'workspace' },
   handler: async (c) => leads.uploadImport(c.workspaceId, await readFile(c.req, c.res), c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/imports/:id/start', tag: 'Imports', summary: 'Start an uploaded import with a column mapping', auth: 'workspace', role: 'MEMBER', status: 202, body: leads.StartImportSchema, handler: (c) => leads.startImport(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/imports/:id/retry', tag: 'Imports', summary: 'Retry a failed import or retryable rows without overwriting existing leads', auth: 'workspace', role: 'MEMBER', status: 202, handler: (c) => leads.retryImport(c.workspaceId, c.params.id, c.actor) });
 route({ method: 'get', path: '/w/:workspaceId/imports/:id', tag: 'Imports', summary: 'Import progress and row errors', auth: 'workspace', role: 'VIEWER', handler: (c) => leads.getImport(c.workspaceId, c.params.id) });
 
 // ---------------------------------------------------------------- suppression

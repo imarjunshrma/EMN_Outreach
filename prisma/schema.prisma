@@ -285,6 +285,7 @@ enum OutboundStatus {
   FAILED
   CANCELLED
   SKIPPED
+  UNCERTAIN
 }
 
 enum ApprovalStatus {
@@ -691,6 +692,8 @@ model EmailAccount {
   replyTo                String?
   providerAccountId      String?
   status                 EmailAccountStatus @default(CONNECTED)
+  operatorPaused         Boolean            @default(false)
+  autoPauseUntil         DateTime?          @db.Timestamptz(3)
   statusReason           String?
   dailySendLimit         Int                @default(25)
   minSecondsBetweenSends Int                @default(180)
@@ -935,6 +938,12 @@ model LeadSource {
   @@unique([workspaceId, name])
 }
 
+enum QualificationReview {
+  QUALIFIED
+  NEEDS_REVIEW
+  DISQUALIFIED
+}
+
 model Lead {
   id                      String                  @id @default(uuid()) @db.Uuid
   workspaceId             String                  @db.Uuid
@@ -960,6 +969,9 @@ model Lead {
   externalId              String?
   customFields            Json                    @default("{}")
   tags                    String[]
+  qualificationReview        QualificationReview?
+  qualificationReviewScoreId String? @db.Uuid
+  qualificationReviewReason  String?
   currentScore            Int?
   lastContactedAt         DateTime?               @db.Timestamptz(3)
   lastRepliedAt           DateTime?               @db.Timestamptz(3)
@@ -991,6 +1003,7 @@ model Lead {
   @@index([workspaceId, companyId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, currentScore])
+  @@index([workspaceId, qualificationReview])
 }
 
 model LeadStatusChange {
@@ -1667,6 +1680,11 @@ model OutboundEmail {
   scheduledFor      DateTime        @db.Timestamptz(3)
   attempts          Int             @default(0)
   sendStartedAt     DateTime?       @db.Timestamptz(3)
+  uncertainAt       DateTime?       @db.Timestamptz(3)
+  resolvedAt        DateTime?       @db.Timestamptz(3)
+  reconciliation    Json?
+  pixelRequestCount Int             @default(0)
+  automatedPixelRequestCount Int    @default(0)
   lastError         String?
   sentAt            DateTime?       @db.Timestamptz(3)
   providerMessageId String?
@@ -1688,6 +1706,7 @@ model OutboundEmail {
   @@unique([enrollmentId, stepId])
   @@index([status, scheduledFor])
   @@index([workspaceId, campaignId, status])
+  @@index([workspaceId, status, resolvedAt, uncertainAt], map: "OutboundEmail_reconciliation_queue_idx")
   @@index([emailAccountId, sentAt])
 }
 
@@ -1698,11 +1717,13 @@ model TrackedLink {
   url             String
   token           String   @unique
   clickCount      Int      @default(0)
+  automatedClickCount Int  @default(0)
   createdAt       DateTime @default(now()) @db.Timestamptz(3)
 
   workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   outboundEmail OutboundEmail @relation(fields: [outboundEmailId], references: [id], onDelete: Cascade)
 
+  @@index([outboundEmailId])
   @@index([workspaceId])
 }
 
@@ -1761,6 +1782,7 @@ model EmailMessage {
   snippet            String?
   bodyText           String?
   bodyHtmlSanitized  String?
+  ingestPending      Boolean          @default(false)
   isAutoReply        Boolean          @default(false)
   isBounce           Boolean          @default(false)
   category           ReplyCategory?
@@ -1825,6 +1847,7 @@ model EmailEvent {
   @@index([workspaceId, type, occurredAt])
   @@index([campaignId, type])
   @@index([emailAccountId, type, occurredAt])
+  @@index([outboundEmailId])
   @@index([leadId])
 }
 
@@ -2185,6 +2208,7 @@ model LeadPersonalization {
   openingLine               String?
   body                      String?
   cta                       String?
+  draftVariants              Json?
   subjectAlternatives       String[]
   usedClaimIds              String[]
   researchReportIds         String[]

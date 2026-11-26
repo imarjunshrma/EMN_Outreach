@@ -142,9 +142,8 @@ export async function captureCampaignTaskExecution(workspaceId: string, tasks: A
   }
   const captured: Record<string, FrozenTaskExecution> = {};
   for (const task of [...new Set(tasks)]) {
-    const [prompt, route, resolved, providers] = await Promise.all([
+    const [prompt, resolved, providers] = await Promise.all([
       ensurePrompt(workspaceId, task),
-      db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } }),
       resolveCandidates(workspaceId, task),
       db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, select: { provider: true, baseUrl: true } }),
     ]);

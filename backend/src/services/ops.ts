@@ -226,18 +226,57 @@ export async function runRetention(now = new Date()) {
 
 export const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
-export async function recordOpen(outboundId: string) {
-  if (!/^[0-9a-f-]{36}$/i.test(outboundId)) return;
-  const o = await db().outboundEmail.findUnique({ where: { id: outboundId }, include: { campaign: true } });
-  if (!o || !o.campaign.trackOpens) return;
-  await db().emailEvent.upsert({ where: { dedupeKey: `OPENED:${o.id}` }, update: {}, create: { workspaceId: o.workspaceId, type: 'OPENED', campaignId: o.campaignId, enrollmentId: o.enrollmentId, outboundEmailId: o.id, emailAccountId: o.emailAccountId, dedupeKey: `OPENED:${o.id}`, metadata: { estimate: true } } });
+export function isAutomatedTrackingRequest(headers: Record<string, string | string[] | undefined>) {
+  const purpose = [headers['sec-purpose'], headers['purpose'], headers['x-purpose']].join(' ');
+  const agent = String(headers['user-agent'] ?? '');
+  return /\b(prefetch|prerender|preview)\b/i.test(purpose)
+    || /bot\b|crawler|spider|scanner|proofpoint|mimecast|barracuda|safelinks|googleimageproxy/i.test(agent);
 }
 
-export async function recordClick(token: string): Promise<string | null> {
-  const l = await db().trackedLink.findUnique({ where: { token }, include: { outboundEmail: true } });
-  if (!l) return null;
-  await db().trackedLink.update({ where: { id: l.id }, data: { clickCount: { increment: 1 } } });
-  await db().emailEvent.upsert({ where: { dedupeKey: `CLICKED:${l.outboundEmailId}:${l.id}` }, update: {}, create: { workspaceId: l.workspaceId, type: 'CLICKED', campaignId: l.outboundEmail.campaignId, enrollmentId: l.outboundEmail.enrollmentId, outboundEmailId: l.outboundEmailId, dedupeKey: `CLICKED:${l.outboundEmailId}:${l.id}`, metadata: { url: l.url } } });
+export async function recordOpen(outboundId: string, automated = false) {
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(outboundId)) return;
+  const o = await db().outboundEmail.findUnique({ where: { id: outboundId }, include: { campaign: true, enrollment: { select: { leadId: true } }, workspace: { select: { settings: true } } } });
+  if (!o || o.status !== 'SENT' || !o.campaign.trackOpens || !readSettings(o.workspace.settings).trackingEnabled) return;
+  const attribution = { leadId: o.enrollment.leadId, emailAccountId: o.emailAccountId };
+  await db().$transaction(async tx => {
+    await tx.outboundEmail.update({ where: { id: o.id }, data: {
+      pixelRequestCount: { increment: 1 },
+      automatedPixelRequestCount: { increment: automated ? 1 : 0 },
+    } });
+    if (automated) return;
+    await tx.emailEvent.upsert({ where: { dedupeKey: `OPENED:${o.id}` }, update: attribution, create: {
+      workspaceId: o.workspaceId, type: 'OPENED', campaignId: o.campaignId, enrollmentId: o.enrollmentId,
+      outboundEmailId: o.id, ...attribution, dedupeKey: `OPENED:${o.id}`, metadata: { estimate: true },
+    } });
+  });
+}
+
+export function isTrackingDestination(value: string) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+export async function recordClick(token: string, automated = false): Promise<string | null> {
+  const l = await db().trackedLink.findUnique({
+    where: { token },
+    include: { outboundEmail: { include: { campaign: { select: { trackClicks: true } }, enrollment: { select: { leadId: true } }, workspace: { select: { settings: true } } } } },
+  });
+  if (!l || !isTrackingDestination(l.url)) return null;
+  const o = l.outboundEmail;
+  if (o.status !== 'SENT' || !o.campaign.trackClicks || !readSettings(o.workspace.settings).trackingEnabled) return l.url;
+  const attribution = { leadId: o.enrollment.leadId, emailAccountId: o.emailAccountId };
+  await db().$transaction(async tx => {
+    await tx.trackedLink.update({ where: { id: l.id }, data: { clickCount: { increment: 1 }, automatedClickCount: { increment: automated ? 1 : 0 } } });
+    if (automated) return;
+    await tx.emailEvent.upsert({ where: { dedupeKey: `CLICKED:${o.id}:${l.id}` }, update: attribution, create: {
+      workspaceId: o.workspaceId, type: 'CLICKED', campaignId: o.campaignId, enrollmentId: o.enrollmentId,
+      outboundEmailId: o.id, ...attribution, dedupeKey: `CLICKED:${o.id}:${l.id}`, metadata: { url: l.url, estimate: true },
+    } });
+  });
   return l.url;
 }
 

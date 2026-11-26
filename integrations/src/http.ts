@@ -1,6 +1,8 @@
 // Small fetch wrapper used by every external adapter: timeouts, retries on transient errors,
 // Retry-After support and a typed error that never contains credentials.
 
+export type SubmissionOutcome = 'DEFINITELY_NOT_SENT' | 'PROVIDER_REJECTED' | 'ACCEPTED' | 'UNKNOWN_OUTCOME';
+
 export class ProviderError extends Error {
   constructor(
     public readonly provider: string,
@@ -9,6 +11,7 @@ export class ProviderError extends Error {
     public readonly retryable = false,
     public readonly retryAfterMs?: number,
     public readonly code?: string,
+    public readonly submissionOutcome?: SubmissionOutcome,
   ) {
     super(`[${provider}] ${message}`);
     this.name = 'ProviderError';

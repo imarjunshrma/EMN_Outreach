@@ -1,3 +1,4 @@
+import { requireDatabaseExtensions } from '../../backend/src/core/database-preflight.js';
 import { Worker } from 'bullmq';
 import { config } from '../../backend/src/core/config.js';
 import { logger } from '../../backend/src/core/logger.js';
@@ -10,6 +11,7 @@ import { processorFor, HANDLERS } from './processors.js';
 process.env.EMN_SERVICE ??= 'emn-worker';
 const cfg = config();
 keyring();
+await requireDatabaseExtensions();
 
 const CONCURRENCY: Partial<Record<QueueName, number>> = {
   [QUEUES.send]: cfg.WORKER_CONCURRENCY_SEND,

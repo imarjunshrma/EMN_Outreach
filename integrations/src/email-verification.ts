@@ -81,6 +81,17 @@ export async function inspectEmail(input: string, resolver: Pick<Resolver, 'reso
     try { return await Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('DNS query timed out'), { code: 'ETIMEOUT' })), timeoutMs); })]); }
     finally { if (timer) clearTimeout(timer); }
   };
+  const checkImplicitMx = async () => {
+    const addresses = await Promise.allSettled([timed(resolver.resolve4(parsed.domain)), timed(resolver.resolve6(parsed.domain))]);
+    if (addresses.some(result => result.status === 'fulfilled' && result.value.length)) {
+      base.dns.status = 'A_FALLBACK';
+    } else if (addresses.some(result => result.status === 'rejected' && !['ENODATA', 'ENOTFOUND'].includes((result.reason as NodeJS.ErrnoException)?.code ?? ''))) {
+      base.dns.status = 'DNS_ERROR';
+      base.dns.error = 'Could not confirm whether the domain has an implicit mail route';
+    } else {
+      base.dns.status = 'NO_MAIL_ROUTE';
+    }
+  };
   try {
     const mx = await timed(resolver.resolveMx(parsed.domain));
     if (mx.some((r) => r.exchange === '.')) { base.dns.status = 'NULL_MX'; base.primaryStatus = 'INVALID'; return base; }
@@ -91,16 +102,11 @@ export async function inspectEmail(input: string, resolver: Pick<Resolver, 'reso
       return { exchange, priority: r.priority, addresses: addresses.flatMap((x) => x.status === 'fulfilled' ? x.value : []) };
     }));
     base.dns.status = ordered.length ? 'MX' : 'NO_MAIL_ROUTE';
-    if (!ordered.length) {
-      const [a, aaaa] = await Promise.allSettled([timed(resolver.resolve4(parsed.domain)), timed(resolver.resolve6(parsed.domain))]);
-      if ((a.status === 'fulfilled' && a.value.length) || (aaaa.status === 'fulfilled' && aaaa.value.length)) base.dns.status = 'A_FALLBACK';
-    }
+    if (!ordered.length) await checkImplicitMx();
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENODATA') {
-      const [a, aaaa] = await Promise.allSettled([timed(resolver.resolve4(parsed.domain)), timed(resolver.resolve6(parsed.domain))]);
-      if ((a.status === 'fulfilled' && a.value.length) || (aaaa.status === 'fulfilled' && aaaa.value.length)) base.dns.status = 'A_FALLBACK';
-      else base.dns.status = 'NO_MAIL_ROUTE';
+      await checkImplicitMx();
     } else if (code === 'ENOTFOUND') {
       base.dns.status = 'NXDOMAIN';
       base.dns.error = 'Domain does not resolve';

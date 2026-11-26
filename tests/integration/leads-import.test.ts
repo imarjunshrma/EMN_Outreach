@@ -39,6 +39,26 @@ describe('CSV import / export', () => {
     expect(await db().company.count({ where: { workspaceId: s.workspaceId, domain: 'acme.io' } })).toBe(1);
   });
 
+  it('retries recoverable rows and preserves successful imports and invalid-row diagnostics', async () => {
+    const s = await createUserSession('import-retry@example.test');
+    const auth = { 'x-csrf-token': s.csrf };
+    const csv = 'Email,First name\nprior@example.test,Original\nretry@example.test,Retry\ninvalid,Invalid';
+    const upload = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports`).set(auth).attach('file', Buffer.from(csv), 'retry.csv');
+    const id = upload.body.importId as string;
+    await s.agent.post(`/api/v1/w/${s.workspaceId}/imports/${id}/start`).set(auth).send({ mapping: upload.body.suggestedMapping });
+    await addLead(s.workspaceId, 'prior@example.test', { firstName: 'Manually corrected' });
+    await db().importJob.update({ where: { id }, data: {
+      status: 'COMPLETED', finishedAt: new Date(), totalRows: 3, importedRows: 1, errorRows: 2,
+      errors: [{ row: 3, error: 'Temporary write failure', retryable: true }, { row: 4, error: 'invalid email' }],
+    } });
+    const retry = await s.agent.post(`/api/v1/w/${s.workspaceId}/imports/${id}/retry`).set(auth).send({});
+    expect(retry.status).toBe(202);
+    expect(await processImport(s.workspaceId, id)).toEqual({ imported: 2, updated: 0, skipped: 0, errors: 1 });
+    expect(await db().importJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'COMPLETED', errors: [{ row: 4, error: 'invalid email' }] });
+    expect((await db().lead.findFirstOrThrow({ where: { workspaceId: s.workspaceId, emailNormalized: 'prior@example.test' } })).firstName).toBe('Manually corrected');
+    expect(await db().lead.count({ where: { workspaceId: s.workspaceId, emailNormalized: 'retry@example.test' } })).toBe(1);
+  });
+
   it('imports research-only records and blocks outreach until an email is supplied', async () => {
     const s = await createUserSession('research-import@example.test');
     const csv = 'Full Name,Company Website,Country\nTaylor Fixture,https://company.example,US\nTaylor Fixture,https://company.example,US\nMissing Source,,US';

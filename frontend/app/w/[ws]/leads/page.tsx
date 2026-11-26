@@ -10,21 +10,24 @@ import { Badge, Button, Empty, Field, Input, Modal, PageHeader, Pagination, Quer
 
 import { LEAD_STATUSES, LAWFUL_BASES as BASES } from '@/lib/constants';
 
-interface Lead { id: string; email: string; firstName: string | null; lastName: string | null; title: string | null; status: string; emailVerificationStatus: string; currentScore: number | null; country: string | null; createdAt: string; company: { id: string; name: string } | null; source: { name: string } | null; tags: string[] }
+interface Lead { id: string; email: string; firstName: string | null; lastName: string | null; title: string | null; status: string; emailVerificationStatus: string; verifications?: Array<{ rawResult: string | null; provider: string; createdAt: string }>;  currentScore: number | null; qualificationReview?: string | null; qualificationReviewReason?: string | null; country: string | null; createdAt: string; company: { id: string; name: string } | null; source: { name: string } | null; tags: string[] }
 
 export default function LeadsPage() {
   const ws = useWs();
-  const [f, setF] = useState({ q: '', status: '', listId: '', verification: '', minScore: '', country: '', sort: 'createdAt', page: 1 });
+  const [f, setF] = useState({ q: '', status: '', listId: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', page: 1 });
   const [selected, setSelected] = useState<string[]>([]);
   const [showNew, setShowNew] = useState(false);
-  const [bulk, setBulk] = useState({ action: 'add_to_list', listId: '', tag: '', status: 'QUALIFIED', lawfulBasis: 'LEGITIMATE_INTEREST', icpId: '' });
+  const [bulk, setBulk] = useState({ action: 'add_to_list', listId: '', tag: '', status: 'QUALIFIED', lawfulBasis: 'LEGITIMATE_INTEREST', icpId: '', review: 'NEEDS_REVIEW', reviewReason: '' });
   const query = qs({ ...f, pageSize: 50 });
   const q = useWsQuery<Paged<Lead>>(`/leads${query}`);
   const lists = useWsQuery<Array<{ id: string; name: string; memberCount: number }>>('/lists');
   const icps = useWsQuery<Array<{ id: string; name: string }>>('/icps');
-  const run = useWsMutation<void, { affected?: number; queued?: number }>(() => ({ path: '/leads/bulk', body: { ids: selected, ...bulk, listId: bulk.listId || undefined, icpId: bulk.icpId || undefined } }), {
+  const run = useWsMutation<void, { affected?: number; queued?: number }>(() => ({ path: '/leads/bulk', body: { ids: selected, ...bulk, reviewReason: bulk.action === 'review_qualification' ? bulk.reviewReason : undefined, listId: bulk.listId || undefined, icpId: bulk.icpId || undefined } }), {
     success: (r) => (r.queued !== undefined ? `${r.queued} queued` : `${r.affected ?? 0} updated`), onSuccess: () => setSelected([]),
   });
+  const verify = useWsMutation<boolean, { queued: number }>((force) => ({
+    path: '/enrichment/verify-bulk', body: { leadIds: selected, force },
+  }), { success: r => `${r.queued} verification request(s)`, onSuccess: () => setSelected([]) });
   const set = (k: keyof typeof f, v: string | number) => setF({ ...f, [k]: v, page: k === 'page' ? Number(v) : 1 });
 
   return (
@@ -36,20 +39,41 @@ export default function LeadsPage() {
         <Select value={f.status} onChange={(e) => set('status', e.target.value)} options={[{ value: '', label: 'Any status' }, ...LEAD_STATUSES.map((s) => ({ value: s, label: s.replace(/_/g, ' ').toLowerCase() }))]} />
         <Select value={f.listId} onChange={(e) => set('listId', e.target.value)} options={[{ value: '', label: 'Any list' }, ...(lists.data ?? []).map((l) => ({ value: l.id, label: `${l.name} (${l.memberCount})` }))]} />
         <Select value={f.verification} onChange={(e) => set('verification', e.target.value)} options={[{ value: '', label: 'Any verification' }, ...['UNVERIFIED', 'VALID', 'INVALID', 'RISKY', 'CATCH_ALL', 'UNKNOWN'].map((s) => ({ value: s, label: s.toLowerCase() }))]} />
+        <Select aria-label="Qualification review" value={f.qualificationReview} onChange={(e) => set('qualificationReview', e.target.value)} options={[
+          { value: '', label: 'Any qualification review' }, { value: 'QUALIFIED', label: 'Approved qualification' },
+          { value: 'NEEDS_REVIEW', label: 'Needs review' }, { value: 'DISQUALIFIED', label: 'Excluded from outreach' },
+        ]} />
+        <Select aria-label="Research status" value={f.research} onChange={(e) => set('research', e.target.value)} options={[
+          { value: '', label: 'Any research status' }, { value: 'NOT_RESEARCHED', label: 'No completed research' }, { value: 'FAILED', label: 'Research failed' },
+        ]} />
         <Input placeholder="Min score" type="number" value={f.minScore} onChange={(e) => set('minScore', e.target.value)} />
         <Select value={f.sort} onChange={(e) => set('sort', e.target.value)} options={[{ value: 'createdAt', label: 'Newest' }, { value: 'score', label: 'Highest score' }, { value: 'lastRepliedAt', label: 'Last reply' }, { value: 'email', label: 'Email A–Z' }]} />
-        <div className="md:col-span-7"><SavedFilters entity="leads" current={f} onApply={(q) => setF({ q: '', status: '', listId: '', verification: '', minScore: '', country: '', sort: 'createdAt', ...q, page: 1 })} /></div>
+        <div className="md:col-span-7"><SavedFilters entity="leads" current={f} onApply={(q) => setF({ q: '', status: '', listId: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', ...q, page: 1 })} /></div>
       </div>
       {selected.length > 0 && (
         <div className="card mb-4 flex flex-wrap items-end gap-3 p-3">
           <span className="text-sm font-medium">{selected.length} selected</span>
-          <Select value={bulk.action} onChange={(e) => setBulk({ ...bulk, action: e.target.value })} className="w-48" options={[{ value: 'add_to_list', label: 'Add to list' }, { value: 'remove_from_list', label: 'Remove from list' }, { value: 'research', label: 'Research (AI)' }, { value: 'score', label: 'Score vs ICP (AI)' }, { value: 'verify', label: 'Verify emails' }, { value: 'add_tag', label: 'Add tag' }, { value: 'set_status', label: 'Set status' }, { value: 'set_lawful_basis', label: 'Set lawful basis' }, { value: 'delete', label: 'Delete' }]} />
+          <Select value={bulk.action} onChange={(e) => setBulk({ ...bulk, action: e.target.value })} className="w-48" options={[{ value: 'add_to_list', label: 'Add to list' }, { value: 'remove_from_list', label: 'Remove from list' }, { value: 'research', label: 'Research (AI)' }, { value: 'retry_research', label: 'Retry missing research sources' }, { value: 'score', label: 'Score vs ICP (AI)' }, { value: 'verify', label: 'Verify emails' }, { value: 'retry_verify', label: 'Retry verification' }, { value: 'review_qualification', label: 'Review qualification' }, { value: 'add_tag', label: 'Add tag' }, { value: 'set_status', label: 'Set status' }, { value: 'set_lawful_basis', label: 'Set lawful basis' }, { value: 'delete', label: 'Delete' }]} />
           {(bulk.action === 'add_to_list' || bulk.action === 'remove_from_list') && <Select className="w-48" value={bulk.listId} onChange={(e) => setBulk({ ...bulk, listId: e.target.value })} options={[{ value: '', label: 'Choose list…' }, ...(lists.data ?? []).map((l) => ({ value: l.id, label: l.name }))]} />}
           {bulk.action === 'add_tag' && <Input className="w-40" placeholder="tag" value={bulk.tag} onChange={(e) => setBulk({ ...bulk, tag: e.target.value })} />}
           {bulk.action === 'set_status' && <Select className="w-48" value={bulk.status} onChange={(e) => setBulk({ ...bulk, status: e.target.value })} options={LEAD_STATUSES} />}
           {bulk.action === 'set_lawful_basis' && <Select className="w-56" value={bulk.lawfulBasis} onChange={(e) => setBulk({ ...bulk, lawfulBasis: e.target.value })} options={BASES} />}
           {bulk.action === 'score' && <Select className="w-48" value={bulk.icpId} onChange={(e) => setBulk({ ...bulk, icpId: e.target.value })} options={[{ value: '', label: 'Default ICP' }, ...(icps.data ?? []).map((i) => ({ value: i.id, label: i.name }))]} />}
-          <Button variant={bulk.action === 'delete' ? 'danger' : 'primary'} loading={run.isPending} onClick={() => (bulk.action !== 'delete' || window.confirm(`Delete ${selected.length} leads?`)) && run.mutate()}>Apply</Button>
+          {bulk.action === 'review_qualification' && <>
+            <Select aria-label="Review decision" value={bulk.review} onChange={e => setBulk({ ...bulk, review: e.target.value })} options={[
+              { value: 'NEEDS_REVIEW', label: 'Hold for review' }, { value: 'QUALIFIED', label: 'Approve qualification' },
+              { value: 'DISQUALIFIED', label: 'Exclude from outreach' },
+            ]} />
+            <Input aria-label="Review reason" placeholder="Review reason" value={bulk.reviewReason} onChange={e => setBulk({ ...bulk, reviewReason: e.target.value })} />
+          </>}
+          <Button variant={bulk.action === 'delete' ? 'danger' : 'primary'} loading={run.isPending || verify.isPending}
+            disabled={bulk.action === 'review_qualification' && bulk.reviewReason.trim().length < 3}
+            onClick={() => {
+              if (bulk.action === 'verify' || bulk.action === 'retry_verify') { verify.mutate(bulk.action === 'retry_verify'); return; }
+              if ((bulk.action === 'delete' || bulk.action === 'review_qualification') && !window.confirm(`Apply this change to ${selected.length} leads?`)) return;
+              run.mutate();
+            }}>Apply</Button>
+          <a className="px-2 py-1 text-sm text-brand-700 underline" href={`/api/v1/w/${ws}/leads/export${qs({ selectedIds: selected.join(',') })}`}>Export selected CSV</a>
           <Button variant="ghost" onClick={() => setSelected([])}>Clear</Button>
         </div>
       )}
@@ -63,8 +87,10 @@ export default function LeadsPage() {
                   <td className="td"><Link className="font-medium text-brand-700 hover:underline" href={`/w/${ws}/leads/${l.id}`}>{fullName(l)}</Link><div className="text-xs text-slate-500">{l.email}</div>{l.title && <div className="text-xs text-slate-400">{l.title}</div>}</td>
                   <td className="td">{l.company ? <Link className="hover:underline" href={`/w/${ws}/companies/${l.company.id}`}>{l.company.name}</Link> : '—'}</td>
                   <td className="td"><Badge>{l.status}</Badge></td>
-                  <td className="td"><Badge>{l.emailVerificationStatus}</Badge></td>
-                  <td className="td">{l.currentScore ?? '—'}</td>
+                  <td className="td"><Badge>{l.emailVerificationStatus}</Badge>
+                    {l.verifications?.[0] && <div className="text-xs text-slate-500">{l.verifications[0].rawResult ?? l.verifications[0].provider} · {fmtDay(l.verifications[0].createdAt)}</div>}
+                  </td>
+                  <td className="td">{l.currentScore ?? '—'}{l.qualificationReview && <div title={l.qualificationReviewReason ?? undefined}><Badge>{l.qualificationReview.replaceAll('_', ' ')}</Badge></div>}</td>
                   <td className="td">{l.country ?? '—'}</td>
                   <td className="td text-xs">{l.source?.name ?? 'manual'}</td>
                   <td className="td text-xs">{fmtDay(l.createdAt)}</td>
