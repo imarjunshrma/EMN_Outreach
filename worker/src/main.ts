@@ -1,3 +1,4 @@
+import { assertWarmupTestSafety } from '../../backend/src/core/warmup-test-safety.js';
 import { requireDatabaseExtensions } from '../../backend/src/core/database-preflight.js';
 import { Worker } from 'bullmq';
 import { config } from '../../backend/src/core/config.js';
@@ -9,6 +10,7 @@ import { keyring } from '../../backend/src/core/crypto.js';
 import { processorFor, HANDLERS } from './processors.js';
 
 process.env.EMN_SERVICE ??= 'emn-worker';
+assertWarmupTestSafety();
 const cfg = config();
 keyring();
 await requireDatabaseExtensions();
@@ -30,10 +32,15 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
   [QUEUES.aiApi]: 4,
 };
 
+const warmupTest = process.env.OUTVEXA_EMAIL_MODE === 'mock';
 const workers: Worker[] = [];
 for (const name of Object.keys(HANDLERS) as QueueName[]) {
-  if (Object.keys(HANDLERS[name]).length === 0) continue;
-  const w = new Worker(name, processorFor(name), {
+  if (Object.keys(HANDLERS[name]).length === 0 || (warmupTest && name !== QUEUES.scheduler)) continue;
+  const processJob = processorFor(name);
+  const w = new Worker(name, job => {
+    if (warmupTest && job.name !== 'warmup.tick') throw new Error('Only warm-up tick jobs are allowed in the local test worker.');
+    return processJob(job);
+  }, {
     connection: newRedis(), concurrency: name === QUEUES.verify ? cfg.EMAIL_VERIFY_WORKER_CONCURRENCY : CONCURRENCY[name] ?? 2, prefix: process.env.QUEUE_PREFIX ?? 'emn',
     settings: { backoffStrategy: (attempt, type) => {
       if (type !== 'emnVerify') return -1;
@@ -53,6 +60,7 @@ for (const name of Object.keys(HANDLERS) as QueueName[]) {
 // Repeatable schedules (idempotent upserts)
 async function schedules() {
   await queue(QUEUES.scheduler).upsertJobScheduler('warmup-tick', { every: 60_000 }, { name: 'warmup.tick', data: {} });
+  if (warmupTest) return;
   await queue(QUEUES.scheduler).upsertJobScheduler('campaign-tick', { every: 60_000 }, { name: 'campaign.tick', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('mailbox-poll', { every: 120_000 }, { name: 'sync.pollAll', data: {} });
   await queue(QUEUES.sync).upsertJobScheduler('graph-renew', { every: 12 * 3600_000 }, { name: 'graph.renew', data: {} });
@@ -72,7 +80,7 @@ async function schedules() {
   await queue(QUEUES.maintenance).upsertJobScheduler('business-website-knowledge-weekly', { pattern: '19 4 * * 1' }, { name: 'knowledge.website.refresh', data: {} });
 }
 schedules()
-  .then(async () => { const r = await (await import('../../backend/src/services/ai-workflow-runs.js')).recoverAiRuns(); if (r.requeued) logger.info(r, 'AI workflow runs recovered after restart'); })
+  .then(async () => { if (warmupTest) return; const r = await (await import('../../backend/src/services/ai-workflow-runs.js')).recoverAiRuns(); if (r.requeued) logger.info(r, 'AI workflow runs recovered after restart'); })
   .then(() => logger.info({ queues: workers.length }, 'EMN worker started')).catch((e) => { logger.fatal({ err: e }, 'failed to register schedules'); process.exit(1); });
 
 let stopping = false;

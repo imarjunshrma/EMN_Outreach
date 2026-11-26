@@ -1,3 +1,4 @@
+import { WARMUP_DEV_WORKSPACE } from '../core/warmup-test-safety.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
@@ -206,8 +207,12 @@ export function evaluateProgress(config: WarmupConfig, target: number, elapsedDa
   return 'OBSERVE';
 }
 
+function warmupWorkspaceScope(): Prisma.WarmupProgramWhereInput {
+  return { workspace: { slug: process.env.OUTVEXA_WARMUP_TEST === 'dev' ? WARMUP_DEV_WORKSPACE : { not: WARMUP_DEV_WORKSPACE } } };
+}
+
 export async function processWarmup(id: string, now = new Date()) {
-  const p = await db().warmupProgram.findFirst({ where: { id, status: 'ACTIVE', nextAt: { lte: now } }, include: { emailAccount: true, workspace: true } });
+  const p = await db().warmupProgram.findFirst({ where: { ...warmupWorkspaceScope(), id, status: 'ACTIVE', nextAt: { lte: now } }, include: { emailAccount: true, workspace: true } });
   if (!p) return;
   if (await db().warmupMessage.count({ where: { programId: id, status: 'RESERVED' } })) return;
   const c = WarmupConfig.parse(p.config);
@@ -341,12 +346,12 @@ export async function processWarmup(id: string, now = new Date()) {
 }
 
 export async function tickWarmup(now = new Date()) {
-  const stale = await db().warmupMessage.findMany({ where: { status: 'RESERVED', reservedAt: { lt: new Date(+now - 15 * 60_000) } }, take: 100 });
+  const stale = await db().warmupMessage.findMany({ where: { program: warmupWorkspaceScope(), status: 'RESERVED', reservedAt: { lt: new Date(+now - 15 * 60_000) } }, take: 100 });
   for (const row of stale) {
     const result = await db().warmupMessage.updateMany({ where: { id: row.id, status: 'RESERVED' }, data: { status: 'UNCERTAIN', reason: 'Interrupted after reservation; confirm through the provider.' } });
     if (result.count) await transition(row.programId, row.workspaceId, 'HEALTH_HOLD', 'Interrupted submission requires reconciliation.');
   }
-  const due = await db().warmupProgram.findMany({ where: { status: 'ACTIVE', nextAt: { lte: now } }, orderBy: { nextAt: 'asc' }, select: { id: true }, take: 100 });
+  const due = await db().warmupProgram.findMany({ where: { ...warmupWorkspaceScope(), status: 'ACTIVE', nextAt: { lte: now } }, orderBy: { nextAt: 'asc' }, select: { id: true }, take: 100 });
   return Promise.allSettled(due.map(row => processWarmup(row.id, now)));
 }
 

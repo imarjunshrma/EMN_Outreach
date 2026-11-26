@@ -1,3 +1,4 @@
+import { assertWarmupTestSafety, mockWarmupEmail } from './warmup-test-safety.js';
 import { ZeroBounceProvider, NeverBounceProvider, HunterFinder, CloudflareDns, type EmailFinder, type DnsProviderAdapter } from '../../../integrations/src/providers/extra.js';
 import { AnthropicAdapter } from '../../../integrations/src/ai/anthropic.js';
 import { OpenAiAdapter } from '../../../integrations/src/ai/openai.js';
@@ -35,12 +36,16 @@ export interface Adapters {
 }
 
 function build(): Adapters {
-  const graph = new MicrosoftGraphProvider();
+  assertWarmupTestSafety();
+  const mock = process.env.OUTVEXA_EMAIL_MODE === 'mock';
+  const graph = mock ? null : new MicrosoftGraphProvider();
   const oauth: Adapters['oauth'] = {};
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) oauth.GMAIL = new GoogleOAuthClient(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
   if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) oauth.MICROSOFT = new MicrosoftOAuthClient(process.env.MICROSOFT_CLIENT_ID, process.env.MICROSOFT_CLIENT_SECRET, process.env.MICROSOFT_TENANT ?? 'common');
   return {
-    email: { GMAIL: new GmailProvider(), MICROSOFT: graph, SMTP_IMAP: new SmtpImapProvider() },
+    email: graph
+      ? { GMAIL: new GmailProvider(), MICROSOFT: graph, SMTP_IMAP: new SmtpImapProvider() }
+      : { GMAIL: mockWarmupEmail('GMAIL'), MICROSOFT: mockWarmupEmail('MICROSOFT'), SMTP_IMAP: mockWarmupEmail('SMTP_IMAP') },
     oauth,
     graphSubscriptions: graph,
     ai: Object.fromEntries(AI_PROVIDER_NAMES.map((name) => [name,

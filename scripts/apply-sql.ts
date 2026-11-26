@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 
-try { process.loadEnvFile('.env'); } catch { /* optional */ }
+try { process.loadEnvFile(process.env.EMN_ENV_FILE ?? '.env'); } catch { /* optional */ }
 const url = process.env.DATABASE_MIGRATION_URL || process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL is required');
 const dir = join(process.cwd(), 'prisma', 'sql');

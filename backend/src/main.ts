@@ -1,3 +1,4 @@
+import { assertWarmupTestSafety } from './core/warmup-test-safety.js';
 import { requireDatabaseExtensions } from './core/database-preflight.js';
 import { config } from './core/config.js';
 import { createApp } from './app.js';
@@ -8,6 +9,7 @@ import { closeQueues } from './core/queues.js';
 import { keyring } from './core/crypto.js';
 
 process.env.EMN_SERVICE ??= 'emn-api';
+assertWarmupTestSafety();
 const cfg = config(); // validates env and exits on misconfiguration
 keyring(); // validates encryption keys at boot
 await requireDatabaseExtensions();
