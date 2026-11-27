@@ -1,7 +1,8 @@
 import { inflateRawSync } from 'node:zlib';
 import { parse } from 'csv-parse/sync';
 import sanitizeHtml from 'sanitize-html';
-import XLSX from 'xlsx';
+import readXlsxFile, { readSheetNames } from 'read-excel-file/node';
+import { writeWorkbook, type TemplateSheet } from './knowledge-import-xlsx.js';
 import { AppError } from '../core/errors.js';
 import { IMPORT_ENTITIES, importFieldKind, type ImportEntityType } from '../../../shared/src/knowledge-import.js';
 
@@ -179,9 +180,8 @@ function exampleField(key: string, type: ImportEntityType) {
   return fieldExamples[key] ?? '';
 }
 
-export function templateWorkbook() {
-  const workbook = XLSX.utils.book_new();
-  const instructions: unknown[][] = [
+export async function templateWorkbook() {
+  const instructions: TemplateSheet['rows'] = [
     ['Outvexa Outreach Brain Template', 'v2'],
     ['Guidance', 'Enter records below the field headers. Leave unused sheets and optional fields empty. Examples are for reference.'],
     ['Relationships', 'Use stable externalId values to link records. Use a comma between multiple identifiers.'],
@@ -189,21 +189,20 @@ export function templateWorkbook() {
     [],
     ['Worksheet', 'Field', 'Required', 'Description and validation', 'Example'],
   ];
+  const sheets: TemplateSheet[] = [];
   for (const [type, item] of entries) {
     const headers = [...commonHeaders, ...item.fields.split(' '), ...relationshipHeaders];
-    const sheet = XLSX.utils.aoa_to_sheet([headers]);
-    sheet['!cols'] = headers.map(key => ({ wch: Math.max(key.length + 2, 18) }));
-    for (const [column, key] of headers.entries()) {
+    const notes = headers.map((key) => {
       const required = key === 'name' || (type === 'SERVICE' && key === 'description');
       const description = describeField(key);
       const example = exampleField(key, type);
-      sheet[XLSX.utils.encode_cell({ r: 0, c: column })].c = [{ a: 'Outvexa', t: `${required ? 'Required' : 'Optional'}. ${description} Example: ${example}` }];
       instructions.push([item.sheet, key, required ? 'Yes' : 'Optional', description, example]);
-    }
-    XLSX.utils.book_append_sheet(workbook, sheet, item.sheet);
+      return `${required ? 'Required' : 'Optional'}. ${description} Example: ${example}`;
+    });
+    sheets.push({ name: item.sheet, rows: [headers], widths: headers.map(key => Math.max(key.length + 2, 18)), headerNotes: notes });
   }
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(instructions), 'Instructions');
-  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  sheets.push({ name: 'Instructions', rows: instructions, widths: [24, 26, 10, 70, 40] });
+  return writeWorkbook(sheets);
 }
 
 const v1NameColumns: Record<ImportEntityType, string> = {
@@ -214,21 +213,27 @@ const v1NameColumns: Record<ImportEntityType, string> = {
   CAMPAIGN_PREFERENCE: 'campaign_type',
 };
 
-function workbookRows(buffer: Buffer): ParsedImportRow[] {
-  const workbook = XLSX.read(buffer, { type: 'buffer', cellFormula: false, cellHTML: false, cellNF: false, cellStyles: false });
-  const instructions = workbook.Sheets.Instructions;
-  const version = instructions?.A1?.v === 'Outvexa Outreach Brain Template' ? instructions.B1?.v : undefined;
+type Cell = string | number | boolean | Date | null;
+// read-excel-file pads every sheet from A1, so grid index + 1 is the physical worksheet row. Formulas are never
+// evaluated: a formula cell yields its stored value and text such as "=1+1" stays plain text.
+const cellValue = (cell: Cell) => cell instanceof Date ? cell.toISOString().slice(0, 10) : cell;
+
+async function workbookRows(buffer: Buffer): Promise<ParsedImportRow[]> {
+  const sheetNames = await readSheetNames(buffer);
+  if (sheetNames.length > 60) throw invalid('The workbook has too many worksheets');
+  const readSheet = async (sheet: string) => (await readXlsxFile(buffer, { sheet, trim: false }) as Cell[][]).map(row => row.map(cellValue));
+  const instructions = sheetNames.includes('Instructions') ? await readSheet('Instructions') : [];
+  const version = instructions[0]?.[0] === 'Outvexa Outreach Brain Template' ? instructions[0]?.[1] : undefined;
   if (version != null && version !== 'v1' && version !== 'v2') throw invalid('Unsupported workbook template version');
   const result: ParsedImportRow[] = [];
-  for (const sheet of workbook.SheetNames) {
+  for (const sheet of sheetNames) {
     if (sheet === 'Instructions') continue;
-    const source = workbook.Sheets[sheet];
-    if (!source['!ref']) continue;
-    const range = XLSX.utils.decode_range(source['!ref']);
-    if (range.e.r - range.s.r > MAX_ROWS || range.e.c - range.s.c >= 150) throw invalid('A worksheet exceeds the row or column limit');
-    const grid = XLSX.utils.sheet_to_json<unknown[]>(source, { header: 1, blankrows: true, raw: true, defval: null });
-    const headerIndex = grid.findIndex(row => row.some(cell => cell != null && String(cell).trim()));
-    if (headerIndex < 0) continue;
+    const grid = await readSheet(sheet);
+    if (!grid.length) continue;
+    const first = grid.findIndex(row => row.some(cell => cell != null && String(cell).trim()));
+    if (first < 0) continue;
+    if (grid.length - first > MAX_ROWS + 1 || grid.some(row => row.length > 150)) throw invalid('A worksheet exceeds the row or column limit');
+    const headerIndex = first;
     const headers = grid[headerIndex].map(cell => String(cell ?? '').trim());
     const lower = headers.filter(Boolean).map(header => header.toLowerCase());
     if (new Set(lower).size !== lower.length) throw invalid('Duplicate worksheet header');
@@ -242,7 +247,7 @@ function workbookRows(buffer: Buffer): ParsedImportRow[] {
       if (!cells.some(populated)) continue;
       if (cells.some((cell, column) => populated(cell) && !headers[column])) throw invalid('A populated worksheet column has no header');
       const value = Object.fromEntries(headers.flatMap((header, column) => populated(cells[column]) ? [[header, cells[column]]] : []));
-      const row = range.s.r + index + 1;
+      const row = index + 1;
       const warnings = unknownHeaders.length ? [`Additional columns require review: ${unknownHeaders.join(', ')}`] : [];
       if (!entry) warnings.push('This worksheet has no template mapping');
       else if (version) {
@@ -289,7 +294,7 @@ export async function parseImportFile(buffer: Buffer, name: string, mime?: strin
   let result: ParsedImportRow[];
   try {
     if (extension === 'xlsx' || extension === 'docx') validateImportUpload(buffer, name, mime, true);
-    if (extension === 'xlsx') result = workbookRows(buffer);
+    if (extension === 'xlsx') result = await workbookRows(buffer);
     else if (extension === 'pdf') result = await pdfRows(buffer);
     else if (extension === 'docx') {
       const mammoth = await import('mammoth');

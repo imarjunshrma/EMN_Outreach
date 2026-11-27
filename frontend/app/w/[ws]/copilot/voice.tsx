@@ -70,9 +70,12 @@ export function CopilotVoice({ workspace, threadId, selection, onReply, disabled
     if (audio.current) audio.current.srcObject = null;
   }
 
+  // Unmount must use the latest dispose (it records the end against the current workspace), not the first render's.
+  const disposeRef = useRef(dispose);
+  disposeRef.current = dispose;
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; dispose(); };
+    return () => { mounted.current = false; disposeRef.current(); };
   }, []);
   useEffect(() => { activeThread.current = threadId; }, [threadId]);
 

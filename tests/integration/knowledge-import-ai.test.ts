@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { redis } from '../../backend/src/core/redis.js';
 import { db } from '../../backend/src/core/db.js';
 import { createPromptVersion, updateRoute } from '../../backend/src/services/ai.js';
 import { captureImportExtraction, extractImportRows } from '../../backend/src/services/knowledge-import-extraction.js';
@@ -7,6 +8,10 @@ import { addAiProvider, createUserSession, installFakes } from '../helpers/harne
 import { randomUUID } from 'node:crypto';
 
 const task = 'KNOWLEDGE_IMPORT_EXTRACTION';
+
+// Start every test from an empty Redis DB, like the rest of the suite; otherwise the per-IP sign-in limiter
+// accumulates across runs and logins start failing with 429.
+beforeEach(async () => { await redis().flushdb(); });
 
 describe('Knowledge Importer provider routing', () => {
   it('pins the workspace prompt and model route, repairs malformed output and records usage without document content', async () => {

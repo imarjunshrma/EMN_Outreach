@@ -35,7 +35,7 @@ async function until<T>(poll: () => Promise<T | undefined>, label: string, timeo
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-const stageWorker = (stage = 'IMPORT_FILE_PARSE', phase?: string, pauseStage = stage, workspaceIds?: string | string[], concurrency = 1) => new Worker(QUEUES.imports, async job => {
+const stageWorker = (stage = 'IMPORT_FILE_PARSE', phase?: string, pauseStage = stage, workspaceIds?: string | string[], concurrency = 1) => new Worker(QUEUES.knowledgeImport, async job => {
   if (!stage.split(',').includes(job.name) || (workspaceIds && ![workspaceIds].flat().includes(job.data.workspaceId))) {
     await job.moveToDelayed(Date.now() + (workspaceIds ? 150 : 120_000), job.token);
     throw new DelayedError();
@@ -50,6 +50,15 @@ const stageWorker = (stage = 'IMPORT_FILE_PARSE', phase?: string, pauseStage = s
     await new Promise<void>(() => {});
   }
 }, { connection: { host: '127.0.0.1', port: Number(new URL(process.env.REDIS_URL!).port), maxRetriesPerRequest: null }, prefix: process.env.QUEUE_PREFIX, lockDuration: 1500, stalledInterval: 1000, concurrency });
+
+/** A worker whose Redis was restarted underneath it can wait forever in a graceful close; bound it as the real worker does (60 s, then exit). */
+async function closeWorker(worker: Worker) {
+  const graceful = worker.close();
+  if (await Promise.race([graceful.then(() => 'closed'), delay(5_000, 'timeout', { ref: false })]) !== 'timeout') return;
+  // A forced close can wait on the same stalled connection, so do not wait for it either.
+  await Promise.race([worker.close(true).catch(() => undefined), delay(2_000, undefined, { ref: false })]);
+  graceful.catch(() => undefined);
+}
 
 async function child() {
   await stageWorker(process.argv[3], process.argv[4], process.argv[5], process.argv[6]).waitUntilReady();
@@ -94,7 +103,7 @@ async function submitWhenWorkerDies(workspaceId: string, phase: 'before' | 'afte
       return row.processingStep === 'IMPORT_EXTRACTION' ? row : undefined;
     }, `${phase} crash recovery`);
     const originalJobId = `knowledge-import-${session.id}-0-IMPORT_FILE_PARSE`;
-    await until(async () => (await queue(QUEUES.imports).getJob(originalJobId))?.isCompleted().then(done => done ? true : undefined), 'stalled parse delivery completion');
+    await until(async () => (await queue(QUEUES.knowledgeImport).getJob(originalJobId))?.isCompleted().then(done => done ? true : undefined), 'stalled parse delivery completion');
     const persisted = await db().knowledgeImportFile.findMany({ where: { workspaceId, sessionId: session.id } });
     assert.equal(persisted.length, 1);
     assert.equal(persisted[0].status, 'PARSED');
@@ -131,7 +140,7 @@ async function assertApplicationRecovery(workspaceId: string) {
   try {
     await restarted.waitUntilReady();
     const jobId = `knowledge-import-${session.id}-1-${stage}`;
-    await until(async () => (await queue(QUEUES.imports).getJob(jobId))?.isCompleted().then(done => done ? true : undefined), 'stalled application completion');
+    await until(async () => (await queue(QUEUES.knowledgeImport).getJob(jobId))?.isCompleted().then(done => done ? true : undefined), 'stalled application completion');
     await until(async () => (await db().knowledgeImportSession.findUniqueOrThrow({ where: { id: session.id } })).status === 'APPLIED' ? true : undefined, 'final application state');
     const applied = await db().knowledgeImportItem.findUniqueOrThrow({ where: { id: item.id } });
     assert.equal(applied.status, 'APPLIED');
@@ -283,7 +292,7 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
     };
     if (!preApproval) {
       const preparer = stageWorker(allStages, undefined, undefined, workspace.id);
-      try { await waitStatus('REVIEW'); } finally { await preparer.close(); }
+      try { await waitStatus('REVIEW'); } finally { await closeWorker(preparer); }
       await approve();
     }
 
@@ -291,20 +300,20 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
       const prep = stageWorker(importStages.filter(stage => stage !== 'IMPORT_RETRIEVAL_SYNC').join(','), undefined, undefined, workspace.id);
       try {
         await until(async () => (await state()).processingStep === target ? true : undefined, 'retrieval checkpoint');
-      } finally { await prep.close(); }
+      } finally { await closeWorker(prep); }
       const active = stageWorker(allStages, undefined, undefined, workspace.id);
       active.on('error', () => undefined);
       try {
         const jobId = `knowledge-import-${session.id}-1-${target}`;
         await db().$transaction(async tx => {
           await tx.$queryRaw`SELECT "id" FROM "KnowledgeImportSession" WHERE "id" = ${session.id}::uuid FOR UPDATE`;
-          const pending = await queue(QUEUES.imports).getJob(jobId);
-          if (await pending?.isDelayed()) await pending.promote();
-          await until(async () => (await queue(QUEUES.imports).getJob(jobId))?.isActive().then(running => running ? true : undefined), 'running retrieval delivery');
+          const pending = await queue(QUEUES.knowledgeImport).getJob(jobId);
+          if (pending && await pending.isDelayed()) await pending.promote();
+          await until(async () => (await queue(QUEUES.knowledgeImport).getJob(jobId))?.isActive().then(running => running ? true : undefined), 'running retrieval delivery');
           await redisRestart();
         }, { timeout: 20_000 });
         await waitStatus('APPLIED');
-      } finally { await active.close(); }
+      } finally { await closeWorker(active); }
     } else if (phase === 'repair') {
       provider.failNextSchema();
       const gate = provider.pause('/v1/chat/completions');
@@ -319,7 +328,7 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
         gate.release();
       }
       const recovered = stageWorker(allStages, undefined, undefined, workspace.id);
-      try { await waitStatus('REVIEW'); } finally { await recovered.close(); }
+      try { await waitStatus('REVIEW'); } finally { await closeWorker(recovered); }
     } else if (phase === 'outage' || phase === 'persisted') {
       const gate = provider.pause(target === 'IMPORT_EXTRACTION' ? '/v1/chat/completions' : '/v1/embeddings');
       const working = stageWorker(allStages, undefined, undefined, workspace.id);
@@ -334,7 +343,7 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
         } : undefined);
         gate.release();
         await waitStatus(preApproval ? 'REVIEW' : 'APPLIED');
-      } finally { gate.release(); await working.close(); }
+      } finally { gate.release(); await closeWorker(working); }
     } else {
       const before = await state();
       const subprocess = spawn(process.execPath, ['--import', 'tsx', import.meta.filename, '--worker', allStages, phase === 'ack' ? 'after' : phase, target, workspace.id], {
@@ -353,15 +362,15 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
         await waitStatus(preApproval ? 'REVIEW' : 'APPLIED');
         if (phase !== 'ack') {
           const jobId = `knowledge-import-${session.id}-${before.run}-${target}`;
-          await until(async () => (await queue(QUEUES.imports).getJob(jobId))?.isCompleted().then(done => done ? true : undefined), 'stalled delivery acknowledged');
+          await until(async () => (await queue(QUEUES.knowledgeImport).getJob(jobId))?.isCompleted().then(done => done ? true : undefined), 'stalled delivery acknowledged');
         }
-      } finally { await recovered.close(); }
+      } finally { await closeWorker(recovered); }
     }
 
     assert.equal(await db().knowledgeImportItem.count({ where: scope }), 1);
     if (preApproval) assert.equal(await db().businessKnowledgeRecord.count({ where: { workspaceId: workspace.id } }), 0);
     const completing = stageWorker(allStages, undefined, undefined, workspace.id);
-    try { if (preApproval) await approve(); await waitStatus('APPLIED'); } finally { await completing.close(); }
+    try { if (preApproval) await approve(); await waitStatus('APPLIED'); } finally { await closeWorker(completing); }
     const applied = await db().knowledgeImportItem.findFirstOrThrow({ where: scope });
     assert.equal(await db().businessKnowledgeRevision.count({ where: { workspaceId: workspace.id } }), 1);
     assert.equal(await db().intelligenceEmbedding.count({ where: { workspaceId: workspace.id, entityId: applied.destinationDocumentId! } }), 1);
@@ -391,6 +400,7 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
     const workers: Worker[] = [];
     const stageMetrics: Record<string, { completed: number; maxQueueMs: number; elapsedMs: number }> = {};
     let failedDeliveries = 0;
+    const failureReasons: string[] = [];
     try {
       const pairs = await Promise.all(tenants.map(async ({ workspace, reviewer }) => Promise.all([1, 2].map(copy =>
         createImport(workspace.id, documents, reviewer, `full-pipeline-${copy}`)))));
@@ -405,7 +415,7 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
         metric.maxQueueMs = Math.max(metric.maxQueueMs, (job.processedOn ?? job.timestamp) - job.timestamp);
         metric.elapsedMs += (job.finishedOn ?? Date.now()) - (job.processedOn ?? Date.now());
       });
-      worker.on('failed', () => { failedDeliveries++; });
+      worker.on('failed', (job, error) => { failedDeliveries++; failureReasons.push(`${job?.name ?? 'unknown'}: ${error.message}`); });
       await until(async () => await db().knowledgeImportSession.count({ where: { id: { in: ids }, status: 'REVIEW' } }) === ids.length ? true : undefined, 'all load imports reviewed', 60_000);
       const reviewMs = Math.round(performance.now() - start);
       assert.equal(await db().knowledgeImportFile.count({ where: { sessionId: { in: ids }, status: 'REVIEW', error: null } }), 9);
@@ -424,11 +434,13 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
         fileBytes: Object.fromEntries(documents.map(file => [file.originalname, file.buffer.length])),
         fixtureRequests: provider.requestCount() - baseline, queuedMs, reviewMs, elapsedMs: Math.round(performance.now() - start),
         peakRssMiB: Math.round(rss / 1024 ** 2), cpuMicros: process.cpuUsage(cpu), databaseConnectionsAtEnd: connections[0]?.count,
-        stages: stageMetrics, failedDeliveries,
+        stages: stageMetrics, failedDeliveries, failureReasons,
       }));
+      // No faults are injected here, so any failed delivery (for example a transaction conflict between tenants) is a defect.
+      assert.equal(failedDeliveries, 0, failureReasons.join('; '));
     } finally {
       clearInterval(monitor);
-      await Promise.all(workers.map(worker => worker.close()));
+      await Promise.all(workers.map(worker => closeWorker(worker)));
     }
   }
 
@@ -539,8 +551,9 @@ async function harness() {
       }));
     } finally { clearInterval(monitor); }
   } finally {
-    await worker?.close();
-    await Promise.all([closeQueues(), closeRedis(), disconnectDb()]);
+    if (worker) await closeWorker(worker);
+    // Connections that lived through a Redis restart may never finish a graceful quit; bound teardown.
+    await Promise.race([Promise.all([closeQueues(), closeRedis(), disconnectDb()]), delay(10_000, undefined, { ref: false })]);
     await stop(redisProcess, 'SIGTERM');
     await rm(scratch, { recursive: true, force: true });
   }
@@ -548,4 +561,8 @@ async function harness() {
 
 assertIsolatedDatabase();
 if (process.argv[2] === '--worker') await child();
-else await harness();
+else {
+  await harness();
+  // Exit explicitly: a client abandoned during the Redis-outage scenario can otherwise hold the event loop open.
+  process.exit(process.exitCode ?? 0);
+}

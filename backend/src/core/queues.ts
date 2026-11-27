@@ -13,6 +13,9 @@ export const QUEUES = {
   ai: 'ai',
   research: 'research',
   imports: 'import',
+  // Knowledge Importer stages. Separate from lead CSV imports so a long AI extraction cannot hold up other
+  // workspaces' lead imports, and so the stage can have a timeout sized for AI work.
+  knowledgeImport: 'knowledge-import',
   verify: 'verify',
   domain: 'domain-health',
   maintenance: 'maintenance',

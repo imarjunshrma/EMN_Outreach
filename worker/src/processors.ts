@@ -46,6 +46,12 @@ function AI_WORKFLOW_HANDLERS(): Record<string, Handler> {
 }
 
 /** Job handlers by queue and job name. Every handler is idempotent. */
+function knowledgeImportHandlers() {
+  return Object.fromEntries(importStages.map(stage => [stage, async (j: Job<Data>) => (
+    await import('../../backend/src/services/knowledge-import-worker.js')
+  ).processImportJob(j)]));
+}
+
 export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
   [QUEUES.warmup]: {
     'warmup.tick': async () => (await import('../../backend/src/services/warmup.js')).tickWarmup(),
@@ -114,11 +120,11 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'research.company': async (j) => intel.runResearch(s(j.data.workspaceId), { companyId: s(j.data.companyId) }),
   },
   [QUEUES.imports]: {
-    ...Object.fromEntries(importStages.map(stage => [stage, async (j: Job<Data>) => (
-      await import('../../backend/src/services/knowledge-import-worker.js')
-    ).processImportJob(j)])),
+    // Drains Knowledge Importer stages published here by releases before the dedicated queue existed.
+    ...knowledgeImportHandlers(),
     'import.csv': async (j) => leads.processImport(s(j.data.workspaceId), s(j.data.importId)),
   },
+  [QUEUES.knowledgeImport]: knowledgeImportHandlers(),
   [QUEUES.verify]: {
     'verify.lead': async (j) => enrichment.verifyQueued(s(j.data.workspaceId), s(j.data.leadId), { force: !!j.data.force, ...(typeof j.data.freshDays === 'number' ? { freshDays: j.data.freshDays } : {}) }),
     'verify.address': async (j) => {
@@ -207,7 +213,7 @@ export const TENANT_GATED = new Set([
   'import.csv', 'verify.lead', 'workflow.run', 'automation.dispatch', 'webhook.deliver', 'channel.notify', 'personalize.lead', 'personalize.single',
 ]);
 /** Per-tenant fair share: at most N concurrent jobs of these queues per organization. */
-const FAIR_QUEUES = new Set<QueueName>([QUEUES.ai, QUEUES.research, QUEUES.personalize, QUEUES.verify, QUEUES.imports]);
+const FAIR_QUEUES = new Set<QueueName>([QUEUES.ai, QUEUES.research, QUEUES.personalize, QUEUES.verify, QUEUES.imports, QUEUES.knowledgeImport]);
 const SLOTS = () => Math.max(1, Number(process.env.TENANT_JOB_SLOTS ?? 2));
 
 export async function tenantGate(job: Job<Data>): Promise<{ skip?: string; organizationId?: string }> {
@@ -236,7 +242,7 @@ async function acquireSlot(queueName: QueueName, org: string, jobId: string): Pr
 /** Hard ceiling per job so a hung provider call cannot hold a worker slot forever (the job is retried with back-off). */
 const TIMEOUT_MS: Partial<Record<QueueName, number>> = {
   [QUEUES.send]: 120_000, [QUEUES.replySend]: 120_000, [QUEUES.prepare]: 120_000, [QUEUES.ai]: 180_000, [QUEUES.personalize]: 240_000,
-  [QUEUES.research]: 300_000, [QUEUES.aiClaude]: 35 * 60_000, [QUEUES.aiCodex]: 35 * 60_000, [QUEUES.aiApi]: 35 * 60_000, [QUEUES.verify]: 120_000, [QUEUES.sync]: 300_000, [QUEUES.webhooks]: 30_000, [QUEUES.imports]: 30 * 60_000, [QUEUES.maintenance]: 30 * 60_000,
+  [QUEUES.research]: 300_000, [QUEUES.aiClaude]: 35 * 60_000, [QUEUES.aiCodex]: 35 * 60_000, [QUEUES.aiApi]: 35 * 60_000, [QUEUES.verify]: 120_000, [QUEUES.sync]: 300_000, [QUEUES.webhooks]: 30_000, [QUEUES.imports]: 30 * 60_000, [QUEUES.knowledgeImport]: 3 * 60 * 60_000, [QUEUES.maintenance]: 30 * 60_000,
 };
 export const jobTimeoutMs = (q: QueueName) => Number(process.env.JOB_TIMEOUT_MS ?? 0) || TIMEOUT_MS[q] || 10 * 60_000;
 export class JobTimeoutError extends Error {}

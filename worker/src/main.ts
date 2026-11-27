@@ -22,6 +22,8 @@ const CONCURRENCY: Partial<Record<QueueName, number>> = {
   [QUEUES.ai]: 4,
   [QUEUES.research]: 2,
   [QUEUES.imports]: 1,
+  // Each knowledge import is one session; a second slot lets another workspace progress while one extracts.
+  [QUEUES.knowledgeImport]: 2,
   [QUEUES.scheduler]: 1,
   [QUEUES.warmup]: 1,
   [QUEUES.webhooks]: 4,

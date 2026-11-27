@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Worker, QueueEvents } from 'bullmq';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { redis } from '../../backend/src/core/redis.js';
 import { db } from '../../backend/src/core/db.js';
 import { newRedis } from '../../backend/src/core/redis.js';
 import { QUEUES, queue } from '../../backend/src/core/queues.js';
@@ -10,6 +11,10 @@ import { createUserSession } from '../helpers/harness.js';
 
 const upload = (text: string) => [{ originalname: 'company.txt', mimetype: 'text/plain', buffer: Buffer.from(text) }];
 const actor = (userId: string) => ({ type: 'USER' as const, userId });
+
+// Start every test from an empty Redis DB, like the rest of the suite; otherwise the per-IP sign-in limiter
+// accumulates across runs and logins start failing with 429.
+beforeEach(async () => { await redis().flushdb(); });
 
 describe('Knowledge Importer review and application state', () => {
   it('deduplicates concurrent uploads and permits a cancelled file to be uploaded again', async () => {
@@ -23,7 +28,7 @@ describe('Knowledge Importer review and application state', () => {
     expect(second.id).toBe(first.id);
     expect((await getImport(workspaceId, first.id)).files).toHaveLength(1);
     await expect(cancelImport(workspaceId, first.id, actor(userId))).resolves.toMatchObject({ status: 'CANCELLED' });
-    const queued = await queue(QUEUES.imports).getJob(`knowledge-import-${first.id}-0-IMPORT_FILE_PARSE`);
+    const queued = await queue(QUEUES.knowledgeImport).getJob(`knowledge-import-${first.id}-0-IMPORT_FILE_PARSE`);
     expect(queued).toBeDefined();
     await processImportJob(queued!);
     expect((await getImport(workspaceId, first.id)).status).toBe('CANCELLED');
@@ -34,14 +39,16 @@ describe('Knowledge Importer review and application state', () => {
     const owner = await createUserSession(`import-recovery-${randomUUID()}@example.test`);
     const { workspaceId } = owner;
     const prefix = `${process.env.QUEUE_PREFIX ?? 'emn'}:importer-recovery-${randomUUID()}`;
-    const shared = queue(QUEUES.imports);
-    const jobEvents = new QueueEvents(QUEUES.imports, { connection: newRedis(), prefix: shared.opts.prefix });
-    const worker = new Worker(QUEUES.imports, async job => {
+    const shared = queue(QUEUES.knowledgeImport);
+    const jobEvents = new QueueEvents(QUEUES.knowledgeImport, { connection: newRedis(), prefix: shared.opts.prefix });
+    const worker = new Worker(QUEUES.knowledgeImport, async job => {
       if (job.data.recoveryFixture === prefix) return;
       await job.moveToDelayed(Date.now() + 60_000, job.token);
       throw new (await import('bullmq')).DelayedError();
     }, { connection: newRedis(), prefix: shared.opts.prefix });
     try {
+      // Subscribe before adding the job; otherwise its completion event can arrive before the listener is connected.
+      await jobEvents.waitUntilReady();
       const session = await db().knowledgeImportSession.create({
         data: { workspaceId, status: 'PROCESSING', processingStep: 'IMPORT_FILE_PARSE' },
       });
@@ -70,7 +77,7 @@ describe('Knowledge Importer review and application state', () => {
     })));
     for (const item of proposals) await decideItem(workspaceId, item.id, { status: 'APPROVED' }, currentActor);
     await applyApproved(workspaceId, session.id, currentActor);
-    const delivery = await queue(QUEUES.imports).getJob(`knowledge-import-${session.id}-1-IMPORT_APPROVED_APPLICATION`);
+    const delivery = await queue(QUEUES.knowledgeImport).getJob(`knowledge-import-${session.id}-1-IMPORT_APPROVED_APPLICATION`);
     await processImportJob(delivery!);
     const review = await getImport(workspaceId, session.id);
     expect(review.items).toHaveLength(2);
@@ -98,7 +105,7 @@ describe('Knowledge Importer review and application state', () => {
     await expect(applyApproved(workspaceId, session.id, actor(stranger.userId))).rejects.toMatchObject({ status: 403 });
     await expect(applyApproved(workspaceId, session.id, actor(userId))).resolves.toMatchObject({ status: 'READY' });
     await db().user.update({ where: { id: userId }, data: { status: 'DISABLED' } });
-    const queued = await queue(QUEUES.imports).getJob(`knowledge-import-${session.id}-1-IMPORT_APPROVED_APPLICATION`);
+    const queued = await queue(QUEUES.knowledgeImport).getJob(`knowledge-import-${session.id}-1-IMPORT_APPROVED_APPLICATION`);
     expect(queued).toBeDefined();
     await expect(processImportJob(queued!)).rejects.toThrow('Current workspace administrator permission is required');
     expect(await db().knowledgeImportItem.count({ where: { workspaceId, sessionId: session.id, status: 'APPLIED' } })).toBe(0);

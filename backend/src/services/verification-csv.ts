@@ -156,6 +156,19 @@ export async function markCsvImportFailed(workspaceId: string, batchId: string, 
   await db().emailVerificationBatch.updateMany({ where: { id: batchId, workspaceId, status: 'INGESTING' }, data: { status: 'FAILED_IMPORT', error: message, completedAt: new Date() } });
 }
 
+/** The parts of a stored verification result that the export reads; every field may be missing on older rows. */
+interface VerificationDetails {
+  originalRow?: unknown;
+  error?: string;
+  dns?: { status?: string; error?: string; mx?: Array<{ priority: number; exchange: string }> };
+  smtp?: { classification?: string };
+  catchAll?: { status?: string };
+  attributes?: { disposable?: boolean; freeProvider?: boolean; roleBased?: boolean };
+  risk?: { score?: number; signals?: string[] };
+  syntax?: { reason?: string };
+  checkedAt?: string;
+}
+
 export async function streamVerificationBatchCsv(workspaceId: string, batchId: string, response: Response) {
   const batch = await db().emailVerificationBatch.findFirst({ where: { id: batchId, workspaceId }, select: { id: true, csvHeaders: true, emailColumn: true } });
   if (!batch) throw NotFound('Verification batch'); // 404 for another workspace's batch, never a 500
@@ -170,10 +183,10 @@ export async function streamVerificationBatchCsv(workspaceId: string, batchId: s
       const page = await db().emailVerification.findMany({ where: { workspaceId, batchId, ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: 'asc' }, take: 500 });
       if (!page.length) break;
       for (const item of page) {
-        const details = item.details as Record<string, any>;
+        const details = item.details as VerificationDetails;
         const original = Array.isArray(details.originalRow) ? details.originalRow : [];
         const originalEmail = typeof original[selectedEmailColumn] === 'string' ? original[selectedEmailColumn] : item.email;
-        const mx = (details.dns?.mx ?? []).map((m: any) => `${m.priority} ${m.exchange}`).join('; ');
+        const mx = (details.dns?.mx ?? []).map((m) => `${m.priority} ${m.exchange}`).join('; ');
         const attrs = details.attributes ?? {};
         yield [...original.map(csvSafe), ...[
           originalEmail, item.email, item.result, details.dns?.status, mx, details.smtp?.classification,

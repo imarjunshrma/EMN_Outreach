@@ -22,7 +22,7 @@ export function WorkflowBuilder() {
   const list = useOwnerQuery<{ workflows: Workflow[] }>('/ai-workflows');
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const workflows = list.data?.workflows ?? [];
+  const workflows = useMemo(() => list.data?.workflows ?? [], [list.data]);
   useEffect(() => {
     if (!workflows.length || draft) return;
     const w = workflows.find((x) => x.isDefault) ?? workflows[0];

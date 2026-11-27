@@ -46,7 +46,7 @@ export async function enqueueImportStage(session: { id: string; workspaceId: str
   const stage = StageSchema.parse(session.processingStep);
   const jobId = `knowledge-import-${session.id}-${session.run}-${stage}`;
   const data = { workspaceId: session.workspaceId, sessionId: session.id, run: session.run };
-  await enqueue(QUEUES.imports, stage, data, { jobId });
+  await enqueue(QUEUES.knowledgeImport, stage, data, { jobId });
 }
 
 async function publishCommittedImport(session: Parameters<typeof enqueueImportStage>[0]) {
@@ -86,10 +86,12 @@ export async function createImport(workspaceId: string, files: Array<{ originaln
       where: { workspaceId, sha256: { in: [...uploads.keys()] }, status: { not: 'CANCELLED' } },
       select: { sha256: true, sessionId: true }, orderBy: { createdAt: 'desc' },
     });
-    if (previous.length === uploads.size) {
+    // Compare distinct files, not rows: the same file can appear in several earlier sessions, and counting rows made a
+    // new file look already imported when another file in the upload had been imported twice before.
+    const seen = new Set(previous.map(file => file.sha256));
+    if (seen.size === uploads.size) {
       return tx.knowledgeImportSession.findFirstOrThrow({ where: { id: previous[0].sessionId, workspaceId } });
     }
-    const seen = new Set(previous.map(file => file.sha256));
     const pending = [...uploads].filter(([hash]) => !seen.has(hash));
     const created = await tx.knowledgeImportSession.create({
       data: {
@@ -321,7 +323,9 @@ export async function recoverImportJobs() {
     select: { id: true, workspaceId: true, run: true, processingStep: true },
   });
   for (const session of sessions) {
-    const job = await queue(QUEUES.imports).getJob(`knowledge-import-${session.id}-${session.run}-${session.processingStep}`);
+    const jobId = `knowledge-import-${session.id}-${session.run}-${session.processingStep}`;
+    // Releases before the dedicated queue published stages on the shared lead-import queue; still honour those.
+    const job = await queue(QUEUES.knowledgeImport).getJob(jobId) ?? await queue(QUEUES.imports).getJob(jobId);
     if (!job) {
       await enqueueImportStage(session);
       continue;

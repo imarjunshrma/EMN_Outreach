@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { Worker } from 'bullmq';
 import JSZip from 'jszip';
 import XLSX from 'xlsx';
@@ -9,6 +9,23 @@ import { IMPORT_ENTITIES, importFieldKind, type ImportEntityType } from '../shar
 import { login, workspaceBase } from './helpers';
 
 test.skip(process.env.KNOWLEDGE_IMPORT_E2E !== '1', 'Run with playwright.knowledge-import.config.ts and an isolated migrated database.');
+
+// Request rate-limit counters survive in the acceptance Redis database between runs, and each scenario signs up a new
+// account. Clear only those counters (keys `rl:*`) so a rerun within the limiter window starts from the same state.
+test.beforeEach(async () => {
+  const { newRedis } = await import('../backend/src/core/redis.js');
+  const client = newRedis();
+  try {
+    let cursor = '0';
+    do {
+      const [next, keys] = await client.scan(cursor, 'MATCH', 'rl:*', 'COUNT', 500);
+      cursor = next;
+      if (keys.length) await client.del(...keys);
+    } while (cursor !== '0');
+  } finally {
+    client.disconnect();
+  }
+});
 
 const xlsxMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -49,6 +66,8 @@ function extractFixture(prompt: string) {
 async function localProvider() {
   const prompts: string[] = [];
   const errors: string[] = [];
+  // Set `outage` to answer extraction requests with HTTP 503, as a provider outage would.
+  const state = { outage: false, outageRequests: 0 };
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
@@ -58,6 +77,12 @@ async function localProvider() {
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body: { messages: Array<{ content: string }> } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const prompt = body.messages.map((message) => message.content).join('\n');
+        if (state.outage && prompt.includes('source="knowledge_import"')) {
+          state.outageRequests += 1;
+          res.statusCode = 503;
+          res.end(JSON.stringify({ error: { message: 'Synthetic provider outage' } }));
+          return;
+        }
         prompts.push(prompt);
         const data = prompt.includes('source="knowledge_import"') ? extractFixture(prompt)
           : prompt.includes('source="workspace_snapshot"') ? {
@@ -85,6 +110,7 @@ async function localProvider() {
     url: `http://localhost:${address.port}/v1`,
     prompts,
     errors,
+    state,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }
@@ -139,7 +165,7 @@ test('reviews and applies the workbook, retrieves eligible knowledge and dedupli
   const { newRedis, closeRedis } = await import('../backend/src/core/redis.js');
   const { disconnectDb } = await import('../backend/src/core/db.js');
   const { processorFor } = await import('../worker/src/processors.js');
-  const worker = new Worker(QUEUES.imports, processorFor(QUEUES.imports), {
+  const worker = new Worker(QUEUES.knowledgeImport, processorFor(QUEUES.knowledgeImport), {
     prefix: process.env.QUEUE_PREFIX,
     connection: newRedis(),
     concurrency: 2,
@@ -257,6 +283,137 @@ test('reviews and applies the workbook, retrieves eligible knowledge and dedupli
     expect(provider.errors).toEqual([]);
   } finally {
     await worker.close();
+    await Promise.all([closeQueues(), closeRedis(), disconnectDb(), provider.close()]);
+  }
+});
+
+/** Status badges render a decorative dot followed by the title-cased status. */
+const badge = (scope: Page | Locator, text: string) => scope.locator('span:has(> span[aria-hidden])').filter({ hasText: new RegExp(`^${text}$`) });
+
+const audienceName = workbookRecord('TARGET_AUDIENCE').name;
+const personaName = workbookRecord('TARGET_PERSONA').name;
+const competitorName = workbookRecord('COMPETITOR').name;
+
+/** Fills only the listed worksheets, so the recovery scenario reviews a small, known set of proposals. */
+function populateSubset(template: Buffer, entities: ImportEntityType[]) {
+  const workbook = XLSX.read(template, { type: 'buffer' });
+  for (const entity of entities) {
+    const { name, description } = workbookRecord(entity);
+    XLSX.utils.sheet_add_aoa(workbook.Sheets[IMPORT_ENTITIES[entity].sheet], [[`fixture-${entity.toLowerCase()}`, name, description]], { origin: 'A2' });
+  }
+  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
+test('cancels, fails and retries an import, then skips and resolves a cyclic reference through review', async ({ page }) => {
+  test.setTimeout(360_000);
+  const provider = await localProvider();
+  const { QUEUES, closeQueues } = await import('../backend/src/core/queues.js');
+  const { newRedis, closeRedis } = await import('../backend/src/core/redis.js');
+  const { disconnectDb } = await import('../backend/src/core/db.js');
+  const { processorFor } = await import('../worker/src/processors.js');
+  let worker: Worker | undefined;
+  try {
+    const email = `knowledge-recovery-${randomUUID()}@example.test`;
+    const password = 'Knowledge-fixture-password-123';
+    await page.goto('/signup');
+    await page.getByLabel('Your name').fill('Importer Recovery');
+    await page.getByLabel('Work email').fill(email);
+    await page.getByLabel('Company or agency name').fill('Isolated Importer Recovery');
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('checkbox').check();
+    await page.getByRole('button', { name: 'Create my account' }).click();
+    await page.getByRole('button', { name: 'Do this later' }).click();
+    const base = await workspaceBase(page);
+    await api(page, base, '/ai/providers', 'PUT', {
+      provider: 'CUSTOM_OPENAI', apiKey: 'synthetic-test-key', defaultModel: 'knowledge-fixture-v1', baseUrl: provider.url,
+    });
+    await api(page, base, '/ai/default-provider', 'PUT', { provider: 'CUSTOM_OPENAI', applyToAll: true });
+    await page.goto(`${base}/ai-studio/imports`);
+    const downloaded = page.waitForEvent('download');
+    await page.getByRole('link', { name: 'Download XLSX template' }).click();
+    const template = await readFile((await (await downloaded).path())!);
+    const workbook = populateSubset(template, ['TARGET_AUDIENCE', 'TARGET_PERSONA', 'COMPETITOR']);
+    const stage = page.getByRole('status').filter({ hasText: /^Import / });
+
+    // Cancellation: no worker is running yet, so the import waits at the parse checkpoint.
+    const cancelledId = await upload(page, base, workbook);
+    await expect(stage).toHaveText('Import File Parse');
+    await expect(page.getByLabel('Import progress')).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel import' }).click();
+    await expect(badge(page, 'Cancelled').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel import' })).toBeHidden();
+
+    worker = new Worker(QUEUES.knowledgeImport, processorFor(QUEUES.knowledgeImport), {
+      prefix: process.env.QUEUE_PREFIX, connection: newRedis(), concurrency: 2,
+    });
+    await worker.waitUntilReady();
+
+    // Failure: the provider is down for every extraction attempt, so the import fails and offers a retry.
+    provider.state.outage = true;
+    const sessionId = await upload(page, base, workbook);
+    expect(sessionId).not.toBe(cancelledId);
+    await expect(badge(page, 'Failed').first()).toBeVisible({ timeout: 150_000 });
+    await expect(stage).toHaveText('Import Extraction');
+    expect(provider.state.outageRequests).toBeGreaterThan(0);
+    const retry = page.getByRole('button', { name: 'Retry processing' });
+    await expect(retry).toBeVisible();
+    await page.goto(`${base}/ai-studio/imports/${cancelledId}`);
+    await expect(badge(page, 'Cancelled').first()).toBeVisible();
+    await page.goto(`${base}/ai-studio/imports/${sessionId}`);
+
+    // Retry after the provider recovers.
+    provider.state.outage = false;
+    await retry.click();
+    const card = (name: string) => page.locator('article').filter({ has: page.getByRole('heading', { name, exact: true }) });
+    await expect(card(personaName)).toBeVisible({ timeout: 90_000 });
+    await expect(card(audienceName)).toBeVisible();
+    await expect(card(competitorName)).toBeVisible();
+    await expect(badge(page, 'Review').first()).toBeVisible();
+
+    const reveal = async (name: string) => {
+      // Open the panel only when it is closed: review controls are briefly hidden while the session refreshes.
+      const details = card(name).locator('details');
+      if (!await details.evaluate((element) => (element as HTMLDetailsElement).open)) await card(name).getByText('Review details', { exact: true }).click();
+      await expect(card(name).getByRole('button', { name: /Edit proposed fields|Hide editor/ })).toBeVisible();
+    };
+    const approveWithReferences = async (name: string, references: string, button = 'Approve') => {
+      await reveal(name);
+      await card(name).getByRole('button', { name: 'Edit proposed fields' }).click();
+      await card(name).getByLabel('Relationship references').fill(references);
+      await card(name).getByRole('button', { name: button, exact: true }).click();
+      await expect(badge(card(name), 'Approved')).toBeVisible();
+    };
+
+    // Skipping.
+    await reveal(competitorName);
+    await card(competitorName).getByRole('button', { name: 'Skip', exact: true }).click();
+    await expect(badge(card(competitorName), 'Skip')).toBeVisible();
+
+    // A cycle the reviewer introduces is returned for editing, and nothing in it is written.
+    await approveWithReferences(audienceName, 'TARGET_PERSONA: fixture-target_persona');
+    await approveWithReferences(personaName, 'TARGET_AUDIENCE: fixture-target_audience');
+    await page.getByRole('button', { name: 'Apply approved items' }).click();
+    for (const name of [audienceName, personaName]) {
+      await expect(badge(card(name), 'Failed')).toBeVisible({ timeout: 60_000 });
+      await expect(card(name).getByText(/circular relationship/)).toBeVisible();
+    }
+    const workspaceId = base.split('/').at(-1)!;
+    const { db } = await import('../backend/src/core/db.js');
+    expect(await db().businessKnowledgeRecord.count({ where: { workspaceId } })).toBe(0);
+
+    // Editing one reference breaks the cycle; both records then apply in dependency order.
+    await approveWithReferences(personaName, '', 'Approve for retry');
+    await reveal(audienceName);
+    await card(audienceName).getByRole('button', { name: 'Approve for retry', exact: true }).click();
+    await expect(badge(card(audienceName), 'Approved')).toBeVisible();
+    await page.getByRole('button', { name: 'Apply approved items' }).click();
+    for (const name of [audienceName, personaName]) await expect(card(name).getByText('Applied', { exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(badge(card(competitorName), 'Skip')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Audit history' })).toBeVisible();
+    expect(await db().businessKnowledgeRecord.count({ where: { workspaceId } })).toBe(2);
+    expect(provider.errors).toEqual([]);
+  } finally {
+    await worker?.close();
     await Promise.all([closeQueues(), closeRedis(), disconnectDb(), provider.close()]);
   }
 });

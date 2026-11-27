@@ -42,12 +42,14 @@ function pdf() {
 
 describe('Knowledge Importer parser', () => {
   it('builds a v2 workbook with every expected sheet and separate field instructions', async () => {
-    const generated = templateWorkbook();
+    const generated = await templateWorkbook();
     const template = XLSX.read(generated);
     expect(template.SheetNames).toEqual(TEMPLATE_SHEETS);
     expect(template.Sheets.Instructions.B1.v).toBe('v2');
     expect(template.Sheets.Services.B1.v).toBe('name');
     expect(template.Sheets.Services['!ref']).toBe('A1:S1');
+    expect(template.Sheets.Services.B1.c?.[0]?.t).toMatch(/^Required\. /); // header notes survive the writer
+    expect(template.Sheets.Instructions.A7.v).toBe('Company_Profile');
     await expect(parseImportFile(generated, 'blank.xlsx')).rejects.toThrow(/no importable/);
   });
 

@@ -6,10 +6,20 @@ import { useState } from 'react';
 import { useWsMutation, useWsQuery } from '@/lib/hooks';
 import { Badge, Button, Card, Empty, PageHeader, QueryView, Table } from '@/components/ui';
 
+type Verification = {
+  id: string; email: string; result: string;
+  details?: {
+    state?: string; syntax?: { reason?: string }; dns?: { status?: string; error?: string }; smtp?: { classification?: string };
+    catchAll?: { status?: string }; attributes?: { disposable?: boolean; freeProvider?: boolean; roleBased?: boolean };
+    risk?: { level?: string; score?: number };
+  };
+};
+type Batch = { status: string; total: number; processed: number; createdAt: string; error?: string | null; page: number; pageSize: number; resultCount: number; verifications?: Verification[] };
+
 export default function VerificationBatchPage() {
   const params = useParams<{ ws: string; id: string }>();
   const [page, setPage] = useState(1);
-  const batch = useWsQuery<any>(`/email-verification/batches/${params.id}?page=${page}&pageSize=100`, { refetchInterval: 2500 });
+  const batch = useWsQuery<Batch>(`/email-verification/batches/${params.id}?page=${page}&pageSize=100`, { refetchInterval: 2500 });
   const control = useWsMutation((action: string) => ({ path: `/email-verification/batches/${params.id}/${action}`, body: {} }));
   return <>
     <PageHeader title="Email verification batch" subtitle="DNS and address attributes only; SMTP replies remain unconfirmed." actions={<div className="flex gap-2"><Link href={`/api/v1/w/${params.ws}/email-verification/batches/${params.id}/export.csv`}><Button variant="secondary">Download CSV</Button></Link><Link className="underline" href={`/w/${params.ws}/enrichment`}>Back to verification</Link></div>} />
@@ -28,7 +38,7 @@ export default function VerificationBatchPage() {
         </div>
         {b.error && <p className="mb-3 text-sm text-red-700">Batch error: {b.error}</p>}
         <Table head={['Email', 'Primary status', 'DNS / SMTP', 'Attributes', 'Risk', 'Reason']}>
-          {(b.verifications ?? []).map((v: any) => <tr key={v.id}>
+          {(b.verifications ?? []).map((v) => <tr key={v.id}>
             <td className="td">{v.email}</td><td className="td"><Badge>{v.result}</Badge></td>
             <td className="td">{v.details?.dns?.status ?? v.details?.state ?? 'Queued'}{v.details?.smtp?.classification ? ` / ${v.details.smtp.classification}` : ''}{v.details?.catchAll?.status ? ` / catch-all ${v.details.catchAll.status}` : ''}</td>
             <td className="td text-xs">{[['Disposable', v.details?.attributes?.disposable], ['Free', v.details?.attributes?.freeProvider], ['Role', v.details?.attributes?.roleBased]].filter(([, yes]) => yes).map(([name]) => name).join(', ') || '—'}</td>

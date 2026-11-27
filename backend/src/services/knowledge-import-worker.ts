@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import type { Job } from 'bullmq';
 import { z } from 'zod';
@@ -89,7 +90,11 @@ export async function processImportJob(job: Job) {
               data: { extracted: importJson(result), parsedRows: Prisma.DbNull, status: 'EXTRACTED', error: null },
             });
           } catch (error) {
-            if (!(error instanceof AppError) || error.code !== 'VALIDATION_FAILED' || error.status !== 400) throw error;
+            // A file the model cannot extract consistently (output that fails the schema or cites text it was not
+            // given, even after the repair attempt) fails on its own; other files in the import continue. Provider,
+            // network and configuration errors still throw so the stage retries and nothing is lost.
+            const fileLevel = error instanceof AppError && ((error.code === 'VALIDATION_FAILED' && error.status === 400) || error.code === 'AI_OUTPUT_INVALID');
+            if (!fileLevel) throw error;
             await db().knowledgeImportFile.updateMany({
               where: { ...scope, id: file.id, status: 'PARSED' },
               data: { status: 'FAILED', parsedRows: Prisma.DbNull, error: workerError(error) },
@@ -108,8 +113,17 @@ export async function processImportJob(job: Job) {
       for (const file of files) {
         const items = file.extracted as unknown as ImportExtractedItem[];
         if (stage === 'IMPORT_SCHEMA_VALIDATION') {
-          for (const item of items) validateImportPayload(ImportEntityTypeSchema.parse(item.entityType), item.payload);
-          await db().knowledgeImportFile.updateMany({ where: { ...scope, id: file.id, status: 'EXTRACTED' }, data: { status: 'VALIDATED' } });
+          // An item that fails destination validation is kept and goes to review with the reason (duplicate detection
+          // marks it NEEDS_REVIEW). Throwing here used to fail the whole import, every file, for one bad record.
+          const invalid = items.filter(item => {
+            const type = ImportEntityTypeSchema.safeParse(item.entityType);
+            if (!type.success) return true;
+            try { validateImportPayload(type.data, item.payload); return false; } catch { return true; }
+          }).length;
+          await db().knowledgeImportFile.updateMany({
+            where: { ...scope, id: file.id, status: 'EXTRACTED' },
+            data: { status: 'VALIDATED', ...(invalid ? { error: `${invalid} extracted record(s) need corrections during review.` } : {}) },
+          });
           continue;
         }
         await db().$transaction(async tx => {
@@ -126,7 +140,8 @@ export async function processImportJob(job: Job) {
               classification: item.classification, verificationStatus: item.verificationStatus,
               relationships: importJson(item.relationships), mappingExplanation: item.mappingExplanation,
               extractionKey: createHash('sha256').update(`${file.id}:${ordinal}:${item.source.locator}`).digest('hex'),
-              stableKey: importStableKey(item.entityType, item.payload),
+              // No key for a record with neither an ID nor a name: it must not be grouped with other unnamed records.
+              stableKey: /:name:$/.test(importStableKey(item.entityType, item.payload)) ? null : importStableKey(item.entityType, item.payload),
             })),
           });
           await tx.knowledgeImportFile.updateMany({
@@ -236,6 +251,22 @@ const dependencyOrder = [
   'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'COMPETITOR', 'RESEARCH_RULE', 'OUTREACH_RULE', 'EXCLUSION', 'PROOF_CASE_STUDY', 'CAMPAIGN_PREFERENCE',
 ];
 
+/**
+ * Concurrent imports in different workspaces can still collide on PostgreSQL's serializable predicate locks over shared
+ * tables and indexes (Prisma P2034). The transaction is rolled back in full and re-reads its state, so retry it briefly
+ * instead of failing the whole stage and waiting for the queue's exponential backoff.
+ */
+async function serializableWithRetry<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, attempts = 5): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await db().$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') || attempt >= attempts) throw error;
+      await delay(20 * 2 ** attempt + Math.floor(Math.random() * 40));
+    }
+  }
+}
+
 function relationshipKeys(input: unknown) {
   const parsed = z.array(z.object({ entityType: ImportEntityTypeSchema, externalId: z.string() })).safeParse(input ?? []);
   return parsed.success ? parsed.data.map(ref => importStableKey(ref.entityType, { externalId: ref.externalId })) : [];
@@ -269,7 +300,7 @@ async function applySession(workspaceId: string, sessionId: string, run: number,
   }
   for (const [position, item] of ordered.entries()) {
     try {
-      await db().$transaction(async tx => {
+      await serializableWithRetry(async tx => {
         const session = await tx.knowledgeImportSession.findFirst({
           where: { workspaceId, id: sessionId, status: 'READY', run, processingStep: 'IMPORT_APPROVED_APPLICATION' },
         });
@@ -284,7 +315,7 @@ async function applySession(workspaceId: string, sessionId: string, run: number,
         });
         if (!updated.count) throw new AppError('IMPORT_REVIEW_CHANGED', 'Item changed during application.', 409);
         await audit(workspaceId, actor, 'knowledge_import.item_applied', { type: 'knowledge_import_item', id: item.id }, { sessionId, ...result }, tx);
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 });
+      });
     } catch (error) {
       if (!(error instanceof AppError || error instanceof z.ZodError)) throw error;
       const message = error instanceof z.ZodError ? 'Destination validation failed. Review the proposed fields.' : workerError(error);

@@ -58,9 +58,10 @@
     "express": "5.3.0",
     "imapflow": "2.12.2",
     "ioredis": "6.0.0",
+    "jszip": "3.10.2",
     "luxon": "3.7.2",
     "mailparser": "3.15.0",
-    "mammoth": "^1.8.0",
+    "mammoth": "^1.13.0",
     "multer": "2.5.0",
     "nodemailer": "10.6.1",
     "pdf-parse": "^1.1.1",
@@ -70,7 +71,6 @@
     "qrcode": "^1.5.4",
     "read-excel-file": "^5.8.6",
     "sanitize-html": "2.18.2",
-    "xlsx": "^0.18.5",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -91,14 +91,14 @@
     "eslint": "10.15.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.14.0",
-    "jszip": "3.10.2",
     "prisma": "7.10.1",
     "smtp-server": "^3.21.7",
     "supertest": "7.3.2",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
     "typescript-eslint": "8.73.0",
-    "vitest": "5.1.1"
+    "vitest": "5.1.1",
+    "xlsx": "^0.18.5"
   },
   "overrides": {
     "effect": "3.22.5"

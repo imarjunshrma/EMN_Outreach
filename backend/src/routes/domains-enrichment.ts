@@ -19,7 +19,7 @@ import { readSettings } from '../services/workspace.js';
 import { getSecret } from '../services/integrations.js';
 
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, cb) => cb(null, file.originalname.toLowerCase().endsWith('.csv')) }).single('file');
-const parseCsvUpload = (ctx: import('../http/router.js').Ctx<any, any>) => new Promise<void>((resolve, reject) => csvUpload(ctx.req, ctx.res, (e) => e ? reject(e) : resolve()));
+const parseCsvUpload = (ctx: Pick<import('../http/router.js').Ctx, 'req' | 'res'>) => new Promise<void>((resolve, reject) => csvUpload(ctx.req, ctx.res, (e) => e ? reject(e) : resolve()));
 
 route({ method: 'get', path: '/w/:workspaceId/provider-registry', tag: 'Deliverability', summary: 'Registrar / DNS / mailbox-provider capability registry (what is automated vs manual)', auth: 'workspace', role: 'VIEWER', handler: async () => domains.providerRegistry() });
 route({ method: 'post', path: '/w/:workspaceId/domains/:id/verification', tag: 'Deliverability', summary: 'Start ownership verification (returns the TXT record to add)', auth: 'workspace', role: 'ADMIN', status: 200, handler: (c) => domains.startVerification(c.workspaceId, c.params.id, c.actor) });

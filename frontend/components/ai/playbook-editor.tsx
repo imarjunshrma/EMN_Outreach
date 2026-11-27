@@ -18,7 +18,8 @@ function Editor({ data }: { data: Overview }) {
   const [note, setNote] = useState('');
   const [view, setView] = useState('edit');
   const [viewing, setViewing] = useState<string | null>(null);
-  useEffect(() => { setContent(data.current.content); }, [data.current.content]);
+  const savedContent = data.current.content;
+  useEffect(() => { setContent(savedContent); }, [savedContent]);
   const save = useOwnerMutation(() => ({ path: '/ai-playbook', body: { content, note: note || null } }), { success: (r: { unchanged?: boolean; version?: { version: number } }) => (r.unchanged ? 'No changes to save' : `Saved as version ${r.version?.version}`), onSuccess: () => setNote('') });
   const restore = useOwnerMutation((id: string) => ({ path: `/ai-playbook/versions/${id}/restore` }), { success: (r: { version?: { version: number } }) => `Restored as version ${r.version?.version}`, onSuccess: () => setViewing(null) });
   const old = useOwnerQuery<{ id: string; version: number; content: string; note: string | null; createdAt: string }>(viewing ? `/ai-playbook/versions/${viewing}` : null);
