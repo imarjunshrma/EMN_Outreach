@@ -27,20 +27,22 @@ export async function listRules(workspaceId: string) {
   const rules = await db().outreachRule.findMany({ where: { workspaceId }, orderBy: [{ status: 'asc' }, { priority: 'asc' }, { updatedAt: 'desc' }] });
   return { rules, conflicts: findRuleConflicts(rules) };
 }
-export async function createRule(workspaceId: string, input: z.infer<typeof RuleInputSchema>, actor: Actor) {
-  const existing = await db().outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE' } });
+export async function createRule(workspaceId: string, input: z.infer<typeof RuleInputSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const existing = await client.outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE' } });
   const conflicts = validateRuleConflictInput(existing, input);
-  const rule = await db().outreachRule.create({ data: { workspaceId, ...input, condition: input.condition ?? null } });
-  await audit(workspaceId, actor, 'outreach_brain.rule_created', { type: 'outreach_rule', id: rule.id }, { category: rule.category, priority: rule.priority });
+  const rule = await client.outreachRule.create({ data: { workspaceId, ...input, condition: input.condition ?? null } });
+  await audit(workspaceId, actor, 'outreach_brain.rule_created', { type: 'outreach_rule', id: rule.id }, { category: rule.category, priority: rule.priority }, transaction);
   return { rule, conflicts };
 }
-export async function updateRule(workspaceId: string, id: string, input: z.infer<typeof RuleInputSchema>, actor: Actor) {
-  const current = await db().outreachRule.findFirst({ where: { id, workspaceId } });
+export async function updateRule(workspaceId: string, id: string, input: z.infer<typeof RuleInputSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const current = await client.outreachRule.findFirst({ where: { id, workspaceId } });
   if (!current) throw NotFound('Outreach rule');
-  const rows = await db().outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE', id: { not: id } } });
+  const rows = await client.outreachRule.findMany({ where: { workspaceId, status: 'ACTIVE', id: { not: id } } });
   const conflicts = validateRuleConflictInput(rows, { ...input, id });
-  const rule = await db().outreachRule.update({ where: { id }, data: { ...input, condition: input.condition ?? null } });
-  await audit(workspaceId, actor, 'outreach_brain.rule_updated', { type: 'outreach_rule', id }, { category: rule.category, priority: rule.priority });
+  const rule = await client.outreachRule.update({ where: { id }, data: { ...input, condition: input.condition ?? null } });
+  await audit(workspaceId, actor, 'outreach_brain.rule_updated', { type: 'outreach_rule', id }, { category: rule.category, priority: rule.priority }, transaction);
   return { rule, conflicts };
 }
 export async function deleteRule(workspaceId: string, id: string, actor: Actor) {

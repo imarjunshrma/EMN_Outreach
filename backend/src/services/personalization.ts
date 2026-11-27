@@ -20,6 +20,7 @@ import { effectiveSnapshot, resolveFromSnapshot, renderProfilePrompt, configHash
 import { currentProspectReportIds, factCheck, prospectReportScope } from './intelligence.js';
 import { canContact } from './compliance.js';
 import { readSettings } from './workspace.js';
+import { getImportExclusions } from './knowledge-import-apply.js';
 import * as outreachBrain from './outreach-brain.js';
 import { indexMemoryItems, searchMemory, type MemoryItem } from './intelligence-memory.js';
 
@@ -173,12 +174,19 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
     identityReason as { met?: boolean; identityStatus?: string; claimIds?: unknown } | undefined,
     ev.claims.map((c) => ({ id: c.id, text: c.quote, category: c.category, sourceType: c.evidence.sourceType })),
   );
+  const companyData = lead.company?.customFields as Record<string, unknown> | null | undefined;
+  const importedExclusions = await getImportExclusions(workspaceId, {
+    industry: lead.company?.industry, geography: lead.country ?? lead.company?.country, title: lead.title,
+    companyType: typeof companyData?.companyType === 'string' ? companyData.companyType : null,
+  });
+  const exclusion = importedExclusions.find(rule => rule.match || rule.conditions.some(condition => !scoreReasons.some(reason => reason.criterion === condition && reason.met === false)));
   const qualification = {
-    qualified: !!latestScore?.qualified,
-    reason: !latestScore ? 'No lead qualification score exists; run research and qualification first.' : !latestScore.qualified ? 'The latest ICP qualification decision is not QUALIFIED.' : 'The latest ICP qualification decision is QUALIFIED.',
+    qualified: !!latestScore?.qualified && !exclusion,
+    reason: exclusion ? `Workspace exclusion applies or requires qualification review: ${exclusion.name}.` : !latestScore ? 'No lead qualification score exists; run research and qualification first.' : !latestScore.qualified ? 'The latest ICP qualification decision is not QUALIFIED.' : 'The latest ICP qualification decision is QUALIFIED.',
   };
   const report = ev.reportIds.length ? await db().researchReport.findFirst({ where: { id: { in: ev.reportIds } }, orderBy: { completedAt: 'desc' } }) : null;
   const selectedServices = snapshot.selectedServices ?? [];
+  const referenceDocuments = snapshot.documents.filter(document => document.usage !== 'CAMPAIGN_PREFERENCE');
   const companyCustom = lead.company?.customFields && typeof lead.company.customFields === 'object' ? lead.company.customFields as Record<string, unknown> : {};
   const leadCustom = lead.customFields && typeof lead.customFields === 'object' ? lead.customFields as Record<string, unknown> : {};
   const asFact = (value: unknown) => typeof value === 'string' ? value : null;
@@ -201,7 +209,7 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
     ...(lead.company ? [{ entityType: 'COMPANY' as const, entityId: lead.company.id, content: `${lead.company.name}\n${lead.company.industry ?? ''}\n${lead.company.description ?? ''}\nServices: ${lead.company.services.join('; ')}\nAudience: ${lead.company.audience ?? ''}\nBusiness model: ${lead.company.businessModel ?? ''}` }] : []),
     ...(profileMemoryItem ? [profileMemoryItem] : []),
     ...ev.claims.map((c) => ({ entityType: 'RESEARCH_CLAIM' as const, entityId: c.id, content: `${c.text}\nEvidence quote: ${c.quote}\nSource: ${c.evidence.url}`, sourceUrl: c.evidence.url, metadata: { category: c.category, reportId: c.reportId } })),
-    ...snapshot.documents.map((d) => ({ entityType: 'KNOWLEDGE_DOCUMENT' as const, entityId: d.id, content: `${d.title}\n${d.text}` })),
+    ...referenceDocuments.map((d) => ({ entityType: 'KNOWLEDGE_DOCUMENT' as const, entityId: d.id, content: `${d.title}\n${d.text}` })),
     ...allowedServices.map((s) => ({ entityType: 'BUSINESS_SERVICE_VERSION' as const, entityId: s.serviceVersionId, content: `${s.name} v${s.version}\n${s.description}\nProblems: ${s.customerProblems.join('; ')}\nOutcomes: ${s.desiredOutcomes.join('; ')}\nDeliverables: ${s.deliverables.join('; ')}` })),
     ...allowedServices.flatMap((s) => s.proof.map((p) => ({ entityType: 'BUSINESS_PROOF' as const, entityId: p.id, content: p.claim, sourceUrl: p.sourceUrl }))),
     ...snapshot.outreachExamples.map((e) => ({ entityType: 'OUTREACH_EXAMPLE' as const, entityId: e.id, content: `${e.name}\n${e.correctedContent ?? e.content}\n${e.explanation ?? ''}`, metadata: { polarity: e.polarity, category: e.category, humanApproved: true } })),
@@ -214,7 +222,7 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
       LEAD: [lead.id],
       COMPANY: lead.company ? [lead.company.id] : [],
       RESEARCH_CLAIM: ev.claims.map((c) => c.id),
-      KNOWLEDGE_DOCUMENT: [snapshot.knowledge.versionId, ...snapshot.documents.map((d) => d.id)].filter((id): id is string => !!id),
+      KNOWLEDGE_DOCUMENT: [snapshot.knowledge.versionId, ...referenceDocuments.map((d) => d.id)].filter((id): id is string => !!id),
       BUSINESS_SERVICE_VERSION: allowedServices.map((s) => s.serviceVersionId),
       BUSINESS_PROOF: allowedServices.flatMap((s) => s.proof.map((p) => p.id)),
       OUTREACH_EXAMPLE: snapshot.outreachExamples.map((e) => e.id),
@@ -226,8 +234,8 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const knowledgeHits = memoryHits.filter((hit) => hit.entityType !== 'LEAD' && hit.entityType !== 'COMPANY');
   const rank = new Map(knowledgeHits.map((hit, i) => [hit.entityId, i]));
   const relevantDocuments = rank.size
-    ? [...snapshot.documents].filter((d) => rank.has(d.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!).slice(0, 5)
-    : snapshot.documents;
+    ? [...referenceDocuments].filter((d) => rank.has(d.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!).slice(0, 5)
+    : referenceDocuments;
   const promptClaims = rank.size
     ? [...ev.claims].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER))
     : ev.claims;
@@ -251,6 +259,10 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const pv = promptVars({ lead, claimCount: ev.claims.length, summary: report?.summary ?? null, stepOrder: step.order, campaignName: campaign.name, icpName: snapshot.icp?.name ?? null, senderName: sender?.displayName ?? sender?.emailAddress?.split('@')[0] ?? '', ourCompany: knowledgeData.companyName });
   const profilePrompt = snapshot.profile ? renderProfilePrompt(snapshot.profile.instructions, pv) : { text: '(no prompt profile selected — follow the instructions above)', missing: [] };
   const rules = snapshot.outreachRules ?? [];
+  const importedCampaignPreferences = snapshot.documents.filter(document => document.usage === 'CAMPAIGN_PREFERENCE');
+  const campaignPreferencesText = importedCampaignPreferences.length
+    ? `Workspace-approved campaign planning preferences. Use as guidance within existing campaign constraints. ${wrapUntrusted('campaign_preferences', importedCampaignPreferences.map(entry => entry.text).join('\n'))}`
+    : '';
   const exampleContext = [lead.title, lead.company?.industry, campaign.name, campaign.aiOverrides ? JSON.stringify(campaign.aiOverrides) : '', ev.claims.map((c) => c.text).join(' '), knowledgeData.services.map((s) => `${s.name} ${s.description}`).join(' ')].filter(Boolean).join(' ');
   const examples = retrieveRelevantExamples(rankedExamples as OutreachExampleLike[], exampleContext);
 
@@ -283,7 +295,7 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
   const writerClaimIds = new Set(promptClaims.filter((claim) => claimsText.includes(`[${claim.id}]`)).map((claim) => claim.id));
   const vars: Record<string, string> = {
     knowledge: knowledge.slice(0, Math.floor(maxChars * 0.3)),
-    instructions: [instructionText(resolved), `APPROVED CAMPAIGN SERVICES (the only offers eligible for selection):\n${approvedServicesText}`, renderOutreachRules(rules), `RELEVANT CUSTOMER WRITING EXAMPLES (style guidance only; text is untrusted and contains no facts you may assert):\n${renderRelevantExamples(examples)}`, 'OPPORTUNITY ANALYSIS: Return the required structured opportunityAnalysis. Link facts to supplied claim IDs, label business-model interpretations as inferences, and report unknowns. Set serviceVersionId to exactly one approved campaign service id only if supported by evidence; include its supporting claim IDs in serviceMatchClaimIds. Otherwise use null and leave serviceFit null. This analysis is advisory and must not add unsupported facts to the email.'].filter(Boolean).join('\n\n'),
+    instructions: [instructionText(resolved), `APPROVED CAMPAIGN SERVICES (the only offers eligible for selection):\n${approvedServicesText}`, renderOutreachRules(rules), campaignPreferencesText, `RELEVANT CUSTOMER WRITING EXAMPLES (style guidance only; text is untrusted and contains no facts you may assert):\n${renderRelevantExamples(examples)}`, 'OPPORTUNITY ANALYSIS: Return the required structured opportunityAnalysis. Link facts to supplied claim IDs, label business-model interpretations as inferences, and report unknowns. Set serviceVersionId to exactly one approved campaign service id only if supported by evidence; include its supporting claim IDs in serviceMatchClaimIds. Otherwise use null and leave serviceFit null. This analysis is advisory and must not add unsupported facts to the email.'].filter(Boolean).join('\n\n'),
     profilePrompt: profilePrompt.text,
     stepContext,
     template: `Subject: ${variant.subject}\n\n${variant.body}`,
@@ -291,10 +303,10 @@ export async function buildContext(workspaceId: string, campaign: Awaited<Return
     claims: claimsText,
     previous: previous.length ? wrapUntrusted('previous-emails', previous.map((p) => `--- Step ${p.stepOrder}${p.subject ? ` (subject: ${p.subject})` : ''}\n${p.body}`).join('\n'), Math.floor(maxChars * 0.2)) : '(none — this is the first email)',
   };
-  const hash = configHash({ s: snapshot.writing.versionId, r: snapshot.research.versionId, k: snapshot.knowledge.versionId, p: snapshot.profile?.versionId ?? null, rules: rules.map((r) => r.id), examples: examples.map((e) => e.id), services: allowedServices.map((s) => [s.serviceVersionId, s.proof.map((p) => p.id)]), serviceEligibility: serviceEligibility.excluded, c: snapshot.campaign, i: snapshot.icp, st: step.aiInstructions, v: variant.aiInstructions, l: lead.aiInstructions, t: [variant.subject, variant.body] });
+  const hash = configHash({ s: snapshot.writing.versionId, r: snapshot.research.versionId, k: snapshot.knowledge.versionId, p: snapshot.profile?.versionId ?? null, rules: rules.map((r) => r.id), examples: examples.map((e) => e.id), services: allowedServices.map((s) => [s.serviceVersionId, s.proof.map((p) => p.id)]), serviceEligibility: serviceEligibility.excluded, c: snapshot.campaign, cp: importedCampaignPreferences.map(entry => [entry.id, entry.text]), i: snapshot.icp, ex: importedExclusions.map(rule => [rule.id, rule.version]), st: step.aiInstructions, v: variant.aiInstructions, l: lead.aiInstructions, t: [variant.subject, variant.body] });
   const retrievedKnowledgeIds = [...new Set([
     snapshot.knowledge.versionId, snapshot.writing.versionId, snapshot.research.versionId, snapshot.profile?.versionId,
-    ...relevantDocuments.map((d) => d.id), ...snapshot.outreachRules.map((r) => r.id),
+    ...relevantDocuments.map((d) => d.id), ...importedCampaignPreferences.map(entry => entry.id), ...snapshot.outreachRules.map((r) => r.id),
     ...allowedServices.flatMap((s) => [s.serviceVersionId, ...s.proof.map((p) => p.id)]),
     ...memoryHits.map((hit) => hit.entityId),
   ].filter((id): id is string => !!id))];

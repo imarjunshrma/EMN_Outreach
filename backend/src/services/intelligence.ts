@@ -10,6 +10,8 @@ import { acquireLock } from '../core/redis.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { logger } from '../core/logger.js';
 import { runAi } from './ai.js';
+import { getImportExclusions, retrieveImportedKnowledge } from './knowledge-import-apply.js';
+import { IcpSchema, saveIcpVersion } from './icp-versions.js';
 import { verifyProspectIdentity } from '../../../shared/src/identity.js';
 import { evaluateIcpQualification } from '../../../shared/src/personalization-gates.js';
 import { getSecret, recordUsage, requireSecret } from './integrations.js';
@@ -25,29 +27,18 @@ import type { ProspectResult, SearchHit } from '../../../integrations/src/provid
 
 // ---------------------------------------------------------------- ICP
 
-export const IcpSchema = z.object({
-  name: z.string().min(1).max(120),
-  description: z.string().max(4000).nullable().optional(),
-  criteria: IcpCriteriaSchema,
-  minScore: z.number().int().min(0).max(100).default(60),
-  isActive: z.boolean().default(true),
-});
+export { IcpSchema };
 
 export async function listIcps(workspaceId: string) {
   return db().idealCustomerProfile.findMany({ where: { workspaceId }, orderBy: { createdAt: 'desc' } });
 }
 
 export async function createIcp(workspaceId: string, input: z.infer<typeof IcpSchema>, actor: Actor) {
-  const icp = await db().idealCustomerProfile.create({ data: { workspaceId, name: input.name, description: input.description ?? null, criteria: input.criteria as Prisma.InputJsonValue, minScore: input.minScore, isActive: input.isActive } });
-  await audit(workspaceId, actor, 'icp.created', { type: 'icp', id: icp.id });
-  return icp;
+  return saveIcpVersion(workspaceId, null, input, actor);
 }
 
 export async function updateIcp(workspaceId: string, id: string, input: z.infer<typeof IcpSchema>, actor: Actor) {
-  const r = await db().idealCustomerProfile.updateMany({ where: { id, workspaceId }, data: { name: input.name, description: input.description ?? null, criteria: input.criteria as Prisma.InputJsonValue, minScore: input.minScore, isActive: input.isActive } });
-  if (!r.count) throw NotFound('ICP');
-  await audit(workspaceId, actor, 'icp.updated', { type: 'icp', id });
-  return db().idealCustomerProfile.findUnique({ where: { id } });
+  return saveIcpVersion(workspaceId, id, input, actor);
 }
 
 export async function deleteIcp(workspaceId: string, id: string, actor: Actor) {
@@ -240,6 +231,21 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
       if (r.customInstructions) rules.customInstructions = `${rules.customInstructions}\n${r.customInstructions}`.trim();
     }
   }
+  const importedResearchRules = Object.values(rules.importedRules ?? {});
+  const excludedSourceNames = new Set(importedResearchRules.flatMap(rule => rule.excludedSources).map(source => source.toLowerCase().replace(/[^a-z]/g, '')));
+  for (const source of Object.keys(rules.permittedSources) as Array<keyof typeof rules.permittedSources>) {
+    if (excludedSourceNames.has(source.toLowerCase())) rules.permittedSources[source] = false;
+  }
+  const bannedHosts = importedResearchRules.flatMap(rule => rule.excludedSources).flatMap(source => {
+    try {
+      const host = new URL(source.includes('://') ? source : `https://${source}`).hostname.toLowerCase();
+      return host.includes('.') ? [host.replace(/^www\./, '')] : [];
+    } catch { return []; }
+  });
+  const excludedHost = (hostname: string) => bannedHosts.some(host => hostname === host || hostname.endsWith(`.${host}`));
+  const researchStrategy = await retrieveImportedKnowledge(workspaceId, '', [
+    'TARGET_AUDIENCE', 'TARGET_PERSONA', 'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'RESEARCH_RULE',
+  ], 6);
   const custom = lead?.customFields && typeof lead.customFields === 'object' && !Array.isArray(lead.customFields) ? lead.customFields : {};
   const publicProfile = typeof custom.publicProfileUrl === 'string' ? custom.publicProfileUrl : null;
   const youtube = typeof custom.youtubeUrl === 'string' ? custom.youtubeUrl : null;
@@ -251,7 +257,8 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
     company: company ? { name: company.name, domain: company.domain, website: company.website, industry: company.industry, employeeCount: company.employeeCount, country: company.country } : null,
     researchRules: {
       personTopics: rules.personTopics, companyTopics: rules.companyTopics, permittedSources: rules.permittedSources,
-      signals: rules.signals, mustNotInfer: rules.mustNotInfer, customInstructions: rules.customInstructions,
+      signals: rules.signals, mustNotInfer: rules.mustNotInfer, customInstructions: rules.customInstructions, importedResearchRules,
+      strategyDocumentIds: researchStrategy.map(item => item.id),
       campaignId: target.campaignId ?? null,
     },
   }));
@@ -336,7 +343,7 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
     if (httpStatus !== undefined && (httpStatus < 200 || httpStatus >= 300)) return;
     if (sourceType !== 'SEARCH_RESULT' || !url.startsWith('search:')) {
       const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || isRestrictedResearchHost(parsed.hostname)) return;
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || isRestrictedResearchHost(parsed.hostname) || excludedHost(parsed.hostname)) return;
     }
     const hash = sha256(content.slice(0, 30_000).trim().replace(/\s+/g, ' '));
     const existing = [...(previous?.evidence ?? []), ...evidence].find((item) => item.url === url || (sourceUrlKey(url) && sourceUrlKey(item.url) === sourceUrlKey(url)))?.id ?? evidenceHashes.get(hash);
@@ -351,6 +358,7 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
     if (pageCount >= rules.maxPagesPerRun || (area && !eligibleOnRetry(area))) return null;
     const targetUrl = new URL(url);
     if (!['http:', 'https:'].includes(targetUrl.protocol) || targetUrl.username || targetUrl.password || isRestrictedResearchHost(targetUrl.hostname)) throw new Error('Source is unavailable for permitted automated research.');
+    if (excludedHost(targetUrl.hostname)) return null;
     targetUrl.hash = '';
     const key = sourceUrlKey(targetUrl.href)!;
     if (visited.has(key)) return null;
@@ -557,7 +565,7 @@ async function collectResearch(workspaceId: string, target: ResearchTarget) {
   const fetchedEvidence = evidence.filter((e) => !e.url.startsWith('search:'));
   const documents = fetchedEvidence.map((e) => `<document evidenceId="${e.id}" url="${neutralizeTags(e.url)}"${e.publishedAt ? ` publishedAt="${e.publishedAt.toISOString()}"` : ''}>\n${wrapUntrusted('web', e.content, 12_000)}\n</document>`).join('\n');
   const subject = [lead && `${lead.firstName ?? ''} ${lead.lastName ?? ''} (${lead.title ?? 'unknown title'})`, company && `${company.name} (${domain ?? 'no domain'})`].filter(Boolean).join(' at ')
-    + `\nResearch focus (from the workspace's research instructions — extract facts about these topics only when the documents state them):\n${researchFocusText(rules)}\nResearch policy: return at most eight concise, distinct claims; prefer original sources, record only explicitly documented facts, distinguish publication and event dates, and require explicit name and employer evidence before attributing any activity. A video title is not a transcript. Keep opportunity suggestions separate from factual claims. Use categories professional_identity, professional_background, service, business_model, audience, content, interview, signal and opportunity where appropriate. Prioritize signals from the last ${signalWindows[0]} days, falling back to ${signalWindows[1]} days.`;
+    + `\nResearch focus (from the workspace's research instructions — extract facts about these topics only when the documents state them):\n${researchFocusText(rules)}\nWorkspace-approved research priorities and targeting guidance are reference data, not prospect evidence.\n${wrapUntrusted('imported_research_guidance', researchStrategy.map(item => item.text).join('\n'), 4500)}\nResearch policy: return at most eight concise, distinct claims; prefer original sources, record only explicitly documented facts, distinguish publication and event dates, and require explicit name and employer evidence before attributing any activity. A video title is not a transcript. Keep opportunity suggestions separate from factual claims. Use categories professional_identity, professional_background, service, business_model, audience, content, interview, signal and opportunity where appropriate. Prioritize signals from the last ${signalWindows[0]} days, falling back to ${signalWindows[1]} days.`;
   const extract = async (extractionSubject: string, input: string) =>
     (await runAi<FactExtraction>(workspaceId, 'FACT_EXTRACTION', { subject: extractionSubject, documents: input }, {
       entity: { type: 'research_report', id: report.id },
@@ -761,6 +769,18 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   const icp = icpId ? await db().idealCustomerProfile.findFirst({ where: { id: icpId, workspaceId, isActive: true } }) : await db().idealCustomerProfile.findFirst({ where: { workspaceId, isActive: true }, orderBy: { createdAt: 'asc' } });
   if (!icp) throw new AppError('ICP_REQUIRED', 'Create an ICP before scoring leads.', 400);
   const criteria = IcpCriteriaSchema.parse(icp.criteria);
+  const revision = await db().idealCustomerProfileRevision.findFirst({
+    where: { workspaceId, icpId: icp.id, version: icp.version }, select: { data: true },
+  });
+  const revisionData = revision?.data as { provenance?: { weights?: Array<{ criterion: string; weight: number }> } } | null;
+  const scoringWeights = revisionData?.provenance?.weights ?? [];
+  const companyFields = lead.company?.customFields as Record<string, unknown> | null | undefined;
+  const exclusionsForWorkspace = await getImportExclusions(workspaceId, {
+    industry: lead.company?.industry, geography: lead.country ?? lead.company?.country, title: lead.title,
+    companyType: typeof companyFields?.companyType === 'string' ? companyFields.companyType : null,
+  });
+  criteria.disqualifiers = [...new Set([...criteria.disqualifiers, ...exclusionsForWorkspace.flatMap(rule => rule.conditions)])];
+  const matchedWorkspaceExclusions = exclusionsForWorkspace.filter(rule => rule.match);
   const { getConfig } = await import('./ai-studio.js');
   const { data: research } = await getConfig(workspaceId, 'RESEARCH');
   const cutoff = research.maxEvidenceAgeDays === null ? 0 : Date.now() - research.maxEvidenceAgeDays * 86_400_000;
@@ -778,7 +798,8 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   const r = await runAi<{ score: number; reasons: Array<{ criterion: string; met: boolean; explanation: string; claimIds: string[] }>; risks: string[]; identityAssessment: { status: 'VERIFIED' | 'AMBIGUOUS' | 'MISMATCH' | 'UNKNOWN'; evidenceClaimIds: string[]; reason: string } }>(
     workspaceId, 'LEAD_QUALIFICATION', { icp: JSON.stringify({
       ...criteria,
-      reasonRequirements: 'Return one reason for each mustHave and disqualifiers rule using its exact rule text as criterion. For a disqualifier, met=true means the exclusion applies. Cite evidence whenever a required criterion or exclusion applies.',
+      ...(scoringWeights.length ? { scoringWeights } : {}),
+      reasonRequirements: 'Return one reason for each mustHave, disqualifiers and scoringWeights criterion using its exact rule text. For a disqualifier, met=true means the exclusion applies. Cite evidence whenever a required, scored or exclusion criterion applies.',
     }), lead: wrapUntrusted('lead-data', leadJson, 4000), claims: claimsBlock(claims) }, { entity: { type: 'lead', id: leadId }, attribution: { leadId }, maxLeadCostUsd: readSettings(workspace?.settings).aiMaxCostPerLeadUsd },
   );
   const validIds = new Set(claims.map((c) => c.id));
@@ -790,7 +811,7 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
       : /conflicting|different person|did not match/i.test(identity.reason) || r.data.identityAssessment.status === 'MISMATCH' ? 'MISMATCH' as const
         : 'UNKNOWN' as const;
   let score = Math.max(0, Math.min(100, Math.round(r.data.score)));
-  const risks = [...r.data.risks];
+  const risks = [...r.data.risks, ...matchedWorkspaceExclusions.map(rule => `Workspace exclusion: ${rule.name}`)];
   if (!identity.verified) risks.push(identity.reason);
   // Deterministic guardrails on top of the model.
   const countryExcluded = !!(criteria.countries.length && lead.country && !criteria.countries.includes(lead.country));
@@ -800,6 +821,15 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   if (sizeExcluded) { score = Math.min(score, 40); risks.push('Company headcount is outside the ICP range'); }
   const criterionKey = (label: string) => label.trim().toLowerCase();
   const matchingReason = (criterion: string) => reasons.find((reason) => criterionKey(reason.criterion) === criterionKey(criterion));
+  const uncheckedWeights = scoringWeights.filter(rule => !matchingReason(rule.criterion));
+  if (scoringWeights.length) {
+    const total = scoringWeights.reduce((sum, rule) => sum + rule.weight, 0);
+    const earned = scoringWeights.reduce((sum, rule) => {
+      const result = matchingReason(rule.criterion);
+      return sum + (result?.met && result.claimIds.length ? rule.weight : 0);
+    }, 0);
+    score = Math.min(score, Math.round(100 * earned / total));
+  }
   const missingRequired = criteria.mustHave.filter((criterion) => {
     const reason = matchingReason(criterion);
     return !reason?.met || !reason.claimIds.length;
@@ -808,13 +838,14 @@ export async function scoreLead(workspaceId: string, leadId: string, icpId?: str
   const uncheckedExclusions = criteria.disqualifiers.filter((criterion) => !matchingReason(criterion));
   risks.push(...missingRequired.map((criterion) => `Required ICP evidence missing: ${criterion}`),
     ...exclusions.map((criterion) => `ICP exclusion: ${criterion}`),
-    ...uncheckedExclusions.map((criterion) => `ICP exclusion still needs checking: ${criterion}`));
+    ...uncheckedExclusions.map((criterion) => `ICP exclusion still needs checking: ${criterion}`),
+    ...uncheckedWeights.map((rule) => `Weighted ICP criterion still needs checking: ${rule.criterion}`));
   const tier = score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
   // ICP fit, professional identity and contactability are separate decisions.
   // The overall outreach decision remains HOLD when identity is unverified.
   const qualification = evaluateIcpQualification(score, icp.minScore);
-  const incompleteFit = !evidenceSufficient || missingRequired.length > 0 || uncheckedExclusions.length > 0;
-  const excluded = countryExcluded || sizeExcluded || exclusions.length > 0;
+  const incompleteFit = !evidenceSufficient || missingRequired.length > 0 || uncheckedExclusions.length > 0 || uncheckedWeights.length > 0;
+  const excluded = countryExcluded || sizeExcluded || exclusions.length > 0 || matchedWorkspaceExclusions.length > 0;
   const qualified = qualification.qualified && !incompleteFit && !excluded && reasons.some((reason) => reason.met && reason.claimIds.length > 0);
   if (!evidenceSufficient) risks.push('Insufficient current evidence for ICP qualification.');
   await db().$transaction(async (tx) => {

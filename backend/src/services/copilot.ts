@@ -9,6 +9,7 @@ import { similarity, firstSentence } from '../../../shared/src/quality.js';
 import { neutralizeTags, wrapUntrusted } from '../../../integrations/src/ai/guard.js';
 import { runAi } from './ai.js';
 import { getConfig } from './ai-studio.js';
+import { retrieveImportedKnowledge } from './knowledge-import-apply.js';
 import { actionRegistry, actionType } from './copilot-tools.js';
 
 // AI Copilot. Reads a bounded, workspace-scoped snapshot of REAL data (no cross-tenant access, no raw
@@ -193,16 +194,21 @@ export async function ask(workspaceId: string, userId: string, role: Role, threa
   const reply: CopilotReply = research
     ? { answer: research.answer, recommendations: [], proposedActions: research.action && hasRole(role, actionRegistry.queue_research.role) ? [research.action] : [] }
     : await (async () => {
-      const [snapshot, memory, selectedProspect] = await Promise.all([
+      const [snapshot, memory, selectedProspect, importedKnowledge] = await Promise.all([
         buildSnapshot(workspaceId),
         db().copilotMemory.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' }, take: 50 }),
         prospectContext(workspaceId, contextLeadId),
+        retrieveImportedKnowledge(workspaceId, question),
       ]);
       const history = thread.messages.slice(-10).map((m) => `${m.role}: ${m.content.slice(0, 1500)}`).join('\n') || '(new conversation)';
       return (await runAi<CopilotReply>(workspaceId, 'COPILOT', {
         memory: wrapUntrusted('workspace_memory', memory.map((m) => `- ${m.content}`).join('\n') || '(none)'), snapshot: serializeCopilotSnapshot({
           ...snapshot,
           selectedProspect,
+          importedKnowledge: importedKnowledge.map(({ text, ...source }) => ({
+            ...source, evidence: text,
+          })),
+          importedKnowledgeInterpretation: 'Use imported items as workspace-approved reference data. Cite the import provenance. Source classification does not independently verify external claims. Recommendations and policy references are guidance.',
           availableActions: Object.entries(actionRegistry).filter(([, tool]) => hasRole(role, tool.role))
             .map(([name, tool]) => ({ name, input: z.toJSONSchema(tool.input), confirmationRequired: true })),
         }), generatedAt: new Date().toISOString(),

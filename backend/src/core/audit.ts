@@ -20,9 +20,10 @@ export async function audit(
   action: string,
   entity?: { type: string; id: string },
   metadata: Record<string, unknown> = {},
+  transaction?: Prisma.TransactionClient,
 ) {
   try {
-    await db().auditLog.create({
+    await (transaction ?? db()).auditLog.create({
       data: {
         workspaceId,
         actorType: actor.type,
@@ -36,6 +37,7 @@ export async function audit(
       },
     });
   } catch (e) {
+    if (transaction) throw e;
     logger.error({ err: e, action }, 'failed to write audit log');
   }
 }

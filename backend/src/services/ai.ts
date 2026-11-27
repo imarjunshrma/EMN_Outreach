@@ -40,7 +40,8 @@ export const SUGGESTED_MODELS: Record<ProviderName, { fast: string; quality: str
   DEEPSEEK: { fast: '', quality: '' }, MISTRAL: { fast: '', quality: '' }, OLLAMA: { fast: '', quality: '' }, CUSTOM_OPENAI: { fast: '', quality: '' },
 };
 
-const FAST_TASKS: AiTaskName[] = ['REPLY_CLASSIFICATION', 'SUBJECT_LINES', 'ICP_FROM_TEXT'];
+const defaultOutputTokens = (task: AiTaskName) => task === 'KNOWLEDGE_IMPORT_EXTRACTION' ? 4000 : 1500;
+const FAST_TASKS: AiTaskName[] = ['REPLY_CLASSIFICATION', 'SUBJECT_LINES', 'ICP_FROM_TEXT', 'KNOWLEDGE_IMPORT_EXTRACTION'];
 
 export function renderPrompt(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, k: string) => vars[k] ?? '');
@@ -107,14 +108,14 @@ export async function estimateCallCost(workspaceId: string, task: AiTaskName, in
   const model = inheritedDefault ? provider.defaultModel : route?.model ?? provider.defaultModel;
   const price = await priceFor(provider.provider, model);
   const inputTokens = Math.ceil(inputChars / 4) + 600; // + system prompt
-  const out = outputTokens ?? route?.maxOutputTokens ?? 1500;
+  const out = outputTokens ?? route?.maxOutputTokens ?? defaultOutputTokens(task);
   const { cost, priced } = computeCost(price, { inputTokens, outputTokens: out, cachedTokens: 0 });
   return { usd: cost, priced, model };
 }
 
 export async function routeLimits(workspaceId: string, task: AiTaskName) {
   const route = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
-  return { maxInputTokens: route?.maxInputTokens ?? null, maxOutputTokens: route?.maxOutputTokens ?? 1500 };
+  return { maxInputTokens: route?.maxInputTokens ?? null, maxOutputTokens: route?.maxOutputTokens ?? defaultOutputTokens(task) };
 }
 
 async function ensurePrompt(workspaceId: string, task: AiTaskName) {
@@ -123,6 +124,34 @@ async function ensurePrompt(workspaceId: string, task: AiTaskName) {
   const d = DEFAULT_PROMPTS[task];
   if (!d || (await db().promptTemplate.count({ where: { workspaceId, task } }))) return null; // user deactivated everything on purpose
   return db().promptTemplate.upsert({ where: { workspaceId_task_version: { workspaceId, task, version: 1 } }, update: {}, create: { workspaceId, task, version: 1, systemPrompt: d.system, userPromptTemplate: d.user, isActive: true, changeNote: 'Built-in default' } });
+}
+
+export interface ImportExtractionPromptSnapshot {
+  id: string;
+  version: number;
+  systemPrompt: string;
+  userPromptTemplate: string;
+}
+
+export async function captureImportExtractionPrompt(workspaceId: string): Promise<ImportExtractionPromptSnapshot> {
+  const prompt = await ensurePrompt(workspaceId, 'KNOWLEDGE_IMPORT_EXTRACTION');
+  if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', 'Activate an importer extraction prompt in AI settings', 409);
+  return { id: prompt.id, version: prompt.version, systemPrompt: prompt.systemPrompt, userPromptTemplate: prompt.userPromptTemplate };
+}
+
+async function importExtractionPrompt(workspaceId: string, snapshot?: ImportExtractionPromptSnapshot) {
+  const prompt = snapshot
+    ? await db().promptTemplate.findFirst({ where: { id: snapshot.id, workspaceId, task: 'KNOWLEDGE_IMPORT_EXTRACTION', version: snapshot.version } })
+    : await ensurePrompt(workspaceId, 'KNOWLEDGE_IMPORT_EXTRACTION');
+  if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', 'The captured importer prompt is unavailable', 409);
+  const builtIn = DEFAULT_PROMPTS.KNOWLEDGE_IMPORT_EXTRACTION;
+  const systemPrompt = snapshot?.systemPrompt ?? prompt.systemPrompt;
+  const userPromptTemplate = snapshot?.userPromptTemplate ?? prompt.userPromptTemplate;
+  return {
+    ...prompt,
+    systemPrompt: systemPrompt === builtIn.system ? builtIn.system : `${systemPrompt}\n\nRequired knowledge importer rules:\n${builtIn.system}`,
+    userPromptTemplate: /{{\s*source\s*}}/.test(userPromptTemplate) && /{{\s*catalog\s*}}/.test(userPromptTemplate) ? userPromptTemplate : builtIn.user,
+  };
 }
 
 interface Candidate { provider: ProviderName; model: string; fallback: boolean }
@@ -134,6 +163,27 @@ export interface FrozenTaskExecution {
   maxOutputTokens: number; maxInputTokens: number | null; temperature: number | null; monthlyBudgetUsd: number | null;
 }
 
+/** Capture the prompt, route, and limits used for a versioned task. Credentials stay in provider storage. */
+export async function captureAiTaskExecution(workspaceId: string, task: AiTaskName): Promise<FrozenTaskExecution> {
+  const [prompt, resolved, providers, limits] = await Promise.all([
+    ensurePrompt(workspaceId, task),
+    resolveCandidates(workspaceId, task),
+    db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, select: { provider: true, baseUrl: true } }),
+    routeLimits(workspaceId, task),
+  ]);
+  if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
+  if (!resolved.candidates.length) throw new AppError('PROVIDER_NOT_CONFIGURED', `No configured provider route for ${task}`, 400);
+  const providerConfig = new Map(providers.map((provider) => [provider.provider, provider.baseUrl]));
+  return {
+    task, promptTemplateId: prompt.id, promptVersion: prompt.version,
+    systemPrompt: prompt.systemPrompt, userPromptTemplate: prompt.userPromptTemplate,
+    schemaHash: createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex'),
+    candidates: resolved.candidates.map((candidate) => ({ ...candidate, baseUrl: providerConfig.get(candidate.provider) ?? null })),
+    maxOutputTokens: resolved.maxOutputTokens, maxInputTokens: limits.maxInputTokens,
+    temperature: resolved.temperature ?? null, monthlyBudgetUsd: resolved.budget,
+  };
+}
+
 /** Capture the exact prompt and provider route used by a campaign approval. Secrets are never copied. */
 export async function captureCampaignTaskExecution(workspaceId: string, tasks: AiTaskName[], campaignId?: string): Promise<Record<string, FrozenTaskExecution>> {
   if (campaignId) {
@@ -141,24 +191,7 @@ export async function captureCampaignTaskExecution(workspaceId: string, tasks: A
     if (source.mode !== 'api') throw new AppError('CAMPAIGN_INVALID', 'Campaign approval cannot freeze subscription-based AI execution yet. Select API-key routing before approval; no provider route was changed.', 409, { reasonCode: 'UNSUPPORTED_SNAPSHOT_SOURCE', mode: source.mode });
   }
   const captured: Record<string, FrozenTaskExecution> = {};
-  for (const task of [...new Set(tasks)]) {
-    const [prompt, resolved, providers] = await Promise.all([
-      ensurePrompt(workspaceId, task),
-      resolveCandidates(workspaceId, task),
-      db().aiProvider.findMany({ where: { workspaceId, isEnabled: true }, select: { provider: true, baseUrl: true } }),
-    ]);
-    if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for campaign task ${task}`, 400);
-    const providerConfig = new Map(providers.map((p) => [p.provider, p.baseUrl]));
-    const limits = await routeLimits(workspaceId, task);
-    const schemaHash = createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex');
-    captured[task] = {
-      task, promptTemplateId: prompt.id, promptVersion: prompt.version, systemPrompt: prompt.systemPrompt,
-      userPromptTemplate: prompt.userPromptTemplate, schemaHash,
-      candidates: resolved.candidates.map((candidate) => ({ ...candidate, baseUrl: providerConfig.get(candidate.provider) ?? null })),
-      maxOutputTokens: resolved.maxOutputTokens, maxInputTokens: limits.maxInputTokens, temperature: resolved.temperature ?? null, monthlyBudgetUsd: resolved.budget,
-    };
-    if (!captured[task].candidates.length) throw new AppError('PROVIDER_NOT_CONFIGURED', `No configured provider route for campaign task ${task}`, 400);
-  }
+  for (const task of new Set(tasks)) captured[task] = await captureAiTaskExecution(workspaceId, task);
   return captured;
 }
 
@@ -174,7 +207,7 @@ async function resolveCandidates(workspaceId: string, task: AiTaskName): Promise
   const fallback = route?.fallbackProvider ? providers.find((p) => p.provider === route.fallbackProvider) : undefined;
   if (fallback && route?.fallbackModel && fallback.provider !== primary?.provider) candidates.push({ provider: fallback.provider, model: route.fallbackModel, fallback: true });
   if (candidates.length === 0) for (const p of providers) candidates.push({ provider: p.provider, model: p.defaultModel, fallback: candidates.length > 0 });
-  return { candidates, maxOutputTokens: route?.maxOutputTokens ?? 1500, temperature: route?.temperature ?? undefined, budget: route?.monthlyBudgetUsd ? Number(route.monthlyBudgetUsd) : null };
+  return { candidates, maxOutputTokens: route?.maxOutputTokens ?? defaultOutputTokens(task), temperature: route?.temperature ?? undefined, budget: route?.monthlyBudgetUsd ? Number(route.monthlyBudgetUsd) : null };
 }
 
 export interface AiRunResult<T> { data: T; executionId: string; provider: ProviderName; model: string }
@@ -190,6 +223,9 @@ export async function runAi<T = unknown>(
   opts: {
     entity?: { type: string; id: string };
     critical?: boolean;
+    importExtractionPrompt?: ImportExtractionPromptSnapshot;
+    importExtractionRoute?: FrozenTaskExecution;
+    importExtractionSource?: Pick<import('./ai-source.js').ResolvedSource, 'mode' | 'ownerUserId' | 'fallbackToApi'>;
     /** Attribute cost to a campaign/lead (enables per-lead cost limits). */
     attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null };
     /** Refuse if the estimated call would exceed the campaign-lead or standalone research budget. */
@@ -203,18 +239,27 @@ export async function runAi<T = unknown>(
   // Campaign approval freezes writing and evaluation. Evidence collection can recur while the campaign is active.
   const isProspectResearch = task === 'FACT_EXTRACTION' && opts.entity?.type === 'research_report';
   if (!isProspectResearch && frozenCampaign && ['APPROVED', 'RUNNING', 'PAUSED'].includes(frozenCampaign.status) && !rawFrozenTask) throw new AppError('CAMPAIGN_INVALID', `Approved campaign has no frozen ${task} execution configuration; reapprove it before generation`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_MISSING', task });
-  const frozenTask = rawFrozenTask as FrozenTaskExecution | null;
+  const importTask = task === 'KNOWLEDGE_IMPORT_EXTRACTION';
+  const capturedRoute = importTask ? opts.importExtractionRoute : undefined;
+  const frozenTask = (capturedRoute ?? rawFrozenTask) as FrozenTaskExecution | null;
   const campaignSnapshotId = frozenSnapshot && typeof frozenSnapshot.executionSnapshotId === 'string' ? frozenSnapshot.executionSnapshotId : null;
-  if (frozenTask && (frozenTask.task !== task || frozenTask.schemaHash !== createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex'))) throw new AppError('CAMPAIGN_INVALID', `Frozen ${task} prompt configuration or output schema is invalid; reapprove the campaign`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_INVALID', task });
+  if (frozenTask && (frozenTask.task !== task || frozenTask.schemaHash !== createHash('sha256').update(JSON.stringify(jsonSchemaFor(task))).digest('hex'))) {
+    if (capturedRoute) throw new AppError('AI_OUTPUT_INVALID', 'The importer extraction schema changed. Start a new import to use the current schema.', 409);
+    throw new AppError('CAMPAIGN_INVALID', `Frozen ${task} prompt configuration or output schema is invalid; reapprove the campaign`, 409, { reasonCode: 'FROZEN_TASK_CONFIG_INVALID', task });
+  }
   // AI source (Settings → AI providers → "AI source", or the campaign's own choice): a personal subscription runs the
   // call instead of the API keys. No silent fallback to paid API calls unless an admin allowed it.
   const { resolveAiSource, AI_SOURCE_LABEL } = await import('./ai-source.js');
-  const source = frozenTask ? { mode: 'api' as const, ownerUserId: null, fallbackToApi: false, from: 'campaign' as const } : await resolveAiSource(workspaceId, opts.attribution?.campaignId ?? null);
+  const source = frozenTask && !importTask ? { mode: 'api' as const, ownerUserId: null, fallbackToApi: false, from: 'campaign' as const } : await resolveAiSource(workspaceId, opts.attribution?.campaignId ?? null);
+  const frozenSource = importTask ? opts.importExtractionSource : undefined;
+  if (frozenSource && (source.mode !== frozenSource.mode || source.ownerUserId !== frozenSource.ownerUserId || source.fallbackToApi !== frozenSource.fallbackToApi)) {
+    throw new AppError('PROVIDER_NOT_CONFIGURED', 'The workspace AI source changed during extraction. Start a new import to use it.', 409);
+  }
   if (source.mode !== 'api') {
     try { return await runAiOnSubscription<T>(workspaceId, task, vars, opts, source); }
     catch (e) {
       if (!source.fallbackToApi) throw e instanceof AppError ? e : new AppError('AI_SUBSCRIPTION_UNAVAILABLE', `${AI_SOURCE_LABEL[source.mode]}: ${(e as Error).message}`, 503);
-      logger.warn({ task, err: (e as Error).message }, 'AI subscription failed; falling back to API keys as allowed in AI settings');
+      logger.warn({ task, err: importTask ? undefined : (e as Error).message }, 'AI subscription failed; falling back to API keys as allowed in AI settings');
     }
   }
   const liveRoute = frozenTask ? null : await resolveCandidates(workspaceId, task);
@@ -237,8 +282,8 @@ export async function runAi<T = unknown>(
       throw (e as { code?: string }).code === 'QUOTA_EXCEEDED' ? new AppError('AI_BUDGET_EXCEEDED', (e as Error).message, 402) : e;
     }
   }
-  const activePrompt = frozenTask ? null : await ensurePrompt(workspaceId, task);
-  const prompt = frozenTask ? { id: frozenTask.promptTemplateId, version: frozenTask.promptVersion, systemPrompt: frozenTask.systemPrompt, userPromptTemplate: frozenTask.userPromptTemplate } : activePrompt;
+  const activePrompt = importTask ? await importExtractionPrompt(workspaceId, opts.importExtractionPrompt) : frozenTask ? null : await ensurePrompt(workspaceId, task);
+  const prompt = frozenTask && !importTask ? { id: frozenTask.promptTemplateId, version: frozenTask.promptVersion, systemPrompt: frozenTask.systemPrompt, userPromptTemplate: frozenTask.userPromptTemplate } : activePrompt;
   if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
   const schema = AI_OUTPUT_SCHEMAS[task];
   const jsonSchema = jsonSchemaFor(task);
@@ -258,7 +303,7 @@ export async function runAi<T = unknown>(
       throw new AppError('AI_COST_LIMIT', `AI cost limit per lead reached ($${spent.toFixed(4)} spent + ~$${est.usd.toFixed(4)} estimated > $${opts.maxLeadCostUsd})`, 402, { spentUsd: spent, estimateUsd: est.usd, limitUsd: opts.maxLeadCostUsd });
     }
   }
-  const preview = redactForLog(userPrompt).slice(0, 1500);
+  const preview = importTask ? null : redactForLog(userPrompt).slice(0, 1500);
   let lastError = 'unknown error';
   let lastProviderError: ProviderError | null = null;
 
@@ -284,11 +329,11 @@ export async function runAi<T = unknown>(
             costUsd: cost, costIsEstimate: !priced, latencyMs: res.latencyMs,
             entityType: opts.entity?.type, entityId: opts.entity?.id, campaignSnapshotId, ...att,
             inputPreview: preview,
-            output: (res.data ?? null) as Prisma.InputJsonValue,
-            errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+            output: importTask ? Prisma.JsonNull : (res.data ?? null) as Prisma.InputJsonValue,
+            errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${importTask ? i.code : i.message}`).join('; '),
           },
         });
-        void emitLangSmithAiTrace({
+        if (!importTask) void emitLangSmithAiTrace({
           workspaceId, task, provider: cand.provider, model: cand.model, promptVersion: prompt.version,
           generationMode: res.generationMode ?? 'structured', schemaValid: parsed.success, inputFields: Object.keys(vars),
           output: res.data, systemPrompt: prompt.systemPrompt, userPrompt: user, entity: opts.entity,
@@ -307,27 +352,28 @@ export async function runAi<T = unknown>(
         lastError = (e as Error).message;
         lastProviderError = e instanceof ProviderError ? e : null;
         await db().aiExecution.create({
-          data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, campaignSnapshotId, ...att, inputPreview: preview },
+          data: { workspaceId, task, provider: cand.provider, model: cand.model, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: cand.fallback, errorMessage: importTask ? 'Import extraction provider request failed' : redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, campaignSnapshotId, ...att, inputPreview: preview },
         });
-        logger.warn({ task, provider: cand.provider, err: lastError }, 'AI call failed');
+        logger.warn({ task, provider: cand.provider, err: importTask ? undefined : lastError }, 'AI call failed');
         if (e instanceof ProviderError && !e.retryable && e.status && e.status < 500 && e.status !== 429) break; // bad key/model → try fallback
         break; // transient errors already retried in the HTTP layer
       }
     }
   }
   if (lastProviderError) throw aiProviderFailure(lastProviderError);
-  throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed: ${lastError}`, 502);
+  throw new AppError('AI_OUTPUT_INVALID', importTask ? 'Import extraction provider could not return valid structured data' : `AI task ${task} failed: ${lastError}`, 502);
 }
 
 
 /** runAi() on a personal subscription: same prompt, schema validation (one repair attempt) and execution log; no API cost. */
 async function runAiOnSubscription<T>(
   workspaceId: string, task: AiTaskName, vars: Record<string, string>,
-  opts: { entity?: { type: string; id: string }; attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null } },
+  opts: { entity?: { type: string; id: string }; importExtractionPrompt?: ImportExtractionPromptSnapshot; attribution?: { campaignId?: string | null; leadId?: string | null; profileVersionId?: string | null } },
   source: import('./ai-source.js').ResolvedSource,
 ): Promise<AiRunResult<T>> {
   const { runOnSubscription, AI_SOURCE_LABEL } = await import('./ai-source.js');
-  const prompt = await ensurePrompt(workspaceId, task);
+  const importTask = task === 'KNOWLEDGE_IMPORT_EXTRACTION';
+  const prompt = importTask ? await importExtractionPrompt(workspaceId, opts.importExtractionPrompt) : await ensurePrompt(workspaceId, task);
   if (!prompt) throw new AppError('PROVIDER_NOT_CONFIGURED', `No active prompt for ${task}`, 400);
   const schema = AI_OUTPUT_SCHEMAS[task];
   const userPrompt = renderPrompt(prompt.userPromptTemplate, vars);
@@ -345,9 +391,9 @@ async function runAiOnSubscription<T>(
           workspaceId, task, provider: r.provider, model: `${label}${r.model ? ` (${r.model})` : ''}`.slice(0, 120), promptTemplateId: prompt.id,
           status: parsed.success ? 'SUCCEEDED' : 'SCHEMA_INVALID', usedFallback: false,
           inputTokens: r.usage?.inputTokens ?? 0, outputTokens: r.usage?.outputTokens ?? 0, costUsd: 0, costIsEstimate: false, latencyMs: Date.now() - started,
-          entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: redactForLog(userPrompt).slice(0, 1500),
-          output: (r.data ?? null) as Prisma.InputJsonValue,
-          errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+          entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: importTask ? null : redactForLog(userPrompt).slice(0, 1500),
+          output: importTask ? Prisma.JsonNull : (r.data ?? null) as Prisma.InputJsonValue,
+          errorMessage: parsed.success ? null : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${importTask ? i.code : i.message}`).join('; '),
         },
       });
       (await import('./usage.js')).meter({ workspaceId, metric: 'ai_requests', quantity: 1, key: `ai:${exec.id}` });
@@ -356,8 +402,8 @@ async function runAiOnSubscription<T>(
       user = `${userPrompt}\n\nYour previous answer failed validation (${exec.errorMessage}). Return output that matches the schema exactly.`;
     } catch (e) {
       lastError = (e as Error).message;
-      await db().aiExecution.create({ data: { workspaceId, task, provider: source.mode === 'claude_subscription' ? 'ANTHROPIC' : 'OPENAI', model: label, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: false, errorMessage: redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: redactForLog(userPrompt).slice(0, 1500) } });
-      throw new AppError('AI_SUBSCRIPTION_UNAVAILABLE', `${label}: ${lastError}`, 503);
+      await db().aiExecution.create({ data: { workspaceId, task, provider: source.mode === 'claude_subscription' ? 'ANTHROPIC' : 'OPENAI', model: label, promptTemplateId: prompt.id, status: 'FAILED', usedFallback: false, errorMessage: importTask ? 'Import extraction subscription request failed' : redactForLog(lastError).slice(0, 1000), entityType: opts.entity?.type, entityId: opts.entity?.id, ...att, inputPreview: importTask ? null : redactForLog(userPrompt).slice(0, 1500) } });
+      throw new AppError('AI_SUBSCRIPTION_UNAVAILABLE', importTask ? 'Import extraction subscription request failed' : `${label}: ${lastError}`, 503);
     }
   }
   throw new AppError('AI_OUTPUT_INVALID', `AI task ${task} failed on ${label}: ${lastError}`, 502);
@@ -473,7 +519,7 @@ export async function ensureDefaultRoutes(workspaceId: string) {
     const existing = await db().aiModelRoute.findUnique({ where: { workspaceId_task: { workspaceId, task } } });
     const model = primary.provider === 'ANTHROPIC' && FAST_TASKS.includes(task) ? SUGGESTED_MODELS.ANTHROPIC.fast : primary.defaultModel;
     if (!existing) {
-      await db().aiModelRoute.create({ data: { workspaceId, task, provider: primary.provider, model, useWorkspaceDefault: !!defaultName, fallbackProvider: secondary?.provider ?? null, fallbackModel: secondary?.defaultModel ?? null } });
+      await db().aiModelRoute.create({ data: { workspaceId, task, provider: primary.provider, model, maxOutputTokens: defaultOutputTokens(task), useWorkspaceDefault: !!defaultName, fallbackProvider: secondary?.provider ?? null, fallbackModel: secondary?.defaultModel ?? null } });
     } else if (!existing.fallbackProvider && secondary && secondary.provider !== existing.provider) {
       await db().aiModelRoute.update({ where: { id: existing.id }, data: { fallbackProvider: secondary.provider, fallbackModel: secondary.defaultModel } });
     }
@@ -512,7 +558,7 @@ export async function updateRoute(workspaceId: string, input: z.infer<typeof Rou
     provider: input.provider, model: input.model,
     useWorkspaceDefault: input.useWorkspaceDefault ?? false,
     fallbackProvider: input.fallbackProvider ?? null, fallbackModel: input.fallbackProvider ? input.fallbackModel ?? null : null,
-    temperature: input.temperature ?? null, maxOutputTokens: input.maxOutputTokens ?? 1500,
+    temperature: input.temperature ?? null, maxOutputTokens: input.maxOutputTokens ?? defaultOutputTokens(input.task),
     maxInputTokens: input.maxInputTokens ?? null,
     monthlyBudgetUsd: input.monthlyBudgetUsd ?? null,
   };

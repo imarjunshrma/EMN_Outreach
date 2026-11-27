@@ -1,3 +1,4 @@
+import { ImportExtractionOutput } from './knowledge-import.js';
 import { z } from 'zod';
 
 // Structured outputs for every AI task. Each model response is validated against these
@@ -135,6 +136,7 @@ export type CopilotReply = z.infer<typeof CopilotOutput>;
 export const AI_OUTPUT_SCHEMAS = {
   PERSONALIZATION: PersonalizationOutput,
   COPILOT: CopilotOutput,
+  KNOWLEDGE_IMPORT_EXTRACTION: ImportExtractionOutput,
   ICP_FROM_TEXT: IcpFromTextOutput,
   FACT_EXTRACTION: FactExtractionOutput,
   LEAD_QUALIFICATION: QualificationOutput,

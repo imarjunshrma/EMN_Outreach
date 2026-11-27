@@ -34,6 +34,7 @@ export const NAV: NavGroup[] = [
     { href: '/ai-studio', label: 'Overview', icon: Sparkles },
     { href: '/ai-studio/training', label: 'Outreach training', icon: BrainCircuit, keywords: 'strategy rules examples learning feedback' },
     { href: '/ai-studio/knowledge', label: 'Business knowledge', icon: BookOpen },
+    { href: '/ai-studio/imports', label: 'Knowledge importer', icon: Upload },
     { href: '/ai-studio/writing', label: 'Writing rules', icon: SlidersHorizontal },
     { href: '/ai-studio/research', label: 'Research rules', icon: FileSearch },
     { href: '/ai-studio/profiles', label: 'Prompt library', icon: Library },

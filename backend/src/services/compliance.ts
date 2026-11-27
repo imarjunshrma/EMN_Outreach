@@ -6,6 +6,7 @@ import { audit, publish, type Actor } from '../core/audit.js';
 import { evaluateCompliance, type LawfulBasisValue } from '../../../shared/src/compliance.js';
 import { verifyPayload } from '../core/crypto.js';
 import type { WorkspaceSettings } from './workspace.js';
+import { getImportExclusions } from './knowledge-import-apply.js';
 
 // Suppression list, unsubscribe processing and country rules.
 // Technical safeguards only — not legal advice.
@@ -163,6 +164,28 @@ export async function canContact(workspaceId: string, lead: { id?: string; email
     }
   }
   const sup = await isSuppressed(workspaceId, lead.emailNormalized);
+  if (!sup.suppressed && lead.id && await db().businessKnowledgeRecord.count({ where: { workspaceId, kind: 'EXCLUSION' } })) {
+    const prospect = await db().lead.findFirst({ where: { workspaceId, id: lead.id }, select: {
+      title: true, company: { select: { industry: true, country: true, customFields: true } },
+    } });
+    const fields = prospect?.company?.customFields as Record<string, unknown> | undefined;
+    const exclusions = await getImportExclusions(workspaceId, {
+      industry: prospect?.company?.industry, companyType: typeof fields?.companyType === 'string' ? fields.companyType : null,
+      title: prospect?.title, geography: lead.country ?? prospect?.company?.country,
+    });
+    const conditional = exclusions.filter(rule => rule.conditions.length > 0);
+    const assessment = conditional.length ? await db().leadScore.findFirst({
+      where: { workspaceId, leadId: lead.id, ...(opts.icpId ? { icpId: opts.icpId } : {}) },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { reasons: true },
+    }) : null;
+    const assessed = Array.isArray(assessment?.reasons) ? assessment.reasons : [];
+    for (const exclusion of exclusions) {
+      if (exclusion.match || exclusion.conditions.some(condition => !assessed.some(reason =>
+        reason !== null && typeof reason === 'object' && !Array.isArray(reason) && reason.criterion === condition && reason.met === false))) {
+        reasons.push(`workspace exclusion applies or requires review (${exclusion.name})`);
+      }
+    }
+  }
   if (sup.suppressed) reasons.push(`suppressed (${sup.reason})`);
   if (['UNSUBSCRIBED', 'BOUNCED', 'CUSTOMER', 'DISQUALIFIED', 'NOT_INTERESTED'].includes(lead.status)) reasons.push(`lead status ${lead.status}`);
   const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { postalAddress: true, settings: true } });

@@ -54,7 +54,7 @@ export interface RouteDef<B = unknown, Q = unknown> {
   query?: ZodType<Q>;
   /** Optional parser run after authentication/tenant authorization and before body validation. */
   prepare?: (ctx: Ctx<any, any>) => Promise<void>;
-  rateLimit?: { limit: number; windowSec: number; key?: 'ip' | 'user' | 'workspace' };
+  rateLimit?: { limit: number; windowSec: number; key?: 'ip' | 'user' | 'workspace'; timeoutMs?: number };
   /** If true the handler writes the response itself (streams, redirects, files). */
   raw?: boolean;
   status?: number;
@@ -113,7 +113,8 @@ export function mountRoutes(app: Express) {
 
         if (def.rateLimit) {
           const who = def.rateLimit.key === 'user' ? auth?.userId : def.rateLimit.key === 'workspace' ? String(req.params.workspaceId ?? '') : req.ip;
-          const r = await rateLimit(`${def.method}:${def.path}:${who ?? req.ip}`, def.rateLimit.limit, def.rateLimit.windowSec);
+          const decision = rateLimit(`${def.method}:${def.path}:${who ?? req.ip}`, def.rateLimit.limit, def.rateLimit.windowSec);
+          const r = def.rateLimit.timeoutMs ? await boundedQuotaCheck(decision, def.rateLimit.timeoutMs) : await decision;
           res.setHeader('X-RateLimit-Remaining', String(Math.max(0, r.remaining)));
           if (!r.allowed) {
             res.setHeader('Retry-After', String(r.resetSec));
@@ -218,6 +219,19 @@ export function mountRoutes(app: Express) {
         next(e);
       }
     });
+  }
+}
+
+async function boundedQuotaCheck(decision: ReturnType<typeof rateLimit>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unavailable = new AppError('IMPORT_ADMISSION_UNAVAILABLE', 'Upload admission is temporarily unavailable. Retry shortly.', 503);
+  try {
+    return await Promise.race([
+      decision.catch(() => { throw unavailable; }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unavailable), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

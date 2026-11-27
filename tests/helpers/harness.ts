@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../../backend/src/app.js';
@@ -64,7 +65,12 @@ export async function createUserSession(email: string, role: 'OWNER' | 'ADMIN' |
   }
   await db().workspaceMember.create({ data: { workspaceId: wsId, userId: user.id, role } });
   const agent = request.agent(getApp());
-  const res = await agent.post('/api/v1/auth/login').send({ email, password: 'CorrectHorse123!' });
+  const login = agent.post('/api/v1/auth/login');
+  if (process.env.QUEUE_PREFIX === 'outvexa-import-integration') {
+    const address = createHash('sha256').update(email).digest();
+    login.set('X-Forwarded-For', `198.18.${address[0]}.${address[1]}`);
+  }
+  const res = await login.send({ email, password: 'CorrectHorse123!' });
   if (res.status !== 200) throw new Error(`login failed ${res.status} ${JSON.stringify(res.body)}`);
   return { agent, csrf: res.body.csrfToken, userId: user.id, workspaceId: wsId, organizationId: orgId };
 }

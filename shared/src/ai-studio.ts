@@ -19,6 +19,20 @@ import { z } from 'zod';
 const str = (max: number) => z.string().max(max);
 const list = (maxItems: number, maxLen = 500) => z.array(z.string().trim().min(1).max(maxLen)).max(maxItems);
 
+export const CommercialOfferSchema = z.object({
+  name: str(200),
+  description: str(2000).default(''),
+  price: str(200).default(''),
+  externalId: str(200).optional(),
+  currency: str(40).optional(),
+  billingModel: str(200).optional(),
+  deliverables: list(40).optional(),
+  duration: str(200).optional(),
+  conditions: str(1000).optional(),
+  eligibility: str(1000).optional(),
+  availability: str(500).optional(),
+});
+
 export const KnowledgeSchema = z.object({
   companyName: str(200).default(''),
   website: str(300).default(''),
@@ -31,7 +45,7 @@ export const KnowledgeSchema = z.object({
   targetAudience: str(3000).default(''),
   competitors: z.array(z.object({ name: str(200), notes: str(1000).default('') })).max(30).default([]),
   customerProfiles: str(5000).default(''),
-  offers: z.array(z.object({ name: str(200), description: str(2000).default(''), price: str(200).default('') })).max(30).default([]),
+  offers: z.array(CommercialOfferSchema).max(30).default([]),
   pricingNotes: str(3000).default(''),
 });
 export type Knowledge = z.infer<typeof KnowledgeSchema>;
@@ -80,6 +94,14 @@ export const ResearchSchema = z.object({
   mustNotInfer: list(50).default(['health', 'religion', 'politics', 'ethnicity', 'sexual orientation', 'family situation', 'personal finances', 'age']),
   onMissing: z.enum(['hold_for_research', 'use_role_and_company_only', 'skip_lead']).default('hold_for_research'),
   customInstructions: str(10000).default(''),
+  importedRules: z.record(str(220), z.object({
+    name: str(200),
+    priorities: list(40).default([]),
+    excludedSources: list(40).default([]),
+    verificationRequirements: list(40).default([]),
+    evidenceRequirements: str(5000).optional(),
+    depth: str(500).optional(),
+  })).optional(),
 });
 export type Research = z.infer<typeof ResearchSchema>;
 
@@ -280,7 +302,13 @@ export function knowledgeText(k: Knowledge, documents: Array<{ title: string; te
   if (unverified) out.push(`(${unverified} unverified case studies/achievements exist and must NOT be mentioned.)`);
   if (k.targetAudience) out.push(`Who we serve: ${k.targetAudience}`);
   if (k.customerProfiles) out.push(`Customer profiles: ${k.customerProfiles}`);
-  if (k.offers.length) out.push('Offers:', ...k.offers.map((o) => `- ${o.name}${o.description ? `: ${o.description}` : ''}${o.price ? ` (price: ${o.price})` : ''}`));
+  if (k.offers.length) out.push('Offers:', ...k.offers.map((o) => [
+    `- ${o.name}${o.description ? `: ${o.description}` : ''}${o.price ? ` (price: ${o.price}${o.currency ? ` ${o.currency}` : ''})` : ''}`,
+    o.billingModel && `Billing: ${o.billingModel}`,
+    o.deliverables?.length && `Deliverables: ${o.deliverables.join(', ')}`,
+    o.duration && `Duration: ${o.duration}`, o.conditions && `Conditions: ${o.conditions}`,
+    o.eligibility && `Eligibility: ${o.eligibility}`, o.availability && `Availability: ${o.availability}`,
+  ].filter(Boolean).join(' | ')));
   if (k.pricingNotes) out.push(`Pricing notes: ${k.pricingNotes}`);
   if (k.competitors.length) out.push('Competitors (never disparage them by name):', ...k.competitors.map((c) => `- ${c.name}${c.notes ? `: ${c.notes}` : ''}`));
   let budget = maxDocChars;

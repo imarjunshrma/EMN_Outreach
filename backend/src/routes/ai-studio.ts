@@ -1,3 +1,4 @@
+import './knowledge-records.js';
 import { z } from 'zod';
 import multer from 'multer';
 import type { Request, Response } from 'express';
@@ -11,6 +12,7 @@ import * as brain from '../services/outreach-brain.js';
 import * as businessKnowledge from '../services/business-knowledge.js';
 import * as businessOnboarding from '../services/business-onboarding.js';
 import * as engine from '../services/engine.js';
+import * as knowledgeImport from '../services/knowledge-import.js';
 import { KnowledgeSchema, WritingSchema, ResearchSchema } from '../../../shared/src/ai-studio.js';
 import { PROMPT_VARIABLES, lintPromptTemplate, EXAMPLE_PROFILE_PROMPT } from '../../../shared/src/prompt-builder.js';
 
@@ -26,6 +28,49 @@ function readDoc(req: Request, res: Response): Promise<{ file?: { originalname: 
 const KindParam = z.enum(['knowledge', 'writing', 'research']);
 const kindOf = (k: string) => KindParam.parse(k).toUpperCase() as 'KNOWLEDGE' | 'WRITING' | 'RESEARCH';
 const SaveBody = z.object({ data: z.unknown(), changeNote: z.string().max(500).optional() });
+
+route({ method: 'get', path: '/w/:workspaceId/ai-studio/imports', tag: 'AI Studio', summary: 'List knowledge imports', auth: 'workspace', role: 'VIEWER', handler: c => knowledgeImport.listImports(c.workspaceId) });
+route({ method: 'get', path: '/w/:workspaceId/ai-studio/imports/template.xlsx', tag: 'AI Studio', summary: 'Download the versioned Outreach Brain workbook template', auth: 'workspace', role: 'VIEWER', raw: true, handler: async c => { c.res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); c.res.setHeader('Content-Disposition', 'attachment; filename="outvexa-outreach-brain-template-v2.xlsx"'); c.res.send(knowledgeImport.templateWorkbook()); } });
+route({ method: 'get', path: '/w/:workspaceId/ai-studio/imports/:id', tag: 'AI Studio', summary: 'Inspect a knowledge import', auth: 'workspace', role: 'VIEWER', handler: c => knowledgeImport.getImport(c.workspaceId, c.params.id) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/imports', tag: 'AI Studio', summary: 'Upload knowledge files for review', auth: 'workspace', role: 'ADMIN', status: 202, rateLimit: { limit: 20, windowSec: 3600, key: 'workspace', timeoutMs: 1500 }, handler: async c => {
+  let totalBytes = 0;
+  let tooLarge = false;
+  const memory = multer.memoryStorage();
+  const storage: multer.StorageEngine = {
+    _handleFile(req, file, done) {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      file.stream.on('data', (chunk: Buffer) => {
+        totalBytes += chunk.length;
+        tooLarge ||= totalBytes > knowledgeImport.MAX_IMPORT_TOTAL_BYTES;
+        if (tooLarge) {
+          chunks.length = 0;
+          return;
+        }
+        chunks.push(chunk);
+        bytes += chunk.length;
+      });
+      file.stream.once('end', () => {
+        if (tooLarge) return done(new AppError('VALIDATION_FAILED', 'The combined upload exceeds 40 MB', 413));
+        done(null, { buffer: Buffer.concat(chunks, bytes), size: bytes });
+      });
+    },
+    _removeFile: memory._removeFile,
+  };
+  const receive = multer({ storage, limits: { fileSize: knowledgeImport.MAX_IMPORT_BYTES, files: 20, fields: 0, parts: 21 } }).array('files', 20);
+  const files = await new Promise<Express.Multer.File[]>((resolve, reject) => {
+    receive(c.req, c.res, (error) => {
+      if (error) return reject(error instanceof AppError ? error : new AppError('VALIDATION_FAILED', 'Invalid import upload or file exceeds 20 MB', 400));
+      resolve((c.req as Request & { files?: Express.Multer.File[] }).files ?? []);
+    });
+  });
+  return knowledgeImport.createImport(c.workspaceId, files, c.actor, String(c.req.headers['idempotency-key'] ?? '') || undefined);
+} });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/import-items/:id/decision', tag: 'AI Studio', summary: 'Approve or reject an import item', auth: 'workspace', role: 'ADMIN', body: knowledgeImport.ReviewSchema, handler: c => knowledgeImport.decideItem(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/imports/:id/decisions', tag: 'AI Studio', summary: 'Reject or skip selected import items', auth: 'workspace', role: 'ADMIN', body: knowledgeImport.BulkReviewSchema, handler: c => knowledgeImport.decideItems(c.workspaceId, c.params.id, c.body, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/imports/:id/cancel', tag: 'AI Studio', summary: 'Cancel a queued knowledge import', auth: 'workspace', role: 'ADMIN', handler: c => knowledgeImport.cancelImport(c.workspaceId, c.params.id, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/imports/:id/retry', tag: 'AI Studio', summary: 'Retry a failed import step', auth: 'workspace', role: 'ADMIN', handler: c => knowledgeImport.retryImport(c.workspaceId, c.params.id, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/ai-studio/imports/:id/apply', tag: 'AI Studio', summary: 'Apply approved knowledge import items', auth: 'workspace', role: 'ADMIN', handler: c => knowledgeImport.applyApproved(c.workspaceId, c.params.id, c.actor) });
 
 // ---------------------------------------------------------------- approved workspace service catalog and evidence-backed EMN proof
 route({ method: 'get', path: '/w/:workspaceId/ai-studio/services', tag: 'AI Studio', summary: 'List workspace services and immutable versions', auth: 'workspace', role: 'VIEWER', handler: (c) => businessKnowledge.listServices(c.workspaceId) });

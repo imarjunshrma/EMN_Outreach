@@ -7,6 +7,7 @@ import { db } from '../../backend/src/core/db.js';
 import { QUEUES, enqueue, type QueueName } from '../../backend/src/core/queues.js';
 import { logError } from '../../backend/src/core/audit.js';
 import { logger } from '../../backend/src/core/logger.js';
+import { importStages } from '../../backend/src/services/knowledge-import.js';
 import * as engine from '../../backend/src/services/engine.js';
 import * as accounts from '../../backend/src/services/accounts.js';
 import * as inbox from '../../backend/src/services/inbox.js';
@@ -113,6 +114,9 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'research.company': async (j) => intel.runResearch(s(j.data.workspaceId), { companyId: s(j.data.companyId) }),
   },
   [QUEUES.imports]: {
+    ...Object.fromEntries(importStages.map(stage => [stage, async (j: Job<Data>) => (
+      await import('../../backend/src/services/knowledge-import-worker.js')
+    ).processImportJob(j)])),
     'import.csv': async (j) => leads.processImport(s(j.data.workspaceId), s(j.data.importId)),
   },
   [QUEUES.verify]: {
@@ -159,6 +163,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'tenant.purge': async () => tenancy.purgeDueTenants(),
     'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
     'emailVerification.datasets.refresh': async () => (await import('../../backend/src/services/email-verification-datasets.js')).refreshDisposableDataset(),
+    'knowledge.import.recover': async () => (await import('../../backend/src/services/knowledge-import.js')).recoverImportJobs(),
     'knowledge.website.refresh': async (j) => (await import('../../backend/src/services/business-onboarding.js')).refreshBusinessWebsiteSources(typeof j.data.workspaceId === 'string' ? j.data.workspaceId : undefined),
     'billing.reconcile': async () => (await import('../../backend/src/services/billing.js')).reconcileSubscriptions(),
   },

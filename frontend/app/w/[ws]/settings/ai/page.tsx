@@ -20,7 +20,7 @@ const AI_PROVIDERS = [
   ['OLLAMA', 'Ollama (local)'], ['CUSTOM_OPENAI', 'Custom OpenAI-compatible'],
 ] as const;
 
-function useProviderModels(configured: any[] | undefined) {
+function useProviderModels(configured: ReadonlyArray<{ provider: string }> | undefined) {
   const enabled = (id: string) => configured?.some((p) => p.provider === id);
   const openai = useWsQuery<{ models: string[]; warning: string | null }>(enabled('OPENAI') ? '/ai/providers/OPENAI/models' : null);
   const anthropic = useWsQuery<{ models: string[]; warning: string | null }>(enabled('ANTHROPIC') ? '/ai/providers/ANTHROPIC/models' : null);
@@ -74,12 +74,13 @@ function Providers() {
   const [customModels, setCustomModels] = useState<Record<string, boolean>>({});
   useEffect(() => { if (q.data) { const next: typeof forms = {}; for (const [id] of AI_PROVIDERS) { const p = q.data.providers.find((x) => x.provider === id); next[id] = { apiKey: '', defaultModel: p?.defaultModel ?? q.data.suggestions[id]?.quality ?? '', baseUrl: p?.baseUrl ?? '', isEnabled: p?.isEnabled ?? true }; } setForms(next); } }, [q.data]);
   const save = useWsMutation<string>((p) => ({ path: '/ai/providers', method: 'PUT', body: { provider: p, defaultModel: forms[p].defaultModel, baseUrl: forms[p].baseUrl || null, isEnabled: forms[p].isEnabled, ...(forms[p].apiKey ? { apiKey: forms[p].apiKey } : {}) } }), { success: 'Saved', onSuccess: () => setForms((f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, { ...v, apiKey: '' }]))) });
-  const test = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}/test`, body: {} }), { success: (r: any) => (r.ok ? 'Connection OK' : `Failed: ${r.error}`) });
+  const test = useWsMutation<string, { ok: true } | { ok: false; error: string }>((p) => ({ path: `/ai/providers/${p}/test`, body: {} }), { success: (r) => (r.ok ? 'Connection OK' : `Failed: ${r.error}`) });
   const del = useWsMutation<string>((p) => ({ path: `/ai/providers/${p}`, method: 'DELETE' }), { success: 'Removed' });
   const setDefault = useWsMutation<{ provider: string | null; applyToAll: boolean }>((body) => ({ path: '/ai/default-provider', method: 'PUT', body }), { success: 'Workspace default saved' });
   const [defaultChoice, setDefaultChoice] = useState('');
   const [applyDefault, setApplyDefault] = useState(false);
-  useEffect(() => { if (q.data) setDefaultChoice(q.data.defaultProvider ?? ''); }, [q.data?.defaultProvider]);
+  const savedDefaultProvider = q.data?.defaultProvider;
+  useEffect(() => { if (savedDefaultProvider !== undefined) setDefaultChoice(savedDefaultProvider ?? ''); }, [savedDefaultProvider]);
   return (
     <QueryView q={q}>
       {(d) => (

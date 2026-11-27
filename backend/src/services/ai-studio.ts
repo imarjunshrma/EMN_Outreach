@@ -17,32 +17,33 @@ import { QUALITY_POLICY_VERSION } from '../../../shared/src/quality.js';
 type Kind = 'KNOWLEDGE' | 'WRITING' | 'RESEARCH';
 const SCHEMAS = { KNOWLEDGE: KnowledgeSchema, WRITING: WritingSchema, RESEARCH: ResearchSchema } as const;
 
-export async function getConfig(workspaceId: string, kind: 'KNOWLEDGE'): Promise<{ data: Knowledge; version: number; versionId: string | null }>;
-export async function getConfig(workspaceId: string, kind: 'WRITING'): Promise<{ data: Writing; version: number; versionId: string | null }>;
-export async function getConfig(workspaceId: string, kind: 'RESEARCH'): Promise<{ data: Research; version: number; versionId: string | null }>;
-export async function getConfig(workspaceId: string, kind: Kind) {
-  const v = await db().aiConfigVersion.findFirst({ where: { workspaceId, kind, isActive: true }, orderBy: { version: 'desc' } });
+export async function getConfig(workspaceId: string, kind: 'KNOWLEDGE', client?: Prisma.TransactionClient): Promise<{ data: Knowledge; version: number; versionId: string | null }>;
+export async function getConfig(workspaceId: string, kind: 'WRITING', client?: Prisma.TransactionClient): Promise<{ data: Writing; version: number; versionId: string | null }>;
+export async function getConfig(workspaceId: string, kind: 'RESEARCH', client?: Prisma.TransactionClient): Promise<{ data: Research; version: number; versionId: string | null }>;
+export async function getConfig(workspaceId: string, kind: Kind, client: Prisma.TransactionClient = db()) {
+  const v = await client.aiConfigVersion.findFirst({ where: { workspaceId, kind, isActive: true }, orderBy: { version: 'desc' } });
   const parsed = SCHEMAS[kind].safeParse(v?.data ?? {});
   let data = parsed.success ? parsed.data : SCHEMAS[kind].parse({});
   if (kind === 'KNOWLEDGE' && !v) {
     // Upgrade path: seed knowledge from the legacy "offer facts" workspace setting.
-    const ws = await db().workspace.findUnique({ where: { id: workspaceId }, select: { name: true, settings: true } });
+    const ws = await client.workspace.findUnique({ where: { id: workspaceId }, select: { name: true, settings: true } });
     const offer = (ws?.settings as { offerFacts?: string } | null)?.offerFacts ?? '';
     data = { ...(data as Knowledge), companyName: ws?.name ?? '', description: offer };
   }
   return { data, version: v?.version ?? 0, versionId: v?.id ?? null };
 }
 
-export async function saveConfig(workspaceId: string, kind: Kind, input: unknown, changeNote: string | undefined, actor: Actor) {
+export async function saveConfig(workspaceId: string, kind: Kind, input: unknown, changeNote: string | undefined, actor: Actor, transaction?: Prisma.TransactionClient) {
   const data = SCHEMAS[kind].parse(input);
-  const last = await db().aiConfigVersion.findFirst({ where: { workspaceId, kind }, orderBy: { version: 'desc' } });
-  const version = (last?.version ?? 0) + 1;
-  const v = await db().$transaction(async (tx) => {
+  const write = async (tx: Prisma.TransactionClient) => {
+    const last = await tx.aiConfigVersion.findFirst({ where: { workspaceId, kind }, orderBy: { version: 'desc' } });
+    const version = (last?.version ?? 0) + 1;
     await tx.aiConfigVersion.updateMany({ where: { workspaceId, kind }, data: { isActive: false } });
     return tx.aiConfigVersion.create({ data: { workspaceId, kind, version, data: data as Prisma.InputJsonValue, isActive: true, changeNote: changeNote ?? null, createdById: actor.userId ?? null } });
-  });
-  await audit(workspaceId, actor, 'ai_studio.config_saved', { type: 'ai_config', id: v.id }, { kind, version });
-  return { data, version, versionId: v.id };
+  };
+  const v = transaction ? await write(transaction) : await db().$transaction(write);
+  await audit(workspaceId, actor, 'ai_studio.config_saved', { type: 'ai_config', id: v.id }, { kind, version: v.version }, transaction);
+  return { data, version: v.version, versionId: v.id };
 }
 
 export async function listConfigVersions(workspaceId: string, kind: Kind) {
@@ -235,7 +236,7 @@ export interface AiSnapshot {
   knowledge: { versionId: string | null; version: number; data: Knowledge };
   writing: { versionId: string | null; version: number; data: Writing };
   research: { versionId: string | null; version: number; data: Research };
-  documents: Array<{ id: string; title: string; text: string }>;
+  documents: Array<{ id: string; title: string; text: string; usage?: 'CAMPAIGN_PREFERENCE' }>;
   outreachRules: Array<{ id: string; title: string; description: string; category: string; priority: string; condition: string | null; triggerTerms: string[] }>;
   outreachExamples: Array<{ id: string; name: string; content: string; correctedContent: string | null; category: string; polarity: string; explanation: string | null; tags: string[] }>;
   selectedServices: Array<{ serviceVersionId: string; serviceId: string; name: string; version: number; description: string; targetIndustries: string[]; excludedIndustries: string[]; targetGeographies: string[]; excludedGeographies: string[]; minEmployeeCount: number | null; maxEmployeeCount: number | null; targetCustomerProfiles: string[]; customerProblems: string[]; desiredOutcomes: string[]; deliverables: string[]; eligibilityCriteria: string[]; exclusions: string[]; exclusionRules: StructuredExclusionRule[]; commercialBoundaries: string[]; isPreferred: boolean; proof: Array<{ id: string; claim: string; description: string | null; sourceUrl: string | null; sourceType?: string; verificationMethod?: string | null }> }>;
@@ -246,17 +247,32 @@ export interface AiSnapshot {
 
 const DOC_BUDGET = 12_000;
 
-async function activeDocuments(workspaceId: string) {
+export async function activeDocuments(workspaceId: string) {
   const docs = await db().knowledgeDocument.findMany({ where: { workspaceId, isActive: true }, orderBy: { updatedAt: 'desc' }, select: { id: true, title: true, text: true } });
+  const imports = docs.length ? await db().knowledgeImportItem.findMany({
+    where: { workspaceId, status: 'APPLIED', destinationDocumentId: { in: docs.map(d => d.id) }, applicationResult: { not: 'UNCHANGED' } },
+    select: { destinationDocumentId: true, entityType: true, classification: true },
+  }) : [];
+  const imported = new Map(imports.map(row => [row.destinationDocumentId, row]));
   let budget = DOC_BUDGET;
-  const out: Array<{ id: string; title: string; text: string }> = [];
+  const documents: AiSnapshot['documents'] = [];
+  let preferenceCount = 0;
   for (const d of docs) {
-    if (budget <= 0) break;
+    const item = imported.get(d.id);
+    if (item?.entityType === 'CAMPAIGN_PREFERENCE') {
+      if (preferenceCount < 6) {
+        documents.push({ ...d, text: d.text.slice(0, 1200), usage: 'CAMPAIGN_PREFERENCE' });
+        preferenceCount++;
+      }
+      continue;
+    }
+    if (item) continue;
+    if (budget <= 0) continue;
     const t = d.text.slice(0, budget);
     budget -= t.length;
-    out.push({ id: d.id, title: d.title, text: t });
+    documents.push({ id: d.id, title: d.title, text: t });
   }
-  return out;
+  return documents;
 }
 
 /** Live configuration for a campaign (what a new approval would freeze). */

@@ -25,6 +25,8 @@ export default function AiStudio() {
             <Card title="Configure">
               <div className="grid gap-3 md:grid-cols-3">
                 {link('/knowledge', 'Business knowledge', `Company, services, offers, verified case studies and achievements, competitors, documents (${d.activeDocuments} active).`)}
+                {link('/imports', 'Knowledge importer', 'Upload workbooks and documents, review extracted records, and apply approved changes.')}
+                {link('/knowledge-records', 'Imported business records', 'Browse applied records and trace changes back to their sources.')}
                 {link('/writing', 'Writing instructions', 'Tone, style, length, CTA, words to avoid, forbidden claims, examples and a large custom-instructions editor.')}
                 {link('/research', 'Research instructions', 'What to research about people and companies, permitted sources, signals, evidence rules and what never to infer.')}
                 {link('/training', 'AI Outreach Training', `${d.pendingSuggestions} learning suggestion(s) · manage customer rules, examples and feedback.`)}

@@ -75,6 +75,7 @@ enum AiProviderType {
 }
 
 enum AiTask {
+  KNOWLEDGE_IMPORT_EXTRACTION
   PERSONALIZATION
   COPILOT
   ICP_FROM_TEXT
@@ -533,6 +534,10 @@ model Workspace {
   jobRuns                     JobRun[]
   errorLogs                   ErrorLog[]
   aiConfigVersions            AiConfigVersion[]
+  businessKnowledgeRecords    BusinessKnowledgeRecord[]
+  knowledgeImportSessions     KnowledgeImportSession[]
+  knowledgeImportFiles        KnowledgeImportFile[]
+  knowledgeImportItems        KnowledgeImportItem[]
   knowledgeDocuments          KnowledgeDocument[]
   promptProfiles              PromptProfile[]
   promptProfileVersions       PromptProfileVersion[]
@@ -1285,17 +1290,35 @@ model IdealCustomerProfile {
   criteria    Json // IcpCriteriaSchema
   minScore    Int      @default(60)
   isActive    Boolean  @default(true)
+  version     Int      @default(1)
   createdAt   DateTime @default(now()) @db.Timestamptz(3)
   updatedAt   DateTime @updatedAt @db.Timestamptz(3)
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   scores    LeadScore[]
   searches  ProspectSearch[]
+  revisions IdealCustomerProfileRevision[]
 
   aiInstructions String?
   campaigns      Campaign[]
 
   @@unique([workspaceId, name])
+  @@unique([workspaceId, id])
+}
+
+model IdealCustomerProfileRevision {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  icpId       String   @db.Uuid
+  version     Int
+  data        Json
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  icp IdealCustomerProfile @relation(fields: [workspaceId, icpId], references: [workspaceId, id], onDelete: Cascade)
+
+  @@unique([icpId, version])
+  @@index([workspaceId, icpId])
 }
 
 model ProspectSearch {
@@ -2157,6 +2180,152 @@ model KnowledgeDocument {
 
   @@unique([workspaceId, id])
   @@index([workspaceId, isActive])
+}
+
+enum KnowledgeImportStatus {
+  UPLOADED
+  PROCESSING
+  REVIEW
+  READY
+  APPLIED
+  FAILED
+  CANCELLED
+}
+
+enum KnowledgeImportItemStatus {
+  CREATE
+  UPDATE
+  SKIP
+  NEEDS_REVIEW
+  CONFLICT
+  APPROVED
+  REJECTED
+  APPLIED
+  FAILED
+}
+
+model KnowledgeImportSession {
+  id              String                @id @default(uuid()) @db.Uuid
+  workspaceId     String                @db.Uuid
+  createdById     String?               @db.Uuid
+  status          KnowledgeImportStatus @default(UPLOADED)
+  templateVersion String?
+  idempotencyKey  String?
+  errorSummary    String?
+  processingStep  String?
+  progress        Int                   @default(0)
+  run             Int                   @default(0)
+  applyActor      Json?
+  extractionRoute Json?
+  createdAt       DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime              @updatedAt @db.Timestamptz(3)
+  workspace       Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  items           KnowledgeImportItem[]
+  files           KnowledgeImportFile[]
+
+  @@unique([workspaceId, id])
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, createdAt])
+}
+
+model KnowledgeImportFile {
+  id          String                 @id @default(uuid()) @db.Uuid
+  workspaceId String                 @db.Uuid
+  sessionId   String                 @db.Uuid
+  fileName    String
+  mimeType    String
+  storageKey  String?
+  sha256      String
+  byteCount   Int
+  content     Bytes?
+  parsedRows  Json?
+  extracted   Json?
+  error       String?
+  status      String                 @default("PENDING")
+  createdAt   DateTime               @default(now()) @db.Timestamptz(3)
+  workspace   Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  session     KnowledgeImportSession @relation(fields: [workspaceId, sessionId], references: [workspaceId, id], onDelete: Cascade)
+  items       KnowledgeImportItem[]
+
+  @@unique([workspaceId, sessionId, id])
+  @@index([workspaceId, sha256])
+  @@index([workspaceId, sessionId])
+}
+
+model KnowledgeImportItem {
+  id             String                    @id @default(uuid()) @db.Uuid
+  workspaceId    String                    @db.Uuid
+  sessionId      String                    @db.Uuid
+  fileId         String?                   @db.Uuid
+  entityType     String
+  destination    String
+  status         KnowledgeImportItemStatus @default(NEEDS_REVIEW)
+  sourceLocator  String?
+  sourceExcerpt  String?
+  sourceMetadata Json?
+  payload        Json
+  existingValue  Json?
+  proposedValue  Json?
+  confidence     Float?
+  conflictReason String?
+  extractionKey  String?
+  stableKey      String?
+  classification String?
+  verificationStatus String?
+  relationships  Json?
+  mappingExplanation String?
+  duplicateCandidates Json?
+  reviewNote     String?
+  destinationEntityId String?
+  destinationDocumentId String?
+  applicationResult String?
+  error          String?
+  updatedAt      DateTime                  @default(now()) @updatedAt @db.Timestamptz(3)
+  appliedAt      DateTime?                 @db.Timestamptz(3)
+  createdAt      DateTime                  @default(now()) @db.Timestamptz(3)
+  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  session        KnowledgeImportSession    @relation(fields: [workspaceId, sessionId], references: [workspaceId, id], onDelete: Cascade)
+  file           KnowledgeImportFile?      @relation(fields: [workspaceId, sessionId, fileId], references: [workspaceId, sessionId, id], onDelete: NoAction)
+
+  @@unique([sessionId, extractionKey])
+  @@index([workspaceId, sessionId, status])
+}
+
+/// Workspace knowledge records without a dedicated application model, with immutable revisions.
+model BusinessKnowledgeRecord {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  kind        String
+  stableKey   String
+  name        String
+  domain      String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  revisions BusinessKnowledgeRevision[]
+
+  @@unique([workspaceId, id])
+  @@unique([workspaceId, kind, stableKey])
+  @@index([workspaceId, kind, name])
+  @@index([workspaceId, kind, domain])
+}
+
+model BusinessKnowledgeRevision {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  recordId    String   @db.Uuid
+  version     Int
+  data        Json
+  provenance  Json
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  record BusinessKnowledgeRecord @relation(fields: [workspaceId, recordId], references: [workspaceId, id], onDelete: Cascade)
+
+  @@unique([recordId, version])
+  @@index([workspaceId, recordId])
 }
 
 /// Reusable custom prompt profile (prompt builder). Content lives in immutable versions.

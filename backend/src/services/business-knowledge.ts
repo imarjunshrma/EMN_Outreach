@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { db } from '../core/db.js';
+import { db, type Prisma } from '../core/db.js';
 import { AppError, NotFound } from '../core/errors.js';
 import { audit, type Actor } from '../core/audit.js';
 import { StructuredExclusionRuleSchema } from '../../../shared/src/service-eligibility.js';
@@ -31,7 +31,7 @@ export const ProofCreateSchema = z.object({
   knowledgeDocumentId: z.string().uuid().nullable().optional(),
 });
 
-function slugFor(name: string) {
+export function slugFor(name: string) {
   return name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 120);
 }
 function assertEmployeeRange(data: { minEmployeeCount: number | null; maxEmployeeCount: number | null }) {
@@ -45,31 +45,33 @@ export async function listServices(workspaceId: string) {
   });
 }
 
-export async function createService(workspaceId: string, input: z.infer<typeof ServiceCreateSchema>, actor: Actor) {
+export async function createService(workspaceId: string, input: z.infer<typeof ServiceCreateSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
   const { name, changeNote, ...data } = ServiceCreateSchema.parse(input);
   assertEmployeeRange(data);
   const slug = slugFor(name);
   if (!slug) throw new AppError('VALIDATION_FAILED', 'Service name must contain letters or numbers', 400);
-  const duplicate = await db().businessService.findFirst({ where: { workspaceId, slug } });
+  const duplicate = await client.businessService.findFirst({ where: { workspaceId, slug } });
   if (duplicate) throw new AppError('CONFLICT', 'A service with this name already exists in the workspace', 409);
-  const service = await db().businessService.create({ data: {
+  const service = await client.businessService.create({ data: {
     workspaceId, name, slug, createdById: actor.userId ?? null,
     // The nested relation supplies both serviceId and workspaceId from its parent.
     // Passing workspaceId here is rejected by Prisma's nested create input.
     versions: { create: { version: 1, status: 'DRAFT', ...data, changeNote: changeNote ?? null, createdById: actor.userId ?? null } },
   }, include: { versions: true } });
-  await audit(workspaceId, actor, 'business_service.created', { type: 'business_service', id: service.id }, { version: 1 });
+  await audit(workspaceId, actor, 'business_service.created', { type: 'business_service', id: service.id }, { version: 1 }, transaction);
   return service;
 }
 
-export async function createServiceVersion(workspaceId: string, serviceId: string, input: z.infer<typeof ServiceVersionInputSchema>, actor: Actor) {
-  const service = await db().businessService.findFirst({ where: { id: serviceId, workspaceId, isArchived: false } });
+export async function createServiceVersion(workspaceId: string, serviceId: string, input: z.infer<typeof ServiceVersionInputSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const service = await client.businessService.findFirst({ where: { id: serviceId, workspaceId, isArchived: false } });
   if (!service) throw NotFound('Business service');
   const data = ServiceVersionInputSchema.parse(input);
   assertEmployeeRange(data);
-  const last = await db().businessServiceVersion.findFirst({ where: { serviceId, workspaceId }, orderBy: { version: 'desc' }, select: { version: true } });
-  const version = await db().businessServiceVersion.create({ data: { workspaceId, serviceId, version: (last?.version ?? 0) + 1, status: 'DRAFT', ...data, createdById: actor.userId ?? null } });
-  await audit(workspaceId, actor, 'business_service.version_created', { type: 'business_service_version', id: version.id }, { serviceId, version: version.version });
+  const last = await client.businessServiceVersion.findFirst({ where: { serviceId, workspaceId }, orderBy: { version: 'desc' }, select: { version: true } });
+  const version = await client.businessServiceVersion.create({ data: { workspaceId, serviceId, version: (last?.version ?? 0) + 1, status: 'DRAFT', ...data, createdById: actor.userId ?? null } });
+  await audit(workspaceId, actor, 'business_service.version_created', { type: 'business_service_version', id: version.id }, { serviceId, version: version.version }, transaction);
   return version;
 }
 
@@ -132,14 +134,15 @@ export async function archiveService(workspaceId: string, serviceId: string, act
   return { ok: true };
 }
 
-export async function addProof(workspaceId: string, input: z.infer<typeof ProofCreateSchema>, actor: Actor) {
+export async function addProof(workspaceId: string, input: z.infer<typeof ProofCreateSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
   const body = ProofCreateSchema.parse(input);
-  const version = await db().businessServiceVersion.findFirst({ where: { id: body.serviceVersionId, workspaceId } });
+  const version = await client.businessServiceVersion.findFirst({ where: { id: body.serviceVersionId, workspaceId } });
   if (!version) throw NotFound('Business service version');
   if (version.status !== 'DRAFT') throw new AppError('CONFLICT', 'Approved service versions are immutable; create a new draft version before changing proof', 409);
-  if (body.knowledgeDocumentId && !(await db().knowledgeDocument.findFirst({ where: { id: body.knowledgeDocumentId, workspaceId } }))) throw NotFound('Knowledge document');
-  const proof = await db().businessProof.create({ data: { workspaceId, serviceVersionId: body.serviceVersionId, knowledgeDocumentId: body.knowledgeDocumentId ?? null, claim: body.claim, description: body.description ?? null, sourceUrl: body.sourceUrl ?? null, sourceTitle: body.sourceTitle ?? null, sourceType: body.knowledgeDocumentId ? 'KNOWLEDGE_DOCUMENT' : body.sourceUrl ? 'URL' : 'USER_PROVIDED', createdById: actor.userId ?? null } });
-  await audit(workspaceId, actor, 'business_proof.created', { type: 'business_proof', id: proof.id }, { serviceVersionId: proof.serviceVersionId });
+  if (body.knowledgeDocumentId && !(await client.knowledgeDocument.findFirst({ where: { id: body.knowledgeDocumentId, workspaceId } }))) throw NotFound('Knowledge document');
+  const proof = await client.businessProof.create({ data: { workspaceId, serviceVersionId: body.serviceVersionId, knowledgeDocumentId: body.knowledgeDocumentId ?? null, claim: body.claim, description: body.description ?? null, sourceUrl: body.sourceUrl ?? null, sourceTitle: body.sourceTitle ?? null, sourceType: body.knowledgeDocumentId ? 'KNOWLEDGE_DOCUMENT' : body.sourceUrl ? 'URL' : 'USER_PROVIDED', createdById: actor.userId ?? null } });
+  await audit(workspaceId, actor, 'business_proof.created', { type: 'business_proof', id: proof.id }, { serviceVersionId: proof.serviceVersionId }, transaction);
   return proof;
 }
 
