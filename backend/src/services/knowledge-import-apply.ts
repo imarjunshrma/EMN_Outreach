@@ -133,9 +133,11 @@ function profilePatch(data: Payload) {
 
 function icpWeights(data: Payload) {
   const weights = parts(data, 'scoringRules').map(rule => {
-    const match = /^(.+?):\s*(\d+(?:\.\d+)?)$/.exec(rule);
-    if (!match) throw new Error('Format each scoring rule as “Criterion: weight”');
-    return { criterion: match[1]!.trim(), weight: z.number().positive().max(100).parse(Number(match[2])) };
+    const standard = /^(.+?):\s*(\d+(?:\.\d+)?)$/.exec(rule);
+    const template = /^Add\s+(\d+(?:\.\d+)?)\s+for\s+(.+)$/i.exec(rule);
+    const criterion = (standard?.[1] ?? template?.[2])?.trim();
+    if (!criterion) throw new Error('Enter one scoring rule per line, for example “Central operations team: 10”.');
+    return { criterion, weight: z.number().positive().max(100).parse(Number(standard?.[2] ?? template?.[1])) };
   });
   const single = field(data, 'weight');
   if (single) {

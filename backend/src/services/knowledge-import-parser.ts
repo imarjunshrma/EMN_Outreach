@@ -143,7 +143,7 @@ const fieldExamples: Record<string, string> = {
   objections: 'Existing spreadsheet workflow is familiar', buyingAuthority: 'Recommends vendor to CFO',
   requiredConditions: 'Exports transactions to CSV', optionalConditions: 'Has a data analyst',
   negativeConditions: 'Prohibits third-party reporting vendors', qualificationSignals: 'Hiring a retail analyst',
-  disqualificationSignals: 'Uses a point-of-sale system with no export option', scoringRules: 'Add 10 for a central operations team',
+  disqualificationSignals: 'Uses a point-of-sale system with no export option', scoringRules: 'Central operations team: 10',
   weight: '10', threshold: '60', category: 'Data accessibility',
   evidenceRequirements: 'Cite the public documentation describing exports',
   marketProblem: 'New stores lack consistent forecasting', marketSignals: 'Recent expansion announcement',
@@ -169,6 +169,7 @@ const fieldExamples: Record<string, string> = {
 };
 
 function describeField(key: string) {
+  if (key === 'scoringRules') return 'Enter one criterion and numeric weight per line. Example: Central operations team: 10.';
   if (key === 'externalId') return 'Stable identifier for re-imports and links across sheets. Use letters, digits, hyphens or underscores.';
   if (key === 'name') return 'Record label. Required before application.';
   if (key === 'description') return 'Short factual summary in plain text.';

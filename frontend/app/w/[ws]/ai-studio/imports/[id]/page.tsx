@@ -206,7 +206,7 @@ function ReviewItem({ item, fileName, editable, selected, setSelected, ws }: {
                 const value = current[key];
                 const kind = allowedFields.includes(key) ? importFieldKind(key) : typeof value === 'string' ? 'text' : 'json';
                 const fieldValue = kind === 'list' && Array.isArray(value) ? value.join('\n') : kind === 'json' ? JSON.stringify(value, null, 2) : String(value ?? '');
-                return <Field key={key} label={formatLabel(key)} hint={kind === 'list' ? 'Enter one value per line.' : kind === 'json' ? 'Enter a JSON value.' : undefined}>
+                return <Field key={key} label={formatLabel(key)} hint={key === 'scoringRules' ? 'Enter one rule per line, e.g. Central operations team: 10.' : kind === 'list' ? 'Enter one value per line.' : kind === 'json' ? 'Enter a JSON value.' : undefined}>
                   <Textarea aria-label={formatLabel(key)} rows={kind === 'text' ? 2 : 3} value={draft[key] ?? fieldValue ?? ''} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
                 </Field>;
               })}
