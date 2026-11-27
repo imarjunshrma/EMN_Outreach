@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../core/browser-e2e-safety.js';
 import { bounceFailureClass } from './deliverability.js';
 import { z } from 'zod';
 import sanitizeHtml from 'sanitize-html';
@@ -343,6 +344,7 @@ export async function queueReply(workspaceId: string, conversationId: string, in
 
 /** Worker: send a manual reply in-thread. Attempts=1 + jobId dedupe prevent double sending. */
 export async function sendReply(workspaceId: string, conversationId: string, bodyText: string, userId: string | null) {
+  blockBrowserE2eDelivery('inbox.reply');
   const c = await db().conversation.findFirstOrThrow({ where: { id: conversationId, workspaceId }, include: { emailAccount: true, messages: { orderBy: { sentAt: 'asc' } } } });
   const lastInbound = [...c.messages].reverse().find((m) => m.direction === 'INBOUND') ?? c.messages[c.messages.length - 1];
   if (!lastInbound) throw new AppError('CONFLICT', 'Conversation has no messages', 409);
@@ -383,6 +385,7 @@ export async function queueForward(workspaceId: string, conversationId: string, 
 }
 
 export async function sendForward(workspaceId: string, conversationId: string, to: string, note: string, userId: string | null) {
+  blockBrowserE2eDelivery('inbox.forward');
   const c = await db().conversation.findFirstOrThrow({ where: { id: conversationId, workspaceId }, include: { emailAccount: true, messages: { orderBy: { sentAt: 'asc' } } } });
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { settings: true } });
   if (readSettings(ws.settings).emergencyPause) throw new AppError('OUTREACH_PAUSED', 'Workspace emergency pause is active; outbound forwarding is temporarily blocked.', 409);

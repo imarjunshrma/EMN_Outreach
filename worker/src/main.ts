@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../../backend/src/core/browser-e2e-safety.js';
 import { assertWarmupTestSafety } from '../../backend/src/core/warmup-test-safety.js';
 import { requireDatabaseExtensions } from '../../backend/src/core/database-preflight.js';
 import { Worker } from 'bullmq';
@@ -11,6 +12,7 @@ import { processorFor, HANDLERS } from './processors.js';
 
 process.env.EMN_SERVICE ??= 'emn-worker';
 assertWarmupTestSafety();
+blockBrowserE2eDelivery('worker.start');
 const cfg = config();
 keyring();
 await requireDatabaseExtensions();

@@ -17,8 +17,8 @@ import { identityFromScoreReason } from '../../../shared/src/identity.js';
 import { evaluatePersonalizationGates } from '../../../shared/src/personalization-gates.js';
 import { runAi, estimateCallCost, routeLimits } from './ai.js';
 import { effectiveSnapshot, resolveFromSnapshot, renderProfilePrompt, configHash, type AiSnapshot } from './ai-studio.js';
-import { currentProspectReportIds, factCheck, prospectReportScope } from './intelligence.js';
-import { canContact } from './compliance.js';
+import { currentProspectReportIds, factCheck, prospectReportScope, runResearch, scoreLead, supportedClaims } from './intelligence.js';
+import { canContact, isSuppressed } from './compliance.js';
 import { readSettings } from './workspace.js';
 import { getImportExclusions } from './knowledge-import-apply.js';
 import * as outreachBrain from './outreach-brain.js';
@@ -325,10 +325,15 @@ async function engagementState(campaignId: string, leadId: string) {
 
 // ------------------------------------------------------------------ eligibility
 
-async function stopReason(workspaceId: string, campaign: { id: string; requireVerifiedEmail: boolean; icpId?: string | null }, lead: LeadWithCompany): Promise<string | null> {
+async function stopReason(workspaceId: string, campaign: { id: string; status: string; requireVerifiedEmail: boolean; icpId?: string | null }, lead: LeadWithCompany): Promise<string | null> {
   if (STOP_LEAD_STATUSES.includes(lead.status)) return `lead status is ${lead.status}`;
   const enrollment = await db().sequenceEnrollment.findUnique({ where: { campaignId_leadId: { campaignId: campaign.id, leadId: lead.id } } });
   if (enrollment && !['ACTIVE', 'PAUSED'].includes(enrollment.status)) return `sequence stopped (${enrollment.status}${enrollment.stopReason ? `: ${enrollment.stopReason}` : ''})`;
+  if (campaign.status === 'PREPARING') {
+    if (lead.qualificationReview === 'DISQUALIFIED' || lead.emailVerificationStatus === 'INVALID') return 'prospect excluded from outreach';
+    const suppression = await isSuppressed(workspaceId, lead.emailNormalized);
+    return suppression.suppressed ? 'prospect suppressed' : null;
+  }
   const ok = await canContact(workspaceId, lead, { requireVerified: campaign.requireVerifiedEmail, icpId: campaign.icpId });
   if (!ok.allowed) return `not contactable: ${ok.reasons.join('; ')}`;
   return null;
@@ -355,15 +360,14 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
   if (!(await campaignAudience(workspaceId, campaignId, [leadId])).includes(leadId)) throw NotFound('Campaign prospect');
   const actor = opts.actor ?? WORKER_ACTOR;
 
-  const existing = opts.preview ? null : await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId, leadId, stepId } } });
-  if (existing && !opts.force) {
-    if (existing.status === 'APPROVED') return { status: 'APPROVED' as const, id: existing.id, preserved: 'approved content is frozen; use force to regenerate' };
-    if (existing.manuallyEdited) return { status: existing.status, id: existing.id, preserved: 'manually edited content is preserved; use force to regenerate' };
-  }
-
   const release = opts.preview ? async () => undefined : await acquireLock(`pz:${campaignId}:${leadId}:${stepId}`, 180_000);
-  if (!release) return { status: 'GENERATING' as const, id: existing?.id ?? null, preserved: 'generation already in progress' };
+  if (!release) return { status: 'GENERATING' as const, id: null, preserved: 'generation already in progress' };
   try {
+    const existing = opts.preview ? null : await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId, leadId, stepId } } });
+    if (existing && !opts.force) {
+      if (existing.status === 'APPROVED') return { status: 'APPROVED' as const, id: existing.id, preserved: 'approved content is frozen; use force to regenerate' };
+      if (existing.manuallyEdited) return { status: existing.status, id: existing.id, preserved: 'manually edited content is preserved; use force to regenerate' };
+    }
     const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
     const settings = readSettings(ws.settings);
     const save = async (data: Prisma.LeadPersonalizationUncheckedUpdateInput) => {
@@ -398,7 +402,7 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     if (gates.gates.research === 'BLOCKED') {
       {
         const status = mode === 'skip_lead' ? 'SKIPPED' : 'NEEDS_RESEARCH';
-        const msg = `${ctx.claims.length} evidence-backed claim(s) available; ${ctx.resolved.research.minClaims} required. ${mode === 'skip_lead' ? 'Lead skipped by research rules.' : 'Run research for this lead, then generate again.'}${ctx.excludedClaims ? ` (${ctx.excludedClaims} claim(s) excluded by source/age rules.)` : ''}`;
+        const msg = `${ctx.claims.length} evidence-backed claim(s) available; ${ctx.resolved.research.minClaims} required. ${mode === 'skip_lead' ? 'Lead skipped by research rules.' : campaign.status === 'PREPARING' ? 'Review the prospect’s research claims, then run preparation again.' : 'Run research for this lead, then generate again.'}${ctx.excludedClaims ? ` (${ctx.excludedClaims} claim(s) excluded by source/age rules.)` : ''}`;
         const row = await save({ status, error: msg, researchReportIds: ctx.reportIds, configHash: ctx.hash, batchId: opts.batchId ?? undefined });
         return { status, id: row?.id ?? null, reason: msg, gateStatus: gates.gates };
       }
@@ -533,7 +537,7 @@ export async function generateForLead(workspaceId: string, campaignId: string, l
     const content = { subject, openingLine, body, cta: out.cta?.trim() || null };
     const row = await db().$transaction(async (tx) => {
       const r = await tx.leadPersonalization.update({
-        where: { id: prev.id },
+        where: { id: prev.id, revision: prev.revision, ...(opts.force ? {} : { manuallyEdited: false }) },
         data: {
           ...content, variantId: ctx.variant.id, subjectAlternatives: out.subjectAlternatives.slice(0, 5), usedClaimIds: usedClaims.map((c) => c.id), researchReportIds: ctx.reportIds, retrievedKnowledgeIds: ctx.retrievedKnowledgeIds, retrievedExampleIds: ctx.retrievedExampleIds, selectedServiceVersionIds,
           quality: quality as unknown as Prisma.InputJsonValue, qualityPassed: quality.passed, score: quality.score, scoreExplanation: explanation as unknown as Prisma.InputJsonValue,
@@ -679,6 +683,7 @@ export async function leadReview(workspaceId: string, campaignId: string, leadId
 export async function editPersonalization(workspaceId: string, id: string, input: z.infer<typeof EditSchema>, actor: Actor) {
   const p = await db().leadPersonalization.findFirst({ where: { id, workspaceId }, include: { campaign: true, step: true, lead: { include: { company: true } } } });
   if (!p) throw NotFound('Personalization');
+  if (['QUEUED', 'GENERATING'].includes(p.status)) throw new AppError('CONFLICT', 'Wait for the current generation before editing.', 409);
   const content = {
     subject: input.subject !== undefined ? input.subject : p.subject,
     openingLine: input.openingLine !== undefined ? input.openingLine : p.openingLine,
@@ -725,10 +730,12 @@ export async function editPersonalization(workspaceId: string, id: string, input
   const revision = p.revision + 1;
   const prevExplanation = (p.scoreExplanation ?? {}) as Record<string, unknown>;
   const row = await db().$transaction(async (tx) => {
-    const r = await tx.leadPersonalization.update({
-      where: { id: p.id },
+    const changed = await tx.leadPersonalization.updateMany({
+      where: { id: p.id, revision: p.revision, status: { notIn: ['QUEUED', 'GENERATING'] } },
       data: { ...content, manuallyEdited: true, editedById: actor.userId ?? null, editedAt: new Date(), quality: quality as unknown as Prisma.InputJsonValue, qualityPassed: quality.passed, score: quality.score, scoreExplanation: { ...prevExplanation, factors: quality.scoreExplanation, disclaimer: quality.scoreDisclaimer, factCheck: fc } as unknown as Prisma.InputJsonValue, status: quality.passed ? 'GENERATED' : 'BLOCKED', approvedById: null, approvedAt: null, approvedContentHash: null, revision },
     });
+    if (!changed.count) throw new AppError('CONFLICT', 'This draft changed while you were editing. Reopen it and try again.', 409);
+    const r = await tx.leadPersonalization.findUniqueOrThrow({ where: { id: p.id } });
     await tx.personalizationRevision.create({ data: { workspaceId, personalizationId: p.id, revision, source: 'MANUAL', ...content, usedClaimIds: p.usedClaimIds, retrievedKnowledgeIds: p.retrievedKnowledgeIds, retrievedExampleIds: p.retrievedExampleIds, selectedServiceVersionIds: p.selectedServiceVersionIds, quality: quality as unknown as Prisma.InputJsonValue, score: quality.score, executionIds, createdById: actor.userId ?? null } });
     return r;
   });
@@ -772,7 +779,7 @@ export async function rejectPersonalization(workspaceId: string, id: string, rea
 
 /** Re-queue outbound emails that were waiting for this personalization. Idempotent: prepare only acts on PENDING. */
 export async function releaseWaitingOutbound(workspaceId: string, campaignId: string, leadId: string, stepId: string) {
-  const waiting = await db().outboundEmail.findMany({ where: { workspaceId, campaignId, stepId, status: 'AWAITING_APPROVAL', lastError: WAITING_MARKER, enrollment: { leadId } } });
+  const waiting = await db().outboundEmail.findMany({ where: { workspaceId, campaignId, stepId, campaign: { status: { not: 'PREPARING' } }, status: 'AWAITING_APPROVAL', lastError: WAITING_MARKER, enrollment: { leadId } } });
   for (const o of waiting) {
     const r = await db().outboundEmail.updateMany({ where: { id: o.id, status: 'AWAITING_APPROVAL' }, data: { status: 'PENDING', approvalStatus: 'NOT_REQUIRED', lastError: null } });
     if (r.count) await enqueue(QUEUES.prepare, 'outbound.prepare', { workspaceId, outboundId: o.id }, { jobId: `prepare-${o.id}-pz-${Date.now()}` });
@@ -833,9 +840,10 @@ async function plannedPairs(workspaceId: string, campaignId: string, input: z.in
   let preserved = 0;
   for (const l of leads) for (const s of steps) {
     const e = ex.get(key(l, s.id));
-    if (e && !input.force) {
-      if (e.status === 'APPROVED' || e.manuallyEdited) { preserved++; continue; }
-      if (input.onlyMissing && ['GENERATED', 'BLOCKED', 'GENERATING', 'QUEUED'].includes(e.status)) { preserved++; continue; }
+    if (e && (['GENERATING', 'QUEUED'].includes(e.status) || (!input.force &&
+      (e.status === 'APPROVED' || e.manuallyEdited || (input.onlyMissing && (e.status === 'GENERATED' || (e.status === 'BLOCKED' && campaign.status !== 'PREPARING'))))))) {
+      preserved++;
+      continue;
     }
     pairs.push({ leadId: l, stepId: s.id });
   }
@@ -862,49 +870,87 @@ export async function estimateBatch(workspaceId: string, campaignId: string, inp
   };
 }
 
-export async function createBatch(workspaceId: string, campaignId: string, input: z.infer<typeof BatchSchema>, actor: Actor) {
+export async function createBatch(workspaceId: string, campaignId: string, input: z.infer<typeof BatchSchema>, actor: Actor, { prepareProspects = false } = {}) {
   const est = await estimateBatch(workspaceId, campaignId, input);
   const { pairs } = await plannedPairs(workspaceId, campaignId, input);
-  if (!pairs.length) throw new AppError('CONFLICT', 'Nothing to generate (everything is approved, edited or already generated). Use force to regenerate.', 409);
+  if (!pairs.length) throw new AppError('CONFLICT', prepareProspects
+    ? 'No drafts to prepare. Add prospects and an AI-enabled step, or check existing drafts and runs.'
+    : 'Nothing to generate (everything is approved, edited or already generated). Use force to regenerate.', 409);
   if (pairs.length > 5000) throw new AppError('VALIDATION_FAILED', 'At most 5,000 generations per batch', 400);
-  const batch = await db().personalizationBatch.create({ data: { workspaceId, campaignId, status: 'RUNNING', total: pairs.length, estimatedCostUsd: est.estimatedUsd, maxCostUsd: input.maxCostUsd ?? null, options: input as Prisma.InputJsonValue, createdById: actor.userId ?? null } });
+  const batch = await db().personalizationBatch.create({ data: { workspaceId, campaignId, status: 'RUNNING', total: pairs.length, estimatedCostUsd: est.estimatedUsd, maxCostUsd: input.maxCostUsd ?? null, options: { ...input, prepareProspects } as Prisma.InputJsonValue, createdById: actor.userId ?? null } });
+  const queued = [];
   for (const p of pairs) {
-    await db().leadPersonalization.upsert({
-      where: { campaignId_leadId_stepId: { campaignId, leadId: p.leadId, stepId: p.stepId } },
-      update: { status: 'QUEUED', batchId: batch.id, error: null },
-      create: { workspaceId, campaignId, leadId: p.leadId, stepId: p.stepId, status: 'QUEUED', batchId: batch.id },
+    const key = { workspaceId, campaignId, leadId: p.leadId, stepId: p.stepId };
+    const updated = await db().leadPersonalization.updateMany({
+      where: { ...key, status: { notIn: input.force ? ['GENERATING', 'QUEUED'] : ['APPROVED', 'GENERATING', 'QUEUED'] }, ...(input.force ? {} : { manuallyEdited: false }) },
+      data: { status: 'QUEUED', batchId: batch.id, error: null },
     });
+    const created = updated.count ? 0 : (await db().leadPersonalization.createMany({
+      data: { ...key, status: 'QUEUED', batchId: batch.id }, skipDuplicates: true,
+    })).count;
+    if (updated.count || created) queued.push(p);
+  }
+  if (queued.length !== pairs.length) {
+    await db().personalizationBatch.update({ where: { id: batch.id }, data: { total: queued.length, ...(queued.length ? {} : { status: 'COMPLETED', completedAt: new Date() }) } });
   }
   // Steps are generated in order per lead so follow-ups can see earlier drafts.
   const byLead = new Map<string, string[]>();
   const order = new Map((await loadCampaign(workspaceId, campaignId)).sequence?.steps.map((s) => [s.id, s.order]) ?? []);
-  for (const p of pairs) byLead.set(p.leadId, [...(byLead.get(p.leadId) ?? []), p.stepId]);
+  for (const p of queued) byLead.set(p.leadId, [...(byLead.get(p.leadId) ?? []), p.stepId]);
   for (const [leadId, stepIds] of byLead) {
     stepIds.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-    await enqueue(QUEUES.personalize, 'personalize.lead', { workspaceId, campaignId, leadId, stepIds, batchId: batch.id, force: input.force }, { jobId: `pz-${batch.id}-${leadId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+    try {
+      await enqueue(QUEUES.personalize, 'personalize.lead', { workspaceId, campaignId, leadId, stepIds, batchId: batch.id, force: input.force }, { jobId: `pz-${batch.id}-${leadId}`, attempts: 3, backoff: { type: 'exponential', delay: 10_000 } });
+    } catch (error) {
+      await markBatchLeadFailed(workspaceId, { campaignId, leadId, stepIds, batchId: batch.id }, `Could not queue draft generation: ${(error as Error).message}`);
+    }
   }
-  await audit(workspaceId, actor, 'personalization.batch_created', { type: 'campaign', id: campaignId }, { batchId: batch.id, generations: pairs.length, estimatedUsd: est.estimatedUsd });
-  return { batchId: batch.id, generations: pairs.length, estimate: est };
+  await audit(workspaceId, actor, 'personalization.batch_created', { type: 'campaign', id: campaignId }, { batchId: batch.id, generations: queued.length, estimatedUsd: est.estimatedUsd });
+  return { batchId: batch.id, generations: queued.length, estimate: est };
 }
 
 /** Worker: generate all requested steps for one lead within a batch, respecting the batch cost cap. */
 export async function processBatchLead(workspaceId: string, data: { campaignId: string; leadId: string; stepIds: string[]; batchId: string; force?: boolean }) {
   const batch = await db().personalizationBatch.findFirst({ where: { id: data.batchId, workspaceId } });
-  if (!batch) return { skipped: 'batch not found' };
+  if (!batch || batch.status !== 'RUNNING') return { skipped: 'batch is inactive' };
+  const prepareProspects = (batch.options as { prepareProspects?: boolean } | null)?.prepareProspects === true;
+  if (prepareProspects) {
+    const campaign = await loadCampaign(workspaceId, data.campaignId);
+    if (campaign.status !== 'PREPARING') {
+      await markBatchLeadFailed(workspaceId, data, 'Campaign preparation stopped.');
+      return { skipped: 'campaign preparation stopped' };
+    }
+    const lead = await db().lead.findFirst({ where: { workspaceId, id: data.leadId }, include: { company: true } });
+    if (lead && !(await stopReason(workspaceId, campaign, lead))) {
+      await runResearch(workspaceId, { leadId: data.leadId, campaignId: data.campaignId });
+      // A draft run should not reset a human-approved qualification used by another campaign.
+      const reviewedScore = lead.qualificationReview === 'QUALIFIED' && lead.qualificationReviewScoreId
+        ? await db().leadScore.findFirst({
+          where: { id: lead.qualificationReviewScoreId, workspaceId, leadId: lead.id, qualified: true,
+            ...(campaign.icpId ? { icpId: campaign.icpId } : {}), icp: { isActive: true } }, select: { id: true },
+        })
+        : null;
+      if (!reviewedScore && (await supportedClaims(workspaceId, data.leadId)).length) await scoreLead(workspaceId, data.leadId, campaign.icpId);
+    }
+  }
   for (const stepId of data.stepIds) {
     const row = await db().leadPersonalization.findUnique({ where: { campaignId_leadId_stepId: { campaignId: data.campaignId, leadId: data.leadId, stepId } } });
-    if (!row || row.batchId !== batch.id || row.status !== 'QUEUED') continue; // already handled (retry-safe)
+    if (!row || row.batchId !== batch.id || !['QUEUED', 'GENERATING'].includes(row.status)) continue; // already handled (retry-safe)
     const fresh = await db().personalizationBatch.findUniqueOrThrow({ where: { id: batch.id } });
     if (fresh.status === 'CANCELLED') {
       await db().leadPersonalization.update({ where: { id: row.id }, data: { status: 'SKIPPED', error: fresh.error ?? 'batch cancelled' } });
       await bump(batch.id, 'skipped', 0);
       continue;
     }
+    if (prepareProspects && !await db().campaign.count({ where: { workspaceId, id: data.campaignId, status: 'PREPARING' } })) {
+      await markBatchLeadFailed(workspaceId, data, 'Campaign preparation stopped.');
+      break;
+    }
     // Unexpected errors propagate: the row stays QUEUED so the BullMQ retry picks it up; the last attempt marks it failed.
     const r = await generateForLead(workspaceId, data.campaignId, data.leadId, stepId, { batchId: batch.id, force: data.force });
     if (r.status === 'GENERATING') throw new Error('Generation for this lead/step is already in progress; retrying later'); // lock held elsewhere — let BullMQ retry
     const cost = 'costUsd' in r && typeof r.costUsd === 'number' ? r.costUsd : 0;
-    const kind = r.status === 'FAILED' ? 'failed' : r.status === 'SKIPPED' || r.status === 'NEEDS_RESEARCH' ? 'skipped' : 'done';
+    const kind = ['FAILED', 'BLOCKED'].includes(r.status) ? 'failed' : r.status === 'SKIPPED' || r.status === 'NEEDS_RESEARCH' ? 'skipped' : 'done';
     await bump(batch.id, kind, cost);
   }
   return { ok: true };

@@ -255,6 +255,7 @@ enum CampaignStatus {
   PAUSED
   COMPLETED
   ARCHIVED
+  PREPARING
 }
 
 enum ReviewMode {

@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../core/browser-e2e-safety.js';
 import * as warmup from '../services/warmup.js';
 import { listUncertainSends, ReconciliationSchema, resolveUncertainSend } from '../services/send-reconciliation.js';
 import { emptyTracking, trackingTotals } from '../services/tracking-analytics.js';
@@ -44,6 +45,7 @@ route({ method: 'put', path: '/w/:workspaceId/campaigns/:id/accounts', tag: 'Cam
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/validate', tag: 'Campaigns', summary: 'Validate and preview eligible recipients', auth: 'workspace', role: 'MEMBER', status: 200, handler: (c) => engine.validateCampaign(c.workspaceId, c.params.id) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/submit', tag: 'Campaigns', summary: 'Submit for approval', auth: 'workspace', role: 'MEMBER', status: 200, handler: (c) => engine.submitCampaign(c.workspaceId, c.params.id, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/approve', tag: 'Campaigns', summary: 'Approve (freezes a content hash; nothing unapproved is ever sent)', auth: 'workspace', role: 'MANAGER', status: 200, handler: (c) => engine.approveCampaign(c.workspaceId, c.params.id, c.actor) });
+route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/prepare', tag: 'Campaigns', summary: 'Activate AI preparation with email delivery disabled', auth: 'workspace', role: 'MANAGER', status: 202, handler: (c) => engine.activatePreparation(c.workspaceId, c.params.id, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/start', tag: 'Campaigns', summary: 'Start or resume an approved campaign', auth: 'workspace', role: 'MANAGER', status: 200, handler: (c) => engine.startCampaign(c.workspaceId, c.params.id, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/pause', tag: 'Campaigns', summary: 'Pause a running campaign', auth: 'workspace', role: 'MEMBER', status: 200, body: z.object({ reason: z.string().max(300).default('Paused by user') }), handler: (c) => engine.pauseCampaign(c.workspaceId, c.params.id, c.body.reason, c.actor) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/archive', tag: 'Campaigns', summary: 'Archive (stops all sequences)', auth: 'workspace', role: 'MANAGER', status: 200, handler: async (c) => { await engine.archiveCampaign(c.workspaceId, c.params.id, c.actor); return { ok: true }; } });
@@ -54,6 +56,7 @@ route({ method: 'post', path: '/w/:workspaceId/enrollments/:id/stop', tag: 'Camp
 route({ method: 'get', path: '/w/:workspaceId/campaigns/:id/steps', tag: 'Analytics', summary: 'Per-step / per-variant (A/B) performance', auth: 'workspace', role: 'VIEWER', handler: (c) => analytics.stepPerformance(c.workspaceId, c.params.id) });
 route({ method: 'post', path: '/w/:workspaceId/campaigns/:id/export-smartlead', tag: 'Campaigns', summary: 'Optional: push this campaign’s eligible leads to a Smartlead campaign', auth: 'workspace', role: 'MANAGER', status: 200, body: z.object({ smartleadCampaignId: z.string().min(1) }),
   handler: async (c) => {
+    blockBrowserE2eDelivery('campaign.external-export');
     const camp = await engine.getCampaign(c.workspaceId, c.params.id);
     const { secret } = await requireSecret(c.workspaceId, 'smartlead');
     const members = await db().leadListMember.findMany({ where: { workspaceId: c.workspaceId, listId: { in: camp.lists.map((l) => l.listId) } }, include: { lead: { include: { company: true } } }, distinct: ['leadId'] });

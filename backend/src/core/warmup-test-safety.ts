@@ -1,6 +1,8 @@
+import { assertBrowserE2eSafety } from './browser-e2e-safety.js';
 import type { EmailProvider, EmailProviderName } from '../../../integrations/src/email/types.js';
 
 export function assertWarmupTestSafety(env: NodeJS.ProcessEnv = process.env) {
+  if (assertBrowserE2eSafety(env)) return;
   const dedicatedTarget = [env.DATABASE_URL, env.DATABASE_MIGRATION_URL].some(value => value?.includes('/emn_outvexa_warmup_local'));
   const testProfile = env.NODE_ENV === 'test' || dedicatedTarget || env.EMN_ENV_FILE?.endsWith('.env.warmup-local') || env.OUTVEXA_WARMUP_TEST !== undefined || env.OUTVEXA_EMAIL_MODE !== undefined;
   if (!testProfile) return;

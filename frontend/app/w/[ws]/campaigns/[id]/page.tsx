@@ -37,9 +37,11 @@ export default function CampaignDetail() {
     <QueryView q={q}>
       {(c) => (
         <>
-          <PageHeader title={c.name} subtitle={<><Badge>{c.status}</Badge>{c.approvedAt && <span className="ml-2 text-xs">approved {fmtDate(c.approvedAt)}</span>}{c.pauseReason && <span className="ml-2 text-xs text-amber-700">{c.pauseReason}</span>}</>}
+          <PageHeader title={c.name} subtitle={<><Badge>{c.status === 'PREPARING' ? 'Active · AI preparation' : c.status}</Badge><span className="ml-2 text-xs">Campaign email sending {c.status === 'RUNNING' ? 'enabled' : 'off'}</span>{c.approvedAt && <span className="ml-2 text-xs">approved {fmtDate(c.approvedAt)}</span>}{c.pauseReason && <span className="ml-2 text-xs text-amber-700">{c.pauseReason}</span>}</>}
             actions={<>
               <Button variant="secondary" loading={validate.isPending} onClick={() => validate.mutate()}>Validate</Button>
+              {['DRAFT', 'PREPARING'].includes(c.status) && <Button loading={action.isPending} onClick={() => { setTab('ai'); action.mutate({ a: 'prepare' }); }}>{c.status === 'PREPARING' ? 'Run preparation again' : 'Activate AI preparation'}</Button>}
+              {c.status === 'PREPARING' && <Button variant="secondary" onClick={() => action.mutate({ a: 'pause' })}>Stop preparation</Button>}
               {['DRAFT', 'PENDING_APPROVAL'].includes(c.status) && c.status === 'DRAFT' && <Button onClick={() => action.mutate({ a: 'submit' })} loading={action.isPending}>Submit for approval</Button>}
               {c.status === 'PENDING_APPROVAL' && <Button onClick={() => action.mutate({ a: 'approve' })} loading={action.isPending}>Approve</Button>}
               {['APPROVED', 'PAUSED'].includes(c.status) && <Button onClick={() => action.mutate({ a: 'start' })} loading={action.isPending}>{c.status === 'PAUSED' ? 'Resume' : 'Start sending'}</Button>}
@@ -48,6 +50,7 @@ export default function CampaignDetail() {
               <Button variant="ghost" loading={dup.isPending} onClick={() => dup.mutate()}>Duplicate</Button>
               {c.status === 'DRAFT' && <ConfirmButton variant="ghost" confirm="Delete this draft?" onConfirm={() => del.mutate()}>Delete</ConfirmButton>}
             </>} />
+          {c.status === 'PREPARING' && <div className="mb-4"><Notice>Review draft status and content in AI personalization. For new research, mark supported claims, then run preparation again. To enable campaign sending later, stop preparation and follow the campaign approval and start steps.</Notice></div>}
           {validation && (
             <div className="mb-4 space-y-2">
               {validation.blocking.length > 0 && <Notice kind="danger"><b>Must fix before approval:</b><ul className="list-disc pl-5">{validation.blocking.map((b) => <li key={b}>{b}</li>)}</ul></Notice>}

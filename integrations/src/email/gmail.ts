@@ -1,3 +1,4 @@
+import { assertRealEmailProviderAllowed } from './real-provider-safety.js';
 import { httpJson, httpRequest, ProviderError, type FetchLike } from '../http.js';
 import { buildMime, fromBase64Url, parseRawMessage, toBase64Url } from './mime.js';
 import {
@@ -23,7 +24,7 @@ function oauthToken(auth: AuthHandle): string {
 
 export class GoogleOAuthClient implements OAuthClient {
   readonly provider = 'GMAIL' as const;
-  constructor(private readonly clientId: string, private readonly clientSecret: string, private readonly fetchImpl?: FetchLike) {}
+  constructor(private readonly clientId: string, private readonly clientSecret: string, private readonly fetchImpl?: FetchLike) { assertRealEmailProviderAllowed(); }
 
   buildAuthUrl(p: { state: string; codeChallenge: string; redirectUri: string; loginHint?: string }): string {
     const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
@@ -79,7 +80,7 @@ interface GmailMessageRef { id: string; threadId: string }
 
 export class GmailProvider implements EmailProvider {
   readonly name = 'GMAIL' as const;
-  constructor(private readonly fetchImpl?: FetchLike, private readonly maxInitialMessages = 300) {}
+  constructor(private readonly fetchImpl?: FetchLike, private readonly maxInitialMessages = 300) { assertRealEmailProviderAllowed(); }
 
   private get<T>(auth: AuthHandle, path: string) {
     return httpJson<T>(`${API}${path}`, { headers: { authorization: `Bearer ${oauthToken(auth)}` } }, { provider: 'gmail', fetchImpl: this.fetchImpl });

@@ -1,3 +1,4 @@
+import { assertRealEmailProviderAllowed } from './real-provider-safety.js';
 import nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
 import { ProviderError } from '../http.js';
@@ -47,6 +48,7 @@ export interface ImapCursor { [folder: string]: { uidValidity: string; lastUid: 
 
 export class SmtpImapProvider implements EmailProvider {
   readonly name = 'SMTP_IMAP' as const;
+  constructor() { assertRealEmailProviderAllowed(); }
 
   private imap(auth: AuthHandle) {
     const { config, imapPassword } = creds(auth);

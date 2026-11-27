@@ -1,3 +1,4 @@
+import { guardBrowserE2eQueue } from '../../backend/src/core/browser-e2e-safety.js';
 import { DelayedError, type Job } from 'bullmq';
 import { redis } from '../../backend/src/core/redis.js';
 import { orgIdOf } from '../../backend/src/core/tenant.js';
@@ -255,6 +256,7 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
 /** Wraps a handler with JobRun bookkeeping and error logging. */
 export function processorFor(queueName: QueueName) {
   return async (job: Job<Data>, token?: string) => {
+    guardBrowserE2eQueue(queueName, 'process');
     const handler = HANDLERS[queueName]?.[job.name];
     if (!handler) throw new Error(`No handler for ${queueName}/${job.name}`);
     const gate = await tenantGate(job);

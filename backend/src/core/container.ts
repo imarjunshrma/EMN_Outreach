@@ -1,3 +1,5 @@
+import { browserE2eAi, browserE2eFetcher } from './browser-e2e-ai.js';
+import { blockBrowserE2eDelivery, browserE2e, browserE2eEmail } from './browser-e2e-safety.js';
 import { assertWarmupTestSafety, mockWarmupEmail } from './warmup-test-safety.js';
 import { ZeroBounceProvider, NeverBounceProvider, HunterFinder, CloudflareDns, type EmailFinder, type DnsProviderAdapter } from '../../../integrations/src/providers/extra.js';
 import { AnthropicAdapter } from '../../../integrations/src/ai/anthropic.js';
@@ -42,14 +44,15 @@ function build(): Adapters {
   const oauth: Adapters['oauth'] = {};
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) oauth.GMAIL = new GoogleOAuthClient(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
   if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) oauth.MICROSOFT = new MicrosoftOAuthClient(process.env.MICROSOFT_CLIENT_ID, process.env.MICROSOFT_CLIENT_SECRET, process.env.MICROSOFT_TENANT ?? 'common');
+  const fixtureEmail = browserE2e() ? browserE2eEmail : mockWarmupEmail;
   return {
     email: graph
       ? { GMAIL: new GmailProvider(), MICROSOFT: graph, SMTP_IMAP: new SmtpImapProvider() }
-      : { GMAIL: mockWarmupEmail('GMAIL'), MICROSOFT: mockWarmupEmail('MICROSOFT'), SMTP_IMAP: mockWarmupEmail('SMTP_IMAP') },
+      : { GMAIL: fixtureEmail('GMAIL'), MICROSOFT: fixtureEmail('MICROSOFT'), SMTP_IMAP: fixtureEmail('SMTP_IMAP') },
     oauth,
     graphSubscriptions: graph,
     ai: Object.fromEntries(AI_PROVIDER_NAMES.map((name) => [name,
-      name === 'OPENAI' ? new OpenAiAdapter()
+      browserE2e() ? browserE2eAi(name) : name === 'OPENAI' ? new OpenAiAdapter()
         : name === 'ANTHROPIC' ? new AnthropicAdapter()
           : name === 'GOOGLE' ? new GoogleAiAdapter()
             : new OpenAiCompatibleAdapter(name, AI_PROVIDER_BASE_URLS[name] ?? 'https://api.openai.com/v1'),
@@ -59,7 +62,7 @@ function build(): Adapters {
     finders: { hunter: new HunterFinder() },
     dnsProviders: { cloudflare: new CloudflareDns() },
     search: { brave: new BraveSearchProvider(), serper: new SerperSearchProvider() },
-    fetcher: new SafeFetcher(undefined, undefined, undefined, (entry) => logger.warn(entry, 'public website fetch rejected')),
+    fetcher: browserE2e() ? browserE2eFetcher : new SafeFetcher(undefined, undefined, undefined, (entry) => logger.warn(entry, 'public website fetch rejected')),
     dns: dnsPromises,
     smartlead: new SmartleadAdapter(),
   };
@@ -71,6 +74,7 @@ export function adapters(): Adapters {
   return current;
 }
 export function setAdapters(partial: Partial<Adapters>) {
+  if (partial.email || partial.oauth || partial.graphSubscriptions) blockBrowserE2eDelivery('provider.override');
   current = { ...adapters(), ...partial };
 }
 export function resetAdapters() { current = null; }

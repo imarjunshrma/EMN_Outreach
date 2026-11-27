@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../core/browser-e2e-safety.js';
 import { CampaignSendingPolicy, domainAuthenticationReason, mailboxSendingPolicy, providerFailureClass } from './deliverability.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
@@ -18,7 +19,7 @@ import { getAuth, markNeedsReauth } from './accounts.js';
 import { readSettings, unsubscribeToken } from './workspace.js';
 import { factCheck, generateEmail, leadVars } from './intelligence.js';
 import { emitEvent } from './automation.js';
-import { variantSeedFor, contentHashOf, WAITING_MARKER } from './personalization.js';
+import { variantSeedFor, contentHashOf, createBatch, WAITING_MARKER } from './personalization.js';
 import { buildSnapshot } from './ai-studio.js';
 import { CampaignAiOverridesSchema } from '../../../shared/src/ai-studio.js';
 import { captureCampaignTaskExecution } from './ai.js';
@@ -67,7 +68,7 @@ export const StepSchema = z.object({
 });
 export const SequenceSchema = z.object({ steps: z.array(StepSchema).min(1).max(10) });
 
-const EDITABLE_STATES = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'RUNNING', 'PAUSED'];
+const EDITABLE_STATES = ['DRAFT', 'PREPARING', 'PENDING_APPROVAL', 'APPROVED', 'RUNNING', 'PAUSED'];
 
 async function getCampaignOr404(workspaceId: string, id: string) {
   const c = await db().campaign.findFirst({ where: { id, workspaceId } });
@@ -303,7 +304,32 @@ async function assertHash(workspaceId: string, id: string) {
   return full;
 }
 
+/** Preparation uses the personalization queue and never enrolls a prospect or schedules delivery. */
+export async function activatePreparation(workspaceId: string, id: string, actor: Actor) {
+  const release = await acquireLock(`campaign:prepare:${id}`, 300_000);
+  if (!release) throw new AppError('CONFLICT', 'Campaign preparation is already being queued', 409);
+  try {
+    const campaign = await getCampaignOr404(workspaceId, id);
+    if (!['DRAFT', 'PREPARING'].includes(campaign.status)) throw new AppError('CAMPAIGN_STATE', 'Only draft campaigns can activate preparation', 409);
+    await (await import('./billing.js')).assertEntitled(workspaceId, 'active');
+    const changed = await db().campaign.updateMany({ where: { workspaceId, id, status: campaign.status }, data: { status: 'PREPARING' } });
+    if (!changed.count) throw new AppError('CONFLICT', 'Campaign state changed', 409);
+    try {
+      const batch = await createBatch(workspaceId, id, { force: false, onlyMissing: true }, actor, { prepareProspects: true });
+      await audit(workspaceId, actor, 'campaign.preparation_activated', { type: 'campaign', id }, { batchId: batch.batchId });
+      await publish(workspaceId, 'campaign.updated', { campaignId: id });
+      return { status: 'PREPARING', ...batch };
+    } catch (error) {
+      if (campaign.status === 'DRAFT') await db().campaign.updateMany({ where: { workspaceId, id, status: 'PREPARING' }, data: { status: 'DRAFT' } });
+      throw error;
+    }
+  } finally {
+    await release();
+  }
+}
+
 export async function startCampaign(workspaceId: string, id: string, actor: Actor) {
+  blockBrowserE2eDelivery('campaign.activate');
   const c = await getCampaignOr404(workspaceId, id);
   if (!['APPROVED', 'PAUSED'].includes(c.status)) throw new AppError('CAMPAIGN_STATE', `Cannot start a ${c.status} campaign — it must be approved first`, 409);
   await (await import('./billing.js')).assertEntitled(workspaceId, 'activeCampaigns');
@@ -319,7 +345,13 @@ export async function startCampaign(workspaceId: string, id: string, actor: Acto
 
 export async function pauseCampaign(workspaceId: string, id: string, reason: string, actor: Actor) {
   const c = await getCampaignOr404(workspaceId, id);
-  if (c.status !== 'RUNNING') throw new AppError('CAMPAIGN_STATE', 'Only running campaigns can be paused', 409);
+  if (c.status === 'PREPARING') {
+    const changed = await db().campaign.updateMany({ where: { id, workspaceId, status: 'PREPARING' }, data: { status: 'DRAFT' } });
+    if (!changed.count) throw new AppError('CONFLICT', 'Campaign state changed', 409);
+    await audit(workspaceId, actor, 'campaign.preparation_stopped', { type: 'campaign', id });
+    return { status: 'DRAFT' };
+  }
+  if (c.status !== 'RUNNING') throw new AppError('CAMPAIGN_STATE', 'Only active campaigns can be paused', 409);
   await db().campaign.update({ where: { id }, data: { status: 'PAUSED', pausedAt: new Date(), pauseReason: reason } });
   await db().sequenceEnrollment.updateMany({ where: { campaignId: id, status: 'ACTIVE' }, data: { status: 'PAUSED', stopReason: 'campaign paused' } });
   await audit(workspaceId, actor, 'campaign.paused', { type: 'campaign', id }, { reason });
@@ -380,6 +412,7 @@ export async function getOutbound(workspaceId: string, id: string) {
 export async function reviewOutbound(workspaceId: string, id: string, input: { decision: 'approve' | 'reject'; subject?: string; bodyText?: string; reason?: string }, actor: Actor) {
   const o = await db().outboundEmail.findFirst({ where: { id, workspaceId }, include: { campaign: true, enrollment: true } });
   if (!o) throw NotFound('Outbound email');
+  if (input.decision === 'approve' && o.campaign.status === 'PREPARING') throw new AppError('CAMPAIGN_STATE', 'Campaign email sending is off', 409);
   if (o.status !== 'AWAITING_APPROVAL') throw new AppError('CONFLICT', `This email is ${o.status}`, 409);
   if (o.lastError?.includes('needs revalidation under the current evidence and quality policy')) throw new AppError('QUALITY_CHECK_FAILED', 'Regenerate and approve this content in the campaign personalization review before sending.', 409);
   if (o.lastError === WAITING_MARKER || !o.bodyText) throw new AppError('CONFLICT', 'This email is waiting for its personalized content. Review and approve it in the campaign\'s AI personalization tab.', 409);
@@ -470,6 +503,7 @@ async function checkThresholds(c: { id: string; workspaceId: string; name: strin
 
 /** One scheduler pass over running campaigns (or one campaign). Safe to run concurrently-ish: all writes are idempotent. */
 export async function tick(now = new Date(), onlyCampaignId?: string) {
+  blockBrowserE2eDelivery('campaign.tick');
   const campaigns = await db().campaign.findMany({ where: { status: 'RUNNING', ...(onlyCampaignId ? { id: onlyCampaignId } : {}) } });
   const summary = { campaigns: campaigns.length, enrolled: 0, outboundCreated: 0, completed: 0, requeued: 0 };
   for (const c of campaigns) {
@@ -616,8 +650,8 @@ async function advanceDue(c: FullCampaign, now: Date) {
 
 /** Re-enqueue QUEUED emails whose job may have been lost or deferred (window/limits/pause). */
 async function sweepQueued(now: Date) {
-  const stale = await db().outboundEmail.findMany({ where: { status: 'QUEUED', scheduledFor: { lte: now }, updatedAt: { lte: new Date(now.getTime() - 60_000) } }, select: { id: true, workspaceId: true }, take: 500 });
-  const stuck = await db().outboundEmail.findMany({ where: { status: 'SENDING', sendStartedAt: { lte: new Date(now.getTime() - 3 * 60_000) } }, select: { id: true, workspaceId: true }, take: 100 });
+  const stale = await db().outboundEmail.findMany({ where: { status: 'QUEUED', campaign: { status: { not: 'PREPARING' } }, scheduledFor: { lte: now }, updatedAt: { lte: new Date(now.getTime() - 60_000) } }, select: { id: true, workspaceId: true }, take: 500 });
+  const stuck = await db().outboundEmail.findMany({ where: { status: 'SENDING', campaign: { status: { not: 'PREPARING' } }, sendStartedAt: { lte: new Date(now.getTime() - 3 * 60_000) } }, select: { id: true, workspaceId: true }, take: 100 });
   for (const o of [...stale, ...stuck]) await enqueue(QUEUES.send, 'outbound.send', { workspaceId: o.workspaceId, outboundId: o.id }, { jobId: `send-${o.id}-${Math.floor(now.getTime() / 60_000)}`, attempts: 5 });
   return stale.length + stuck.length;
 }
@@ -632,7 +666,7 @@ export function buildFooter(ws: { senderLegalName: string | null; name: string; 
 
 export async function prepareOutbound(workspaceId: string, outboundId: string) {
   const o = await db().outboundEmail.findFirst({ where: { id: outboundId, workspaceId }, include: { campaign: true, step: true, variant: true, emailAccount: true, enrollment: { include: { lead: { include: { company: true } } } } } });
-  if (!o || o.status !== 'PENDING') return { skipped: true };
+  if (!o || o.status !== 'PENDING' || o.campaign.status === 'PREPARING') return { skipped: true };
   const ws = await db().workspace.findUniqueOrThrow({ where: { id: workspaceId } });
   const settings = readSettings(ws.settings);
   const lead = o.enrollment.lead;
@@ -831,8 +865,10 @@ async function holdUncertain(workspaceId: string, outboundId: string, enrollment
 }
 
 export async function sendOutbound(workspaceId: string, outboundId: string, now = new Date()): Promise<{ outcome: SendOutcome; detail?: string }> {
+  blockBrowserE2eDelivery('campaign.send');
   const o = await db().outboundEmail.findFirst({ where: { id: outboundId, workspaceId }, include: { campaign: true, step: true, emailAccount: true, enrollment: { include: { lead: true } } } });
   if (!o) return { outcome: 'skipped', detail: 'not found' };
+  if (o.campaign.status === 'PREPARING') return { outcome: 'deferred', detail: 'campaign email sending is off' };
   if (o.status === 'UNCERTAIN' && o.resolvedAt) return { outcome: 'skipped', detail: 'operator decision recorded' };
   if (['SENT', 'CANCELLED', 'SKIPPED', 'FAILED', 'PENDING', 'AWAITING_APPROVAL'].includes(o.status)) return { outcome: 'skipped', detail: o.status };
 
@@ -1239,10 +1275,12 @@ export const TestEmailSchema = z.object({ leadId: z.string().uuid(), stepOrder: 
  * campaign send, no tracking. Restricting the recipient to members stops "test" from becoming a bypass.
  */
 export async function sendTestEmail(workspaceId: string, id: string, input: z.infer<typeof TestEmailSchema>, actor: Actor) {
+  blockBrowserE2eDelivery('campaign.test-send');
+  const c = await getCampaign(workspaceId, id);
+  if (c.status === 'PREPARING') throw new AppError('CAMPAIGN_STATE', 'Campaign email sending is off', 409);
   const to = input.to.toLowerCase();
   const member = await db().workspaceMember.findFirst({ where: { workspaceId, user: { email: to } } });
   if (!member) throw new AppError('FORBIDDEN', 'Test emails can only be sent to the email address of a member of this workspace', 403);
-  const c = await getCampaign(workspaceId, id);
   const accountId = input.emailAccountId ?? c.accounts.find((a) => a.emailAccount.status === 'CONNECTED')?.emailAccountId;
   const account = accountId ? await db().emailAccount.findFirst({ where: { id: accountId, workspaceId, status: 'CONNECTED' } }) : null;
   if (!account) throw new AppError('ACCOUNT_NOT_CONNECTED', 'Select a connected mailbox for the test', 400);

@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../core/browser-e2e-safety.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { db, Prisma } from '../core/db.js';
@@ -103,6 +104,7 @@ export const SmtpConnectSchema = z.object({
 }).refine((v) => (v.smtpUsername || v.username) && (v.imapUsername || v.username) && (v.smtpPassword || v.password) && (v.imapPassword || v.password), { message: 'SMTP and IMAP each require a username and password (or provide shared credentials)' });
 
 export async function connectSmtp(workspaceId: string, input: z.infer<typeof SmtpConnectSchema>, actor: Actor) {
+  blockBrowserE2eDelivery('mailbox.connect');
   await (await import('./billing.js')).assertEntitled(workspaceId, 'mailboxes');
   const email = input.emailAddress.toLowerCase();
   const smtpUsername = input.smtpUsername ?? input.username!;
@@ -425,6 +427,7 @@ export async function testAccount(workspaceId: string, id: string) {
 
 /** One explicit, clearly labeled delivery diagnostic addressed only to the same authorized mailbox. */
 export async function sendMailboxDiagnostic(workspaceId: string, id: string, actor: Actor) {
+  blockBrowserE2eDelivery('mailbox.test-send');
   const account = await db().emailAccount.findFirst({ where: { id, workspaceId } });
   if (!account) throw NotFound('Email account');
   if (account.status !== 'CONNECTED') throw new AppError('CONFLICT', `Mailbox is ${account.status}; reconnect or resume it before testing`, 409);

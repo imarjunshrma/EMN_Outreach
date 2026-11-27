@@ -1,3 +1,4 @@
+import { guardBrowserE2eQueue } from './browser-e2e-safety.js';
 import { Queue, type JobsOptions } from 'bullmq';
 import { newRedis } from './redis.js';
 
@@ -42,6 +43,7 @@ const queues = new Map<string, Queue>();
 let connection: ReturnType<typeof newRedis> | null = null;
 
 export function queue(name: QueueName): Queue {
+  guardBrowserE2eQueue(name, 'publish');
   let q = queues.get(name);
   if (!q) {
     connection ??= newRedis();

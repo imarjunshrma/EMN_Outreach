@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery, browserE2e } from './browser-e2e-safety.js';
 import nodemailer from 'nodemailer';
 import { logger } from './logger.js';
 
@@ -23,6 +24,7 @@ class SmtpSystemMailer implements SystemMailer {
 
 let mailer: SystemMailer | null = null;
 export function systemMailer(): SystemMailer {
+  if (browserE2e()) return { configured: false, async send() { blockBrowserE2eDelivery('system-mail.send'); } };
   mailer ??= new SmtpSystemMailer(process.env.SYSTEM_SMTP_URL || undefined, process.env.SYSTEM_MAIL_FROM || 'Outvexa <no-reply@localhost>');
   return mailer;
 }

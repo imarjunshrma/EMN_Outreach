@@ -1,3 +1,4 @@
+import { blockBrowserE2eDelivery } from '../core/browser-e2e-safety.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, Prisma } from '../core/db.js';
@@ -87,6 +88,7 @@ function startingTarget(config: WarmupConfig, dailyLimit: number) {
 }
 
 export async function enrollWarmup(workspaceId: string, emailAccountId: string, config: WarmupConfig, actor: Actor) {
+  blockBrowserE2eDelivery('warmup.enroll');
   requireOperator(actor);
   const account = await db().emailAccount.findFirst({ where: { workspaceId, id: emailAccountId } });
   if (!account) throw NotFound('Mailbox');
@@ -164,6 +166,7 @@ async function healthIssue(workspaceId: string, mailboxId: string, now: Date) {
 }
 
 export async function changeWarmup(workspaceId: string, id: string, action: z.infer<typeof WarmupAction>['action'], actor: Actor) {
+  blockBrowserE2eDelivery('warmup.change');
   requireOperator(actor);
   const program = await db().warmupProgram.findFirst({ where: { workspaceId, id } });
   if (!program) throw NotFound('Warm-up program');
@@ -212,6 +215,7 @@ export function evaluateProgress(config: WarmupConfig, target: number, elapsedDa
 }
 
 export async function processWarmup(workspaceId: string, id: string, now = new Date()) {
+  blockBrowserE2eDelivery('warmup.process');
   const p = await db().warmupProgram.findFirst({ where: { workspaceId, id, status: 'ACTIVE', nextAt: { lte: now } }, include: { emailAccount: true, workspace: true } });
   if (!p) return;
   if (await db().warmupMessage.count({ where: { programId: id, status: 'RESERVED' } })) return;
@@ -346,6 +350,7 @@ export async function processWarmup(workspaceId: string, id: string, now = new D
 }
 
 export async function tickWarmup(now = new Date()) {
+  blockBrowserE2eDelivery('warmup.tick');
   const stale = await db().warmupMessage.findMany({ where: { status: 'RESERVED', reservedAt: { lt: new Date(+now - 15 * 60_000) } }, take: 100 });
   for (const row of stale) {
     const result = await db().warmupMessage.updateMany({ where: { id: row.id, status: 'RESERVED' }, data: { status: 'UNCERTAIN', reason: 'Interrupted after reservation; confirm through the provider.' } });

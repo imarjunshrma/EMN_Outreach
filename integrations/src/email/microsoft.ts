@@ -1,3 +1,4 @@
+import { assertRealEmailProviderAllowed } from './real-provider-safety.js';
 import { httpJson, httpRequest, ProviderError, type FetchLike } from '../http.js';
 import { buildMime, parseRawMessage } from './mime.js';
 import {
@@ -29,7 +30,7 @@ export class MicrosoftOAuthClient implements OAuthClient {
     private readonly clientSecret: string,
     private readonly tenant = 'common',
     private readonly fetchImpl?: FetchLike,
-  ) {}
+  ) { assertRealEmailProviderAllowed(); }
 
   private base() { return `https://login.microsoftonline.com/${this.tenant}/oauth2/v2.0`; }
 
@@ -84,7 +85,7 @@ interface DeltaPage { value: Array<{ id: string; '@removed'?: unknown }>; '@odat
 
 export class MicrosoftGraphProvider implements EmailProvider, ChangeSubscriptionProvider {
   readonly name = 'MICROSOFT' as const;
-  constructor(private readonly fetchImpl?: FetchLike, private readonly maxInitialMessages = 300) {}
+  constructor(private readonly fetchImpl?: FetchLike, private readonly maxInitialMessages = 300) { assertRealEmailProviderAllowed(); }
 
   private json<T>(auth: AuthHandle, url: string, init: RequestInit = {}) {
     const full = url.startsWith('http') ? url : `${GRAPH}${url}`;
