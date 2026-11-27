@@ -1,11 +1,13 @@
 'use client';
 
+import Link from 'next/link';
 import { useState } from 'react';
-import { useWsMutation, useWsQuery } from '@/lib/hooks';
+import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
 import { Badge, Button, Card, ConfirmButton, Empty, Notice, PageHeader, QueryView, Textarea } from '@/components/ui';
 import { EMPTY, IcpEditor, LIST_FIELDS, type Criteria, type Icp } from '@/components/icp-editor';
 
 export default function Icps() {
+  const ws = useWs();
   const q = useWsQuery<Icp[]>('/icps');
   const [draft, setDraft] = useState({ name: '', description: '', criteria: EMPTY, minScore: 60, isActive: true });
   const [editing, setEditing] = useState<string | null>(null);
@@ -19,7 +21,8 @@ export default function Icps() {
   const del = useWsMutation<string>((id) => ({ path: `/icps/${id}`, method: 'DELETE' }), { success: 'Deleted' });
   return (
     <>
-      <PageHeader title="Ideal customer profile" subtitle="Describe who you want to reach. The ICP drives prospect searches and AI scoring (with an explanation per criterion)." />
+      <PageHeader title="Ideal customer profile" subtitle="Describe who you want to reach. The ICP drives prospect searches and AI scoring (with an explanation per criterion)."
+        actions={<Link className="inline-flex h-10 items-center rounded-lg border border-slate-300 px-4 text-sm font-semibold hover:border-brand-500 dark:border-slate-700" href={`/w/${ws}/ai-studio/imports`}>Import ICPs</Link>} />
       <div className="grid gap-4 lg:grid-cols-5">
         <div className="space-y-4 lg:col-span-3">
           <Card title="Describe your ideal customer (AI)">

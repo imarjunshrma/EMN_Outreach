@@ -144,7 +144,17 @@ function populateTemplate(template: Buffer, updatedService?: string) {
   for (const [entity, { sheet }] of Object.entries(IMPORT_ENTITIES)) {
     if (updatedService && entity !== 'SERVICE') continue;
     const { name, description } = workbookRecord(entity);
-    XLSX.utils.sheet_add_aoa(workbook.Sheets[sheet], [[`fixture-${entity.toLowerCase()}`, name, updatedService ?? description]], { origin: 'A2' });
+    const settings: Record<string, Record<string, string | number>> = {
+      WRITING_SETTINGS: { tone: 'consultative', minWords: 35, language: 'Spanish' },
+      RESEARCH_SETTINGS: { minClaims: 2, webSearch: 'false' },
+      ICP_CRITERIA: { titles: 'Operations Director', employeeMin: 50, threshold: 72, aiInstructions: 'Inspect instrumentation needs.' },
+      TRAINING_EXAMPLE: { content: 'Could a better calibration process help your operators?', category: 'EMAIL', polarity: 'POSITIVE' },
+      PROMPT_PROFILE: { instructions: 'Draft a short outreach message using verified facts only.', tone: 'consultative' },
+    };
+    const worksheet = workbook.Sheets[sheet];
+    const [headers] = XLSX.utils.sheet_to_json<string[]>(worksheet, { header: 1 });
+    const values = { externalId: `fixture-${entity.toLowerCase()}`, name, description: updatedService ?? description, ...settings[entity] };
+    XLSX.utils.sheet_add_aoa(worksheet, [headers.map(header => values[header as keyof typeof values] ?? null)], { origin: 'A2' });
   }
   return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
@@ -227,13 +237,20 @@ test('reviews and applies the workbook, retrieves eligible knowledge and dedupli
     await proof.getByRole('button', { name: 'Reject', exact: true }).click();
     await expect(proof.getByText('Rejected', { exact: true })).toBeVisible();
 
+    const additionalTypes = ['PRODUCT', 'WRITING_SETTINGS', 'RESEARCH_SETTINGS', 'ICP_CRITERIA', 'TRAINING_EXAMPLE', 'PROMPT_PROFILE'];
+    for (const type of additionalTypes) {
+      const proposal = page.locator('article').filter({ has: page.getByRole('heading', { name: workbookRecord(type).name, exact: true }) });
+      await proposal.getByText('Review details', { exact: true }).click();
+      await proposal.getByRole('button', { name: 'Approve', exact: true }).click();
+      await expect(proposal.getByText('Approved', { exact: true })).toBeVisible();
+    }
     await page.getByRole('button', { name: 'Apply approved items' }).click();
     await expect(service.getByText('Applied', { exact: true })).toBeVisible({ timeout: 60_000 });
     await expect(company.getByText('Applied', { exact: true })).toBeVisible();
     await expect(audience.getByText('Applied', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Audit history' })).toBeVisible();
     const session = await api<{ items: Array<{ status: string; destinationEntityId: string | null }>; auditEvents: unknown[] }>(page, base, `/ai-studio/imports/${sessionId}`);
-    expect(session.items.filter((item) => item.status === 'APPLIED' && item.destinationEntityId)).toHaveLength(3);
+    expect(session.items.filter((item) => item.status === 'APPLIED' && item.destinationEntityId)).toHaveLength(9);
     expect(session.auditEvents.length).toBeGreaterThan(2);
     const config = await api<{ version: number; data: object }>(page, base, '/ai-studio/config/knowledge');
     expect(JSON.stringify(config.data)).toContain(companyName);
@@ -257,8 +274,7 @@ test('reviews and applies the workbook, retrieves eligible knowledge and dedupli
     const { retrieveImportedKnowledge } = await import('../backend/src/services/knowledge-import-apply.js');
     const { buildSnapshot } = await import('../backend/src/services/ai-studio.js');
     const research = await retrieveImportedKnowledge(workspaceId, '', ['TARGET_AUDIENCE', 'TARGET_PERSONA', 'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'RESEARCH_RULE'], 6);
-    expect(research).toHaveLength(1);
-    expect(research[0].text).toContain(workbookRecord('TARGET_AUDIENCE').name);
+    expect(research.some(document => document.text.includes(workbookRecord('TARGET_AUDIENCE').name))).toBe(true);
     const campaign = await api<{ id: string }>(page, base, '/campaigns', 'POST', { name: 'Synthetic importer context' });
     const personalization = await buildSnapshot(workspaceId, campaign.id);
     expect(JSON.stringify(personalization.knowledge.data)).toContain(companyDescription);

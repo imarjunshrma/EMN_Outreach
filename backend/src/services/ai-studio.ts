@@ -143,14 +143,15 @@ export async function getProfile(workspaceId: string, id: string) {
   return p;
 }
 
-export async function createProfile(workspaceId: string, input: z.infer<typeof ProfileCreateSchema>, actor: Actor) {
+export async function createProfile(workspaceId: string, input: z.infer<typeof ProfileCreateSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
   assertValidPrompt(input.instructions);
-  const p = await db().$transaction(async (tx) => {
+  const write = async (tx: Prisma.TransactionClient) => {
     const prof = await tx.promptProfile.create({ data: { workspaceId, name: input.name, description: input.description ?? null } });
     const v = await tx.promptProfileVersion.create({ data: { workspaceId, profileId: prof.id, version: 1, instructions: input.instructions, settings: input.settings as Prisma.InputJsonValue, changeNote: 'Created', createdById: actor.userId ?? null } });
     return tx.promptProfile.update({ where: { id: prof.id }, data: { activeVersionId: v.id } });
-  });
-  await audit(workspaceId, actor, 'ai_studio.profile_created', { type: 'prompt_profile', id: p.id }, { name: p.name });
+  };
+  const p = await (transaction ? write(transaction) : db().$transaction(write));
+  await audit(workspaceId, actor, 'ai_studio.profile_created', { type: 'prompt_profile', id: p.id }, { name: p.name }, transaction);
   return p;
 }
 
@@ -162,13 +163,15 @@ export async function updateProfileMeta(workspaceId: string, id: string, input: 
 }
 
 /** Profiles are versioned: editing creates a new version; campaigns approved on an older version keep it (snapshot). */
-export async function createProfileVersion(workspaceId: string, id: string, input: z.infer<typeof ProfileVersionSchema>, actor: Actor) {
-  const p = await getProfile(workspaceId, id);
+export async function createProfileVersion(workspaceId: string, id: string, input: z.infer<typeof ProfileVersionSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const p = await client.promptProfile.findFirst({ where: { id, workspaceId }, include: { versions: { orderBy: { version: 'desc' }, take: 1 } } });
+  if (!p) throw NotFound('Prompt profile');
   assertValidPrompt(input.instructions);
   const version = (p.versions[0]?.version ?? 0) + 1;
-  const v = await db().promptProfileVersion.create({ data: { workspaceId, profileId: id, version, instructions: input.instructions, settings: input.settings as Prisma.InputJsonValue, changeNote: input.changeNote ?? null, createdById: actor.userId ?? null } });
-  if (input.activate) await db().promptProfile.update({ where: { id }, data: { activeVersionId: v.id } });
-  await audit(workspaceId, actor, 'ai_studio.profile_version_created', { type: 'prompt_profile', id }, { version, activated: input.activate });
+  const v = await client.promptProfileVersion.create({ data: { workspaceId, profileId: id, version, instructions: input.instructions, settings: input.settings as Prisma.InputJsonValue, changeNote: input.changeNote ?? null, createdById: actor.userId ?? null } });
+  if (input.activate) await client.promptProfile.update({ where: { id }, data: { activeVersionId: v.id } });
+  await audit(workspaceId, actor, 'ai_studio.profile_version_created', { type: 'prompt_profile', id }, { version, activated: input.activate }, transaction);
   return v;
 }
 

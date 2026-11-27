@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import JSZip from 'jszip';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../backend/src/core/db.js';
@@ -6,7 +8,7 @@ import { redis } from '../../backend/src/core/redis.js';
 import { QUEUES, queue } from '../../backend/src/core/queues.js';
 import { createImport, getImport, recoverImportJobs } from '../../backend/src/services/knowledge-import.js';
 import { processImportJob } from '../../backend/src/services/knowledge-import-worker.js';
-import { parseImportFile } from '../../backend/src/services/knowledge-import-parser.js';
+import { EMPTY_TEMPLATE_NOTICE, parseImportFile } from '../../backend/src/services/knowledge-import-parser.js';
 import { addAiProvider, createUserSession, installFakes, type Session } from '../helpers/harness.js';
 import type { FakeAi } from '../helpers/fakes.js';
 
@@ -161,5 +163,53 @@ describe('Knowledge Importer authorization', () => {
     expect((await v.post(`imports/${created.id}/apply`)).status).toBe(403);
     expect((await viewer.agent.post(`/api/v1/w/${owner.workspaceId}/ai-studio/imports`).set('x-csrf-token', viewer.csrf).attach('files', Buffer.from('x'), 'x.txt')).status).toBe(403);
     expect((await db().knowledgeImportItem.findUniqueOrThrow({ where: { id: proposal.id } })).status).toBe(proposal.status);
+  });
+});
+
+describe('Knowledge Importer XLSX uploads', () => {
+  const fixture = (name: string) => readFile(join(import.meta.dirname, '..', 'fixtures', 'knowledge-import', name));
+  const xlsx = async (name: string) => ({ originalname: name, mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: await fixture(name) });
+
+  it('accepts the untouched template as an unfilled workbook, without needing an AI provider', async () => {
+    const s = await createUserSession(`template-${randomUUID()}@example.test`);
+    const created = await createImport(s.workspaceId, [await xlsx('outvexa-outreach-brain-template-v2.xlsx')], actor(s.userId));
+    const settled = await drive(s.workspaceId, created.id);
+    expect(settled).toMatchObject({ status: 'REVIEW', errorSummary: null });
+    const view = await getImport(s.workspaceId, created.id);
+    expect(view.files).toEqual([expect.objectContaining({ status: 'REVIEW', error: EMPTY_TEMPLATE_NOTICE })]);
+    expect(view.items).toEqual([]);
+  });
+
+  it('uploads a workbook written by openpyxl and proposes a record from every entity sheet', async () => {
+    const s = await workspaceWithAi(`openpyxl-${randomUUID()}@example.test`);
+    extractor(fakes.openai as FakeAi, (user) => {
+      const source = /<untrusted_content source="knowledge_import">\n([\s\S]+?)\n<\/untrusted_content>/.exec(user)?.[1] ?? '';
+      return { items: source.split('\n\n').map((fragment) => {
+        const [header, ...lines] = fragment.split('\n');
+        const meta = JSON.parse(header) as { sourceIndex: number; worksheetEntityType: string };
+        const name = lines.find((line) => line.startsWith('name: '))!.slice(6);
+        return { ...item(meta.worksheetEntityType, name, lines[0]), sourceIndex: meta.sourceIndex };
+      }) };
+    });
+    const created = await createImport(s.workspaceId, [await xlsx('openpyxl-agency-workbook.xlsx')], actor(s.userId));
+    const settled = await drive(s.workspaceId, created.id);
+    expect(settled).toMatchObject({ status: 'REVIEW', errorSummary: null });
+    const view = await getImport(s.workspaceId, created.id);
+    expect(view.files).toEqual([expect.objectContaining({ status: 'REVIEW', error: null })]);
+    expect(new Set(view.items.map((proposal) => proposal.entityType))).toEqual(new Set(['COMPANY_PROFILE', 'SERVICE', 'COMMERCIAL_OFFER', 'TARGET_AUDIENCE',
+      'TARGET_PERSONA', 'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'COMPETITOR', 'RESEARCH_RULE', 'OUTREACH_RULE', 'EXCLUSION', 'PROOF_CASE_STUDY', 'CAMPAIGN_PREFERENCE']));
+    expect(view.items).toHaveLength(14);
+  });
+
+  it('reports a damaged worksheet by name instead of a generic malformed-file error', async () => {
+    const s = await createUserSession(`damaged-${randomUUID()}@example.test`);
+    const zip = await JSZip.loadAsync(await fixture('outvexa-outreach-brain-template-v2.xlsx'));
+    const sheet = await zip.file('xl/worksheets/sheet2.xml')!.async('string');
+    zip.file('xl/worksheets/sheet2.xml', sheet.replace('</sheetData>', '<row r="2"><c r="A2" t="x"><v>1</v></c></row></sheetData>'));
+    const damaged = { originalname: 'damaged.xlsx', mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) };
+    const created = await createImport(s.workspaceId, [damaged], actor(s.userId));
+    await drive(s.workspaceId, created.id);
+    const [file] = (await getImport(s.workspaceId, created.id)).files;
+    expect(file).toMatchObject({ status: 'FAILED', error: 'Worksheet "Services" could not be read: Cell type not supported' });
   });
 });

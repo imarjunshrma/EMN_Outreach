@@ -269,3 +269,31 @@ unset NODE_ENV OUTVEXA_WARMUP_TEST OUTVEXA_EMAIL_MODE DATABASE_MIGRATION_URL
 - Cycles always need an administrator to edit references. The importer never creates mutually dependent records automatically. Similarity suggestions never merge records.
 
 **CONDITIONALLY READY**
+
+## 18. Expanded AI Outreach Brain and ICP workbook coverage
+
+The v3 workbook retains v1 and v2 import compatibility. It adds worksheets for Products, Research Settings, Writing Settings, Prompt Profiles, Training Examples, and Achievements. The importer now writes these through the existing Business Knowledge, versioned workspace configuration, prompt profile, and outreach training services. Review and application authorization remain in the existing pipeline.
+
+| Destination | Expanded fields and application behavior |
+| --- | --- |
+| Company profile | Native target audience, customer profiles, and pricing notes |
+| Products | Name, description and stable workbook identifier in versioned Business Knowledge |
+| Services | Employee ranges, included/excluded industries and geographies, structured exclusion rules, methodology, availability, and evidence notes. Partial updates retain omitted terms and still create drafts. |
+| ICP | Titles, seniorities, industries, countries, employee bounds, keywords, instructions, active status, criteria, and threshold. Omitted fields carry forward to the next revision. |
+| Writing settings | Tone, length, language, CTA, style, complexity, intensity, formality, examples, restrictions, and instructions |
+| Research settings | Topics, signals, source toggles, evidence windows, minimum claims, search budgets, missing-evidence behavior, and instructions |
+| Outreach rules | Native category, priority, condition, active state, and trigger terms |
+| Prompt profiles | Instructions and writing overrides, with immutable versions |
+| Training examples | Content and correction, category, polarity, explanation, tags, active state, and reviewer attribution |
+| Achievements and case studies | Visible in Business Knowledge as unverified evidence. Existing native evidence is preserved. Import approval alone does not verify claims. |
+| Competitors | Approved explicit facts can populate Business Knowledge alongside the existing structured competitor record. Existing native entries are preserved. |
+
+For recognized worksheets that produce structured proposals, explicit workbook cells for native controls take precedence over AI paraphrases. The destination schema validates the resulting record. Operational settings, provider credentials, and campaign activation stay in their existing administrative workflows.
+
+No migration was needed. Existing JSON configuration versioning and the current ICP schema carry the new fields.
+
+- The focused five-file Vitest suite in section 15 passed **34 tests** on the isolated PostgreSQL database with Redis DB 12.
+- The expanded Chrome workflow downloaded v3, extracted all worksheets, approved nine proposals including products, writing, research, ICP, prompt profiles, and training examples, and verified application, retrieval, and identical re-import. The separate cancellation, retry, and cycle-resolution workflow also passed.
+- Backend and frontend type checks and production builds, repository ESLint, and `git diff --check` were rerun. The release provider prerequisite in section 6 remains open.
+
+**CONDITIONALLY READY**

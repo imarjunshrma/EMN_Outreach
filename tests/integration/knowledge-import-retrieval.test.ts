@@ -46,6 +46,54 @@ async function apply(s: Session, item: Awaited<ReturnType<typeof proposed>>) {
 afterEach(() => { vi.unstubAllEnvs(); resetMemoryFetchForTests(); });
 
 describe('approved knowledge import destination retrieval', () => {
+  it('imports native writing, research and ICP controls without clearing omitted settings', async () => {
+    const session = await owner();
+    await apply(session, await proposed(session, 'WRITING_SETTINGS', {
+      name: 'Writing defaults', minWords: 35, maxWords: 90, tone: 'consultative', language: 'Spanish',
+      forbiddenClaims: ['False guarantees'], customInstructions: 'Use verified customer references.',
+    }));
+    expect((await getConfig(session.workspaceId, 'WRITING')).data).toMatchObject({
+      minWords: 35, maxWords: 90, tone: 'consultative', language: 'Spanish', forbiddenClaims: ['False guarantees'],
+    });
+    await apply(session, await proposed(session, 'RESEARCH_SETTINGS', {
+      name: 'Research defaults', webSearch: 'false', maxEvidenceAgeDays: 'null', minClaims: 2, personTopics: ['Published interviews'],
+    }));
+    expect((await getConfig(session.workspaceId, 'RESEARCH')).data).toMatchObject({
+      permittedSources: { webSearch: false, companyWebsite: true }, maxEvidenceAgeDays: null, minClaims: 2, personTopics: ['Published interviews'],
+    });
+    const product = await proposed(session, 'PRODUCT', { name: 'Sensor console', description: 'Displays current instrument readings.' });
+    await apply(session, product);
+    expect((await getConfig(session.workspaceId, 'KNOWLEDGE')).data.products).toEqual([{ name: 'Sensor console', description: 'Displays current instrument readings.' }]);
+    const training = await apply(session, await proposed(session, 'TRAINING_EXAMPLE', {
+      name: 'Concise opener', content: 'Would improved calibration help your operators?', category: 'EMAIL', polarity: 'POSITIVE',
+    }));
+    expect(await db().outreachExample.findUnique({ where: { id: training.destinationEntityId } })).toMatchObject({ isHumanApproved: true, reviewedById: session.userId });
+    const profile = await apply(session, await proposed(session, 'PROMPT_PROFILE', {
+      name: 'Industrial outreach', instructions: 'Write a concise message from verified facts.', tone: 'consultative',
+    }));
+    const version = await apply(session, await proposed(session, 'PROMPT_PROFILE', { name: 'Industrial outreach', maxWords: 80 }));
+    expect(version).toMatchObject({ destinationEntityId: profile.destinationEntityId, applicationResult: 'UPDATED' });
+    expect(await db().promptProfileVersion.findFirst({ where: { profileId: profile.destinationEntityId }, orderBy: { version: 'desc' } }))
+      .toMatchObject({ version: 2, settings: { tone: 'consultative', maxWords: 80 } });
+    await apply(session, await proposed(session, 'ACHIEVEMENT', {
+      name: 'Synthetic certification', description: 'Published internal certification results.', sourceEvidence: 'https://example.test/certificate',
+    }, { classification: 'CLAIM' }));
+    expect((await getConfig(session.workspaceId, 'KNOWLEDGE')).data.achievements)
+      .toEqual([{ text: 'Published internal certification results.', source: 'https://example.test/certificate', verified: false }]);
+    expect(await retrieveImportedKnowledge(session.workspaceId, 'Synthetic certification', ['ACHIEVEMENT'])).toEqual([]);
+    const template = { name: 'Industrial buyer', titles: ['Director'], countries: ['US'], seniorities: ['director'], industries: ['Manufacturing'],
+      employeeMin: 100, employeeMax: 1000, aiInstructions: 'Focus on workplace instrumentation.', isActive: 'false' };
+    const first = await apply(session, await proposed(session, 'ICP_CRITERIA', template));
+    const update = await proposed(session, 'ICP_CRITERIA', { name: template.name, threshold: 75 });
+    await apply(session, update);
+    expect(await db().idealCustomerProfile.findUnique({ where: { id: first.destinationEntityId } })).toMatchObject({
+      isActive: false, minScore: 75, aiInstructions: template.aiInstructions, criteria: {
+        titles: template.titles, countries: template.countries, seniorities: template.seniorities, industries: template.industries,
+        employeeMin: 100, employeeMax: 1000,
+      },
+    });
+  });
+
   it('applies additional native destinations and preserves cross-sheet references in approved records', async () => {
     const s = await owner();
     const service = await proposed(s, 'SERVICE', { name: 'Synthetic diagnostics', externalId: 'service-1', description: 'Tests industrial sensors.' });

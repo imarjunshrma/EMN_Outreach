@@ -5,8 +5,8 @@ import { stringify } from 'csv-stringify/sync';
 import { sha256 } from '../core/crypto.js';
 import { db, Prisma } from '../core/db.js';
 import { AppError, BadRequest, NotFound } from '../core/errors.js';
-import { audit, publish, type Actor } from '../core/audit.js';
-import { acquireLock } from '../core/redis.js';
+import { audit, publish, WORKER_ACTOR, type Actor } from '../core/audit.js';
+import { acquireLock, redis } from '../core/redis.js';
 import { store } from '../core/storage.js';
 import { enqueue, QUEUES } from '../core/queues.js';
 import { emitEvent } from './automation.js';
@@ -493,9 +493,30 @@ export async function retryImport(workspaceId: string, importId: string, actor: 
   return { importId, status: 'queued' };
 }
 
+/**
+ * Maintenance: an import left RUNNING by a worker that died has no live lock. Mark it FAILED so it shows as interrupted
+ * and can be retried (a retry skips leads that were already imported). Without this it would stay RUNNING forever.
+ */
+export async function recoverInterruptedLeadImports() {
+  const running = await db().importJob.findMany({ where: { status: 'RUNNING' }, select: { id: true, workspaceId: true }, orderBy: { createdAt: 'asc' }, take: 200 });
+  let recovered = 0;
+  for (const job of running) {
+    if (await redis().exists(`lock:${importLockKey(job.workspaceId, job.id)}`)) continue;
+    const changed = await db().importJob.updateMany({ where: { id: job.id, workspaceId: job.workspaceId, status: 'RUNNING' }, data: { status: 'FAILED', finishedAt: new Date() } });
+    if (!changed.count) continue;
+    recovered++;
+    await audit(job.workspaceId, WORKER_ACTOR, 'import.interrupted', { type: 'import', id: job.id }, { reason: 'The worker stopped before the import finished. Retry it to continue.' });
+  }
+  return { recovered };
+}
+
 /** Worker: process an import job in batches. */
+const importLockKey = (workspaceId: string, importId: string) => `import-csv:${workspaceId}:${importId}`;
+const IMPORT_LOCK_TTL_MS = 2 * 60_000;
+
 export async function processImport(workspaceId: string, importId: string) {
-  const release = await acquireLock(`import-csv:${workspaceId}:${importId}`, 15 * 60_000);
+  // Renewed while the file is processed: a long file keeps its lock, and a crashed worker's lock lapses within the TTL.
+  const release = await acquireLock(importLockKey(workspaceId, importId), IMPORT_LOCK_TTL_MS, { renewEveryMs: 30_000 });
   if (!release) return;
   try {
     return await processImportRows(workspaceId, importId);

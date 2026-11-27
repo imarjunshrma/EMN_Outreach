@@ -65,11 +65,16 @@ route({ method: 'post', path: '/orgs/:organizationId/export', tag: 'Organization
   handler: async (c) => {
     const org = await tenancy.getOrganization(c.organizationId);
     const ws = await db().workspace.findMany({ where: { organizationId: c.organizationId }, select: { id: true } });
-    const workspaces = [];
-    for (const w of ws) workspaces.push(await ops.workspaceExport(w.id, c.actor));
     await platformAudit({ actorUserId: c.userId, action: 'organization.exported', organizationId: c.organizationId, ip: c.req.ip });
-    c.res.setHeader('content-disposition', 'attachment; filename="organization-export.json"');
-    c.res.json({ exportedAt: new Date().toISOString(), organization: org, workspaces });
+    // Streamed one workspace at a time: holding every workspace in memory could exhaust the API process.
+    await ops.streamJsonDownload(c.res, 'organization-export.json', async (sink) => {
+      await sink(`{"exportedAt":${JSON.stringify(new Date().toISOString())},"organization":${JSON.stringify(org)},"workspaces":[`);
+      for (const [index, w] of ws.entries()) {
+        if (index) await sink(',');
+        await ops.writeWorkspaceExport(w.id, c.actor, sink);
+      }
+      await sink(']}');
+    });
   } });
 route({ method: 'post', path: '/orgs/:organizationId/deletion', tag: 'Organizations', summary: 'Schedule permanent deletion of the organization (grace period, then erased)', auth: 'org', orgPermission: 'own', allowWhenInactive: true, status: 200,
   body: z.object({ confirmName: z.string().min(1).max(80) }), handler: (c) => tenancy.requestDeletion(c.organizationId, c.actor, c.body.confirmName) });

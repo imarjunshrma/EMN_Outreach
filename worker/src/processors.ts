@@ -170,6 +170,7 @@ export const HANDLERS: Record<QueueName, Record<string, Handler>> = {
     'storage.reconcile': async () => (await import('../../backend/src/services/storage-accounting.js')).reconcileStorage(),
     'emailVerification.datasets.refresh': async () => (await import('../../backend/src/services/email-verification-datasets.js')).refreshDisposableDataset(),
     'knowledge.import.recover': async () => (await import('../../backend/src/services/knowledge-import.js')).recoverImportJobs(),
+    'leads.import.recover': async () => leads.recoverInterruptedLeadImports(),
     'knowledge.website.refresh': async (j) => (await import('../../backend/src/services/business-onboarding.js')).refreshBusinessWebsiteSources(typeof j.data.workspaceId === 'string' ? j.data.workspaceId : undefined),
     'billing.reconcile': async () => (await import('../../backend/src/services/billing.js')).reconcileSubscriptions(),
   },

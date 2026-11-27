@@ -21,11 +21,23 @@ export async function closeRedis() {
 }
 
 /** Simple single-node lock (SET NX PX). Returns a release function or null if not acquired. */
-export async function acquireLock(key: string, ttlMs: number): Promise<(() => Promise<void>) | null> {
+/**
+ * Takes a Redis lock. With `renewEveryMs`, the holder keeps extending it while it runs, so long work never loses its lock
+ * and a crashed holder's lock lapses within `ttlMs` (which lets recovery tell a dead holder from a live one).
+ */
+export async function acquireLock(key: string, ttlMs: number, opts: { renewEveryMs?: number } = {}): Promise<(() => Promise<void>) | null> {
   const token = `${process.pid}-${Math.random().toString(36).slice(2)}`;
   const ok = await redis().set(`lock:${key}`, token, 'PX', ttlMs, 'NX');
   if (ok !== 'OK') return null;
+  const renewal = opts.renewEveryMs ? setInterval(() => {
+    void redis().eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+      1, `lock:${key}`, token, String(ttlMs),
+    ).catch(() => undefined);
+  }, opts.renewEveryMs) : undefined;
+  renewal?.unref();
   return async () => {
+    if (renewal) clearInterval(renewal);
     await redis().eval(
       "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
       1, `lock:${key}`, token,

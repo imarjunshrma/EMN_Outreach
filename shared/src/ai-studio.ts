@@ -38,7 +38,7 @@ export const KnowledgeSchema = z.object({
   website: str(300).default(''),
   description: str(5000).default(''),
   services: z.array(z.object({ name: str(200), description: str(2000).default('') })).max(50).default([]),
-  products: z.array(z.object({ name: str(200), description: str(2000).default('') })).max(50).default([]),
+  products: z.array(z.object({ name: str(200), description: str(2000).default(''), externalId: str(200).optional() })).max(50).default([]),
   usps: list(30).default([]),
   caseStudies: z.array(z.object({ title: str(200), summary: str(3000).default(''), result: str(1000).default(''), url: str(500).default(''), verified: z.boolean().default(false) })).max(50).default([]),
   achievements: z.array(z.object({ text: str(1000), source: str(500).default(''), verified: z.boolean().default(false) })).max(50).default([]),

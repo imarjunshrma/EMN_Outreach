@@ -119,11 +119,19 @@ export async function routeLimits(workspaceId: string, task: AiTaskName) {
 }
 
 async function ensurePrompt(workspaceId: string, task: AiTaskName) {
-  const p = await db().promptTemplate.findFirst({ where: { workspaceId, task, isActive: true }, orderBy: { version: 'desc' } });
+  const active = () => db().promptTemplate.findFirst({ where: { workspaceId, task, isActive: true }, orderBy: { version: 'desc' } });
+  const p = await active();
   if (p) return task === 'COPILOT' ? correctCopilotPrompt(p) : p;
   const d = DEFAULT_PROMPTS[task];
-  if (!d || (await db().promptTemplate.count({ where: { workspaceId, task } }))) return null; // user deactivated everything on purpose
-  return db().promptTemplate.upsert({ where: { workspaceId_task_version: { workspaceId, task, version: 1 } }, update: {}, create: { workspaceId, task, version: 1, systemPrompt: d.system, userPromptTemplate: d.user, isActive: true, changeNote: 'Built-in default' } });
+  if (!d) return null;
+  // Seed the built-in default only for a workspace that has never had a prompt for this task (one whose versions are all
+  // inactive was deactivated on purpose). Concurrent first callers race here: the insert skips an existing version 1
+  // instead of failing, and every caller then reads the same active prompt.
+  if (!(await db().promptTemplate.count({ where: { workspaceId, task } }))) {
+    await db().promptTemplate.createMany({ data: [{ workspaceId, task, version: 1, systemPrompt: d.system, userPromptTemplate: d.user, isActive: true, changeNote: 'Built-in default' }], skipDuplicates: true });
+  }
+  const seeded = await active();
+  return seeded && task === 'COPILOT' ? correctCopilotPrompt(seeded) : seeded;
 }
 
 export interface ImportExtractionPromptSnapshot {
@@ -453,8 +461,26 @@ function validateBaseUrl(provider: ProviderName, raw?: string | null) {
   return url.toString().replace(/\/$/, '');
 }
 
+/**
+ * On an instance with open sign-up, tenants are strangers to each other and to the host, so a custom endpoint must be a
+ * public address: otherwise any tenant could make the server call services on its private network. Private installs keep
+ * local models (Ollama, localhost); AI_ALLOW_PRIVATE_ENDPOINTS=true lets an operator opt in deliberately.
+ */
+async function assertEndpointAllowed(baseUrl: string | null) {
+  if (!baseUrl || process.env.AI_ALLOW_PRIVATE_ENDPOINTS === 'true') return;
+  const { registrationOpen } = await import('./tenancy.js');
+  if (!(await registrationOpen())) return;
+  const { assertPublicUrl } = await import('../../../integrations/src/research/fetcher.js');
+  try {
+    await assertPublicUrl(baseUrl);
+  } catch {
+    throw new AppError('VALIDATION_FAILED', 'This instance accepts sign-ups, so custom AI endpoints must be public HTTPS addresses on the standard port. Local and private-network endpoints are available on private installs.', 400);
+  }
+}
+
 export async function upsertProvider(workspaceId: string, input: { provider: ProviderName; apiKey?: string; defaultModel: string; baseUrl?: string | null; isEnabled?: boolean }, actor: Actor) {
   const baseUrl = validateBaseUrl(input.provider, input.baseUrl);
+  await assertEndpointAllowed(baseUrl);
   if (input.isEnabled === false && await workspaceDefaultProvider(workspaceId) === input.provider) {
     throw new AppError('VALIDATION_FAILED', 'Choose a different workspace default before disabling this provider', 400);
   }

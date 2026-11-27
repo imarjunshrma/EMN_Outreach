@@ -138,6 +138,17 @@ export async function handleWebhook(provider: 'stripe' | 'razorpay', rawBody: st
   let ev;
   try { ev = paymentGateways()[provider].verifyAndParse(rawBody, headers); } catch (e) { throw new AppError('INVALID_SIGNATURE', (e as Error).message, 400); }
   try { await db().billingEvent.create({ data: { provider, eventId: ev.id, type: ev.type, payload: ev.raw as Prisma.InputJsonValue } }); } catch (e) { if ((e as { code?: string }).code === 'P2002') return { duplicate: true }; throw e; }
+  try {
+    return await applyWebhookEvent(provider, ev);
+  } catch (e) {
+    // The event row marks the delivery as handled. If applying it failed, release it so the provider's retry is
+    // processed instead of being answered as a duplicate and lost.
+    await db().billingEvent.deleteMany({ where: { provider, eventId: ev.id } }).catch(() => undefined);
+    throw e;
+  }
+}
+
+async function applyWebhookEvent(provider: 'stripe' | 'razorpay', ev: import('../../../integrations/src/billing/gateways.js').NormalizedBillingEvent) {
   if (ev.type === 'ignored') return { ignored: true };
   if (ev.type === 'refund.updated') return applyRefundEvent(provider, ev);
   if (ev.type === 'dispute.updated') return applyDisputeEvent(provider, ev);

@@ -54,16 +54,18 @@ export async function deleteRule(workspaceId: string, id: string, actor: Actor) 
 export async function listExamples(workspaceId: string) {
   return db().outreachExample.findMany({ where: { workspaceId }, orderBy: { updatedAt: 'desc' } });
 }
-export async function createExample(workspaceId: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor) {
-  const example = await db().outreachExample.create({ data: { workspaceId, ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
-  await audit(workspaceId, actor, 'outreach_brain.example_created', { type: 'outreach_example', id: example.id }, { category: example.category, polarity: example.polarity });
+export async function createExample(workspaceId: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const example = await client.outreachExample.create({ data: { workspaceId, ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
+  await audit(workspaceId, actor, 'outreach_brain.example_created', { type: 'outreach_example', id: example.id }, { category: example.category, polarity: example.polarity }, transaction);
   return example;
 }
-export async function updateExample(workspaceId: string, id: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor) {
-  const example = await db().outreachExample.findFirst({ where: { id, workspaceId } });
+export async function updateExample(workspaceId: string, id: string, input: z.infer<typeof ExampleInputSchema>, actor: Actor, transaction?: Prisma.TransactionClient) {
+  const client = transaction ?? db();
+  const example = await client.outreachExample.findFirst({ where: { id, workspaceId } });
   if (!example) throw NotFound('Outreach example');
-  const updated = await db().outreachExample.update({ where: { id }, data: { ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
-  await audit(workspaceId, actor, 'outreach_brain.example_updated', { type: 'outreach_example', id });
+  const updated = await client.outreachExample.update({ where: { id }, data: { ...input, isHumanApproved: true, reviewedById: actor.userId ?? null, reviewedAt: new Date(), correctedContent: input.correctedContent ?? null, explanation: input.explanation ?? null } });
+  await audit(workspaceId, actor, 'outreach_brain.example_updated', { type: 'outreach_example', id }, {}, transaction);
   return updated;
 }
 export async function deleteExample(workspaceId: string, id: string, actor: Actor) {

@@ -31,6 +31,8 @@ const env = {
   ENCRYPTION_ACTIVE_KEY: '1',
   STORAGE_ROOT: '/tmp/outvexa-knowledge-import-acceptance',
   REGISTRATION_OPEN: 'true',
+  // The synthetic AI provider listens on localhost; sign-up is open here, so private endpoints need the explicit opt-in.
+  AI_ALLOW_PRIVATE_ENDPOINTS: 'true',
   LOG_LEVEL: 'warn',
   QUEUE_PREFIX: process.env.KNOWLEDGE_IMPORT_E2E_QUEUE_PREFIX ?? `outvexa-import-e2e-${process.pid}`,
   E2E_REDIS_URL: '',

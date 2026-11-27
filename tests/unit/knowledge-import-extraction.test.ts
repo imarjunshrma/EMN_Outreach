@@ -3,7 +3,7 @@ import XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { TEMPLATE_SHEETS, parseImportFile, templateWorkbook, validateImportUpload } from '../../backend/src/services/knowledge-import-parser.js';
 import { extractImportRows, validateExtractedItems, type ImportExtractionSnapshot } from '../../backend/src/services/knowledge-import-extraction.js';
-import { validateImportPayload } from '../../shared/src/knowledge-import.js';
+import { importFieldNames, validateImportPayload } from '../../shared/src/knowledge-import.js';
 
 const { runAi } = vi.hoisted(() => ({ runAi: vi.fn() }));
 vi.mock('../../backend/src/services/ai.js', () => ({ runAi }));
@@ -41,16 +41,18 @@ function pdf() {
 }
 
 describe('Knowledge Importer parser', () => {
-  it('builds a v2 workbook with every expected sheet and separate field instructions', async () => {
+  it('builds a v3 workbook with every expected sheet and separate field instructions', async () => {
     const generated = await templateWorkbook();
     const template = XLSX.read(generated);
     expect(template.SheetNames).toEqual(TEMPLATE_SHEETS);
-    expect(template.Sheets.Instructions.B1.v).toBe('v2');
+    expect(template.Sheets.Instructions.B1.v).toBe('v3');
     expect(template.Sheets.Services.B1.v).toBe('name');
-    expect(template.Sheets.Services['!ref']).toBe('A1:S1');
+    const serviceRange = XLSX.utils.decode_range(template.Sheets.Services['!ref']!);
+    expect(serviceRange.e).toEqual({ r: 0, c: importFieldNames('SERVICE').length + 3 });
     expect(template.Sheets.Services.B1.c?.[0]?.t).toMatch(/^Required\. /); // header notes survive the writer
     expect(template.Sheets.Instructions.A7.v).toBe('Company_Profile');
-    await expect(parseImportFile(generated, 'blank.xlsx')).rejects.toThrow(/no importable/);
+    // An unfilled official template is a valid upload with nothing to import (see knowledge-import-xlsx-compat.test.ts).
+    await expect(parseImportFile(generated, 'blank.xlsx')).resolves.toEqual([]);
   });
 
   it('preserves physical row numbers and validates partial v2 and legacy v1 worksheets', async () => {

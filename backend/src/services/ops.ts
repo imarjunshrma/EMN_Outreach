@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import type { Response } from 'express';
 import { Queue } from 'bullmq';
 import { db, Prisma } from '../core/db.js';
 import { adapters } from '../core/container.js';
@@ -214,6 +216,69 @@ export async function workspaceExport(workspaceId: string, actor: Actor) {
   ]);
   await audit(workspaceId, actor, 'workspace.exported');
   return { exportedAt: new Date().toISOString(), leads, companies, campaigns, conversations, suppressions, opportunities, tasks };
+}
+
+/** Receives successive pieces of an export; resolves when the piece may be followed by the next (back-pressure). */
+export type ExportSink = (chunk: string) => Promise<void>;
+const EXPORT_BATCH = 1_000;
+
+/** Writes one JSON array, reading the rows in id order one batch at a time so memory stays bounded. */
+async function writeRows<T extends { id: string }>(sink: ExportSink, page: (cursor: string | undefined) => Promise<T[]>) {
+  await sink('[');
+  let cursor: string | undefined;
+  let first = true;
+  for (;;) {
+    const rows = await page(cursor);
+    if (rows.length) {
+      await sink(`${first ? '' : ','}${rows.map((row) => JSON.stringify(row)).join(',')}`);
+      first = false;
+    }
+    if (rows.length < EXPORT_BATCH) break;
+    cursor = rows[rows.length - 1].id;
+  }
+  await sink(']');
+}
+const after = (cursor: string | undefined) => ({ orderBy: { id: 'asc' as const }, take: EXPORT_BATCH, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) });
+
+/**
+ * Streams the same document as workspaceExport (same keys, same order) without holding the workspace in memory: a large
+ * workspace previously needed several times its export size in API memory.
+ */
+export async function writeWorkspaceExport(workspaceId: string, actor: Actor, sink: ExportSink) {
+  await audit(workspaceId, actor, 'workspace.exported');
+  await sink(`{"exportedAt":${JSON.stringify(new Date().toISOString())},"leads":`);
+  await writeRows(sink, (cursor) => db().lead.findMany({ where: { workspaceId }, ...after(cursor) }));
+  await sink(',"companies":');
+  await writeRows(sink, (cursor) => db().company.findMany({ where: { workspaceId }, ...after(cursor) }));
+  await sink(',"campaigns":');
+  await writeRows(sink, (cursor) => db().campaign.findMany({ where: { workspaceId }, include: { sequence: { include: { steps: { include: { variants: true } } } } }, ...after(cursor) }));
+  await sink(',"conversations":');
+  await writeRows(sink, (cursor) => db().conversation.findMany({ where: { workspaceId }, include: { messages: { select: { direction: true, fromAddress: true, toAddresses: true, subject: true, bodyText: true, sentAt: true, category: true } } }, ...after(cursor) }));
+  await sink(',"suppressions":');
+  await writeRows(sink, (cursor) => db().suppressionEntry.findMany({ where: { workspaceId }, ...after(cursor) }));
+  await sink(',"opportunities":');
+  await writeRows(sink, (cursor) => db().opportunity.findMany({ where: { workspaceId }, ...after(cursor) }));
+  await sink(',"tasks":');
+  await writeRows(sink, (cursor) => db().task.findMany({ where: { workspaceId }, ...after(cursor) }));
+  await sink('}');
+}
+
+/** Sends a JSON download produced piece by piece. A failure after the first byte aborts the response, so a client never
+ *  receives a truncated file that looks complete. */
+export async function streamJsonDownload(res: Response, filename: string, write: (sink: ExportSink) => Promise<void>) {
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('content-disposition', `attachment; filename="${filename}"`);
+  const sink: ExportSink = async (chunk) => {
+    if (res.destroyed) throw new AppError('CLIENT_CLOSED', 'The download was cancelled', 499);
+    if (!res.write(chunk)) await once(res, 'drain');
+  };
+  try {
+    await write(sink);
+    res.end();
+  } catch (error) {
+    if (!res.headersSent) throw error;
+    res.destroy(error as Error);
+  }
 }
 
 // ---------------------------------------------------------------- maintenance & retention

@@ -8,7 +8,7 @@ import { resolveAiSource, type ResolvedSource } from './ai-source.js';
 import type { ParsedImportRow } from './knowledge-import-parser.js';
 import { wrapUntrusted } from '../../../integrations/src/ai/guard.js';
 import {
-  IMPORT_ENTITIES, ImportExtractionOutput, importFieldsToPayload,
+  IMPORT_ENTITIES, ImportExtractionOutput, importFieldKind, importFieldNames, importFieldsToPayload,
   validateImportPayload, type ImportEntityType, type ImportRelationship,
 } from '../../../shared/src/knowledge-import.js';
 
@@ -109,6 +109,19 @@ function importRelationships(fragment: Fragment, inferred: ImportRelationship[])
   return [...unique.values()];
 }
 
+const nativeWorkbookSettings = new Set<ImportEntityType>(['WRITING_SETTINGS', 'RESEARCH_SETTINGS', 'ICP_CRITERIA', 'PROMPT_PROFILE', 'TRAINING_EXAMPLE', 'OUTREACH_RULE', 'SERVICE', 'PRODUCT']);
+
+function explicitWorkbookFields(row: ParsedImportRow) {
+  if (!row.sheet || !row.entityType || !nativeWorkbookSettings.has(row.entityType)) return {};
+  return Object.fromEntries(importFieldNames(row.entityType).flatMap<[string, string | string[] | number]>(key => {
+    const raw = row.value[key];
+    if (raw === undefined || raw === null || raw === '') return [];
+    const kind = importFieldKind(key);
+    if (kind === 'list') return [[key, String(raw).split(/\r?\n/).map(part => part.trim()).filter(Boolean)]];
+    return [[key, typeof raw === 'number' && kind === 'numeric' ? raw : String(raw).trim()]];
+  }));
+}
+
 const normalizeQuote = (value: string) => value.normalize('NFKC').replace(/\s+/g, ' ').trim();
 
 export function validateExtractedItems(result: unknown, fragments: Fragment[], executionId: string): ImportExtractedItem[] {
@@ -116,7 +129,10 @@ export function validateExtractedItems(result: unknown, fragments: Fragment[], e
     const fragment = fragments[item.sourceIndex];
     if (!fragment || !normalizeQuote(fragment.text).includes(normalizeQuote(item.sourceExcerpt))) throw new Error('Extraction excerpt is unsupported by its cited source');
     if (fragment.source.entityType && item.entityType !== fragment.source.entityType) throw new Error('Extraction entity does not match its workbook worksheet');
-    const payload = importFieldsToPayload(item.entityType, item.fields);
+    const payload = validateImportPayload(item.entityType, {
+      ...importFieldsToPayload(item.entityType, item.fields),
+      ...explicitWorkbookFields(fragment.source),
+    });
     const stableId = fragment.source.value.externalId ?? fragment.source.value.external_id;
     if (stableId != null) {
       if (typeof stableId !== 'string' && typeof stableId !== 'number') throw new Error('Invalid workbook identifier');
@@ -124,7 +140,7 @@ export function validateExtractedItems(result: unknown, fragments: Fragment[], e
       validateImportPayload(item.entityType, payload);
     }
     if (typeof payload.externalId === 'string' && !fragment.text.includes(payload.externalId)) throw new Error('Extraction identifier is unsupported by its cited source');
-    const sensitiveClassification = item.entityType === 'PROOF_CASE_STUDY' || item.entityType === 'COMMERCIAL_OFFER';
+    const sensitiveClassification = ['PROOF_CASE_STUDY', 'COMMERCIAL_OFFER', 'ACHIEVEMENT'].includes(item.entityType);
     return {
       entityType: item.entityType,
       payload,

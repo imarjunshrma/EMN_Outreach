@@ -25,7 +25,7 @@ export default function KnowledgeImports() {
 
   return (
     <>
-      <PageHeader title="Knowledge importer" subtitle="Import company knowledge, then review the proposed changes before applying them."
+      <PageHeader title="Knowledge importer" subtitle="Import company knowledge, Outreach Brain settings, and ICPs. Review the proposed changes before applying them."
         actions={<a className="inline-flex h-10 items-center rounded-lg bg-brand-600 px-4 text-sm font-semibold text-white hover:bg-brand-700" href={`/api/v1/w/${ws}/ai-studio/imports/template.xlsx`}>Download XLSX template</a>} />
       {canReview && <Card title="New import" className="mb-5">
         <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); upload.mutate(files); }}>

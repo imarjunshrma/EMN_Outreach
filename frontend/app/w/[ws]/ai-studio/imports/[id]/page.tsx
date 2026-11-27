@@ -19,7 +19,9 @@ function formatLabel(key: string) {
 function destinationPath(destination: string, entityId?: string | null) {
   if (['AI_CONFIG_KNOWLEDGE', 'BUSINESS_SERVICE', 'COMMERCIAL_OFFER'].includes(destination)) return '/ai-studio/knowledge';
   if (destination === 'RESEARCH_CONFIGURATION') return '/ai-studio/research';
-  if (destination === 'OUTREACH_CONFIGURATION') return '/ai-studio/writing';
+  if (destination === 'OUTREACH_CONFIGURATION' || destination === 'WRITING_CONFIGURATION') return '/ai-studio/writing';
+  if (destination === 'PROMPT_PROFILE') return '/ai-studio/profiles';
+  if (destination === 'OUTREACH_TRAINING') return '/ai-studio/training';
   if (destination === 'ICP') return '/icps';
   if (destination === 'APPROVED_EVIDENCE') return '/ai-studio/knowledge-records';
   return entityId ? `/ai-studio/knowledge-records/${entityId}` : null;
@@ -281,7 +283,7 @@ function ImportDetail({ session, ws, canReview }: { session: ImportSession; ws: 
       {session.files.length ? <ul className="divide-y divide-slate-100">
         {session.files.map((file) => <li key={file.id} className="py-2 text-sm">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="break-all font-medium">{file.fileName}</span><span className="text-xs text-slate-500">{Math.ceil(file.byteCount / 1024).toLocaleString()} KB</span>{file.status && <Badge>{file.status}</Badge>}</div>
-          {file.error && <p className="mt-1 text-xs text-red-600">{file.error}</p>}
+          {file.error && <p className={`mt-1 text-xs ${file.status === 'FAILED' ? 'text-red-600' : 'text-slate-600 dark:text-slate-300'}`}>{file.error}</p>}
         </li>)}
       </ul> : <p className="text-sm text-slate-500">No new files were attached to this session.</p>}
     </Card>

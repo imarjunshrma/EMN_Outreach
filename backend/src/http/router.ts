@@ -114,7 +114,11 @@ export function mountRoutes(app: Express) {
         if (def.rateLimit) {
           const who = def.rateLimit.key === 'user' ? auth?.userId : def.rateLimit.key === 'workspace' ? String(req.params.workspaceId ?? '') : req.ip;
           const decision = rateLimit(`${def.method}:${def.path}:${who ?? req.ip}`, def.rateLimit.limit, def.rateLimit.windowSec);
-          const r = def.rateLimit.timeoutMs ? await boundedQuotaCheck(decision, def.rateLimit.timeoutMs) : await decision;
+          // Redis holds the counters. If it is unreachable, fail closed with a prompt 503 instead of waiting for it to
+          // return (the client queues commands while reconnecting, so an unbounded wait hangs the request).
+          const r = def.rateLimit.timeoutMs
+            ? await boundedQuotaCheck(decision, def.rateLimit.timeoutMs, new AppError('IMPORT_ADMISSION_UNAVAILABLE', 'Upload admission is temporarily unavailable. Retry shortly.', 503))
+            : await boundedQuotaCheck(decision, RATE_LIMIT_TIMEOUT_MS, new AppError('RATE_LIMIT_UNAVAILABLE', 'This action is temporarily unavailable. Retry shortly.', 503));
           res.setHeader('X-RateLimit-Remaining', String(Math.max(0, r.remaining)));
           if (!r.allowed) {
             res.setHeader('Retry-After', String(r.resetSec));
@@ -222,9 +226,11 @@ export function mountRoutes(app: Express) {
   }
 }
 
-async function boundedQuotaCheck(decision: ReturnType<typeof rateLimit>, timeoutMs: number) {
+/** Longest wait for a rate-limit decision before the request is refused with 503. */
+const RATE_LIMIT_TIMEOUT_MS = 2_000;
+
+async function boundedQuotaCheck(decision: ReturnType<typeof rateLimit>, timeoutMs: number, unavailable: AppError) {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const unavailable = new AppError('IMPORT_ADMISSION_UNAVAILABLE', 'Upload admission is temporarily unavailable. Retry shortly.', 503);
   try {
     return await Promise.race([
       decision.catch(() => { throw unavailable; }),

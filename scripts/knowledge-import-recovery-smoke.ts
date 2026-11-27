@@ -61,6 +61,12 @@ async function closeWorker(worker: Worker) {
 }
 
 async function child() {
+  if (process.argv[3] === 'lead-import') {
+    const { processorFor } = await import('../worker/src/processors.js');
+    const { newRedis } = await import('../backend/src/core/redis.js');
+    await new Worker(QUEUES.imports, processorFor(QUEUES.imports), { prefix: process.env.QUEUE_PREFIX, connection: newRedis(), concurrency: 1 }).waitUntilReady();
+    return;
+  }
   await stageWorker(process.argv[3], process.argv[4], process.argv[5], process.argv[6]).waitUntilReady();
 }
 
@@ -162,8 +168,10 @@ async function fixtureProvider() {
   let hold: { path: string; reached: () => void; wait: Promise<void> } | undefined;
   let requests = 0;
   let malformedNext = false;
+  let latencyMs = 0;
   const server = createHttpServer(async (req, res) => {
     try {
+      if (latencyMs && req.url === '/v1/chat/completions') await delay(latencyMs);
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(chunks).toString()) as { input?: string[]; messages?: Array<{ content: string }> };
@@ -212,6 +220,8 @@ async function fixtureProvider() {
     failures,
     requestCount: () => requests,
     failNextSchema: () => { malformedNext = true; },
+    /** Slows every chat completion, so an import keeps its queue busy for a predictable time. */
+    setLatency: (ms: number) => { latencyMs = ms; },
     pause(path: string) {
       const reached = deferredSignal();
       const wait = deferredSignal();
@@ -464,6 +474,186 @@ async function stageMatrix(redisRestart: (whileDown?: () => Promise<void>) => Pr
   } finally { await provider.close(); }
 }
 
+/**
+ * HTTP admission during a real Redis outage. Rate-limited routes must answer a bounded 503 rather than wait for Redis to
+ * return, and must work again once it does.
+ */
+async function httpOutage(redisControl: { kill: () => Promise<void>; start: () => Promise<void> }) {
+  const { default: request } = await import('supertest');
+  const { createApp } = await import('../backend/src/app.js');
+  const { hashPassword } = await import('../backend/src/services/auth.js');
+  const app = createApp();
+  const workspace = await syntheticWorkspace('HTTP outage fixture');
+  const email = `outage-${randomUUID()}@example.test`;
+  const password = 'Outage-fixture-password-123';
+  const user = await db().user.create({ data: { email, name: 'Outage fixture', passwordHash: await hashPassword(password), emailVerifiedAt: new Date() } });
+  await db().organizationMember.create({ data: { organizationId: workspace.organizationId, userId: user.id, role: 'OWNER' } });
+  await db().workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: 'OWNER' } });
+  const agent = request.agent(app);
+  const signedIn = await agent.post('/api/v1/auth/login').send({ email, password });
+  assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
+  const csrf = String(signedIn.body.csrfToken);
+  const timed = async (label: string, send: () => PromiseLike<{ status: number; body: { error?: { code?: string } } }>) => {
+    const started = performance.now();
+    const response = await Promise.race([send(), delay(15_000, null, { ref: false })]);
+    return { label, status: response?.status ?? 'no response within 15 s', code: response?.body?.error?.code ?? null, ms: Math.round(performance.now() - started) };
+  };
+  const upload = () => agent.post(`/api/v1/w/${workspace.id}/ai-studio/imports`).set('x-csrf-token', csrf)
+    .attach('files', Buffer.from('Outage admission fixture'), { filename: 'outage.txt', contentType: 'text/plain' });
+  const login = () => request(app).post('/api/v1/auth/login').send({ email, password });
+  const workspaceRead = () => agent.get(`/api/v1/w/${workspace.id}/ai-studio/imports`);
+
+  await redisControl.kill();
+  const duringOutage = [await timed('importer upload', upload), await timed('login', login), await timed('workspace read without a rate limit', workspaceRead)];
+  await redisControl.start();
+  const afterRecovery = [await timed('login', login), await timed('importer upload', upload)];
+  console.log(JSON.stringify({ httpOutage: duringOutage, afterRecovery }));
+  for (const result of duringOutage.slice(0, 2)) {
+    assert.equal(result.status, 503, `${result.label} during the outage`);
+    assert(result.ms < 5_000, `${result.label} took ${result.ms} ms`);
+  }
+  assert.equal(duringOutage[2].status, 200, 'routes without a rate limit keep working on PostgreSQL');
+  assert.equal(afterRecovery[0].status, 200);
+  assert.equal(afterRecovery[1].status, 202);
+}
+
+/**
+ * Lead CSV imports and Knowledge Importer stages run on separate queues. A backlog on either must not delay the other,
+ * even inside one workspace. The workers use the production processors and concurrency (imports 1, knowledge-import 2).
+ */
+async function queueIsolation() {
+  const provider = await fixtureProvider();
+  process.env.ENCRYPTION_KEYS = `1:${Buffer.alloc(32, 13).toString('base64')}`;
+  process.env.ENCRYPTION_ACTIVE_KEY = '1';
+  const { processorFor } = await import('../worker/src/processors.js');
+  const { uploadImport, startImport } = await import('../backend/src/services/leads.js');
+  const { newRedis } = await import('../backend/src/core/redis.js');
+  const workspace = await syntheticWorkspace('Queue isolation fixture');
+  await upsertProvider(workspace.id, { provider: 'CUSTOM_OPENAI', apiKey: 'synthetic-fixture', baseUrl: provider.url, defaultModel: 'fixture-model' }, actor);
+  await updateRoute(workspace.id, { task: 'KNOWLEDGE_IMPORT_EXTRACTION', provider: 'CUSTOM_OPENAI', model: 'fixture-model' }, actor);
+  const options = (concurrency: number) => ({ prefix: process.env.QUEUE_PREFIX, connection: newRedis(), concurrency });
+  const workers = [
+    new Worker(QUEUES.knowledgeImport, processorFor(QUEUES.knowledgeImport), options(2)),
+    new Worker(QUEUES.imports, processorFor(QUEUES.imports), options(1)),
+  ];
+  const failures: string[] = [];
+  const jobs: Array<{ queue: string; name: string; waitMs: number; runMs: number; finishedAt: number }> = [];
+  for (const worker of workers) {
+    worker.on('failed', (job, error) => { failures.push(`${job?.name}: ${error.message}`); });
+    worker.on('completed', job => jobs.push({ queue: worker.name, name: job.name, waitMs: (job.processedOn ?? job.timestamp) - job.timestamp, runMs: (job.finishedOn ?? Date.now()) - (job.processedOn ?? Date.now()), finishedAt: job.finishedOn ?? Date.now() }));
+  }
+  const csv = (rows: number, tag: string) => Buffer.from(['email,first_name,company',
+    ...Array.from({ length: rows }, (_, index) => `${tag}-${index}@lead-fixture.example,Fixture${index},Fixture Co ${index % 50}`)].join('\n'));
+  const leadImport = async (rows: number, tag: string) => {
+    const uploaded = await uploadImport(workspace.id, { originalname: `${tag}.csv`, buffer: csv(rows, tag) }, actor);
+    await startImport(workspace.id, uploaded.importId, { mapping: { email: 'email', first_name: 'firstName' }, dedupeMode: 'skip', sourceName: 'CSV import', lawfulBasis: 'UNKNOWN' }, actor);
+    return uploaded.importId;
+  };
+  const leadStatus = async (ids: string[]) => db().importJob.findMany({ where: { id: { in: ids } }, select: { id: true, status: true, createdAt: true, finishedAt: true } });
+  try {
+    await Promise.all(workers.map(worker => worker.waitUntilReady()));
+
+    // A: a knowledge-import backlog with slow extraction, then lead imports.
+    provider.setLatency(3_000);
+    const knowledge = await Promise.all([1, 2, 3, 4].map(index => createImport(workspace.id, files(`Knowledge backlog ${index} ${randomUUID()}`), actor)));
+    const knowledgeIds = knowledge.map(session => session.id);
+    await until(async () => await db().knowledgeImportSession.count({ where: { id: { in: knowledgeIds }, processingStep: 'IMPORT_EXTRACTION' } }) >= 2 ? true : undefined, 'knowledge backlog in extraction');
+    const leadStart = performance.now();
+    const leads = [await leadImport(500, `a1-${randomUUID()}`), await leadImport(500, `a2-${randomUUID()}`), await leadImport(500, `a3-${randomUUID()}`)];
+    await until(async () => (await leadStatus(leads)).every(row => row.status === 'COMPLETED') ? true : undefined, 'lead imports during a knowledge backlog', 60_000);
+    const leadMs = Math.round(performance.now() - leadStart);
+    await until(async () => await db().knowledgeImportSession.count({ where: { id: { in: knowledgeIds }, status: 'REVIEW' } }) === knowledgeIds.length ? true : undefined, 'knowledge backlog reviewed', 120_000);
+    const knowledgeMs = Math.round(performance.now() - leadStart);
+    // The first lead import has no other lead import ahead of it, so any wait it sees would come from the knowledge backlog.
+    const leadJobs = jobs.filter(job => job.queue === QUEUES.imports).sort((a, b) => a.finishedAt - b.finishedAt);
+    const firstLead = leadJobs[0];
+    const lastKnowledge = Math.max(...jobs.filter(job => job.queue === QUEUES.knowledgeImport).map(job => job.finishedAt));
+    const firstLeadWaitMs = firstLead.waitMs;
+    const firstLeadFinishedBeforeKnowledgeBacklogMs = lastKnowledge - firstLead.finishedAt;
+
+    // B: a lead-import backlog, then one knowledge import with a fast provider.
+    provider.setLatency(0);
+    const backlogStart = performance.now();
+    const backlog = [await leadImport(15_000, `b1-${randomUUID()}`), await leadImport(15_000, `b2-${randomUUID()}`), await leadImport(15_000, `b3-${randomUUID()}`)];
+    await until(async () => (await leadStatus(backlog)).some(row => row.status === 'RUNNING') ? true : undefined, 'lead backlog running');
+    const single = await createImport(workspace.id, files(`Knowledge during lead backlog ${randomUUID()}`), actor);
+    const singleStart = performance.now();
+    await until(async () => (await db().knowledgeImportSession.findUniqueOrThrow({ where: { id: single.id } })).status === 'REVIEW' ? true : undefined, 'knowledge import during a lead backlog', 60_000);
+    const singleMs = Math.round(performance.now() - singleStart);
+    const leadsPendingAtReview = (await leadStatus(backlog)).filter(row => row.status !== 'COMPLETED').length;
+    await until(async () => (await leadStatus(backlog)).every(row => row.status === 'COMPLETED') ? true : undefined, 'lead backlog completed', 600_000);
+    const backlogMs = Math.round(performance.now() - backlogStart);
+    const leadRows = await db().lead.count({ where: { workspaceId: workspace.id } });
+
+    console.log(JSON.stringify({
+      queueIsolation: {
+        knowledgeBacklogThenLeads: { leadImports: 3, rowsEach: 500, leadImportsMs: leadMs, firstLeadWaitMs, leadWaitsMs: leadJobs.map(job => job.waitMs), firstLeadFinishedBeforeKnowledgeBacklogMs, knowledgeBacklogMs: knowledgeMs },
+        leadBacklogThenKnowledge: { leadImports: 3, rowsEach: 15_000, knowledgeImportToReviewMs: singleMs, leadImportsStillQueuedOrRunningAtReview: leadsPendingAtReview, leadBacklogMs: backlogMs },
+        leadRows, failedDeliveries: failures.length, failures,
+      },
+    }));
+    assert.deepEqual(failures, []);
+    assert(firstLeadWaitMs < 1_000, `the first lead import waited ${firstLeadWaitMs} ms behind the knowledge backlog`);
+    assert(firstLeadFinishedBeforeKnowledgeBacklogMs > 0, 'a lead import finished while knowledge imports were still processing');
+    assert(leadsPendingAtReview > 0, 'the knowledge import reached review while lead imports were still queued or running');
+    assert.equal(leadRows, 3 * 500 + 3 * 15_000);
+  } finally {
+    await Promise.all(workers.map(worker => closeWorker(worker)));
+    await provider.close();
+  }
+}
+
+/**
+ * A lead CSV import whose worker is killed mid-file must not stay RUNNING forever: it must become retryable, and the
+ * retry must finish the file without duplicating leads. Uses the production import processor in a child process.
+ */
+async function leadImportCrash() {
+  const leads = await import('../backend/src/services/leads.js');
+  const { processorFor } = await import('../worker/src/processors.js');
+  const { newRedis } = await import('../backend/src/core/redis.js');
+  const workspace = await syntheticWorkspace('Lead import crash fixture');
+  const rows = 20_000;
+  const csv = Buffer.from(['email,first_name', ...Array.from({ length: rows }, (_, index) => `crash-${index}@lead-fixture.example,Crash${index}`)].join('\n'));
+  const uploaded = await leads.uploadImport(workspace.id, { originalname: 'crash.csv', buffer: csv }, actor);
+  await leads.startImport(workspace.id, uploaded.importId, { mapping: { email: 'email', first_name: 'firstName' }, dedupeMode: 'skip', sourceName: 'CSV import', lawfulBasis: 'UNKNOWN' }, actor);
+  const subprocess = spawn(process.execPath, ['--import', 'tsx', import.meta.filename, '--worker', 'lead-import'], { env: process.env, stdio: ['ignore', 'ignore', 'inherit'] });
+  const status = async () => (await db().importJob.findUniqueOrThrow({ where: { id: uploaded.importId } })).status;
+  try {
+    await until(async () => {
+      if (await status() !== 'RUNNING') return undefined;
+      const count = await db().lead.count({ where: { workspaceId: workspace.id } });
+      return count > 0 ? count : undefined;
+    }, 'lead import in progress', 60_000);
+  } finally {
+    await stop(subprocess, 'SIGKILL');
+  }
+  const leadsAtKill = await db().lead.count({ where: { workspaceId: workspace.id } });
+  const worker = new Worker(QUEUES.imports, processorFor(QUEUES.imports), { prefix: process.env.QUEUE_PREFIX, connection: newRedis(), concurrency: 1 });
+  const sweep = (leads as Record<string, unknown>).recoverInterruptedLeadImports as (() => Promise<unknown>) | undefined;
+  const killedAt = performance.now();
+  try {
+    await worker.waitUntilReady();
+    let after = await status();
+    while (after === 'RUNNING' && performance.now() - killedAt < 180_000) {
+      await sweep?.();
+      await delay(2_000);
+      after = await status();
+    }
+    const recoveredMs = Math.round(performance.now() - killedAt);
+    const result: Record<string, unknown> = { leadImportCrash: { rows, leadsAtKill, statusAfterCrash: after, recoveredMs, recoverySweep: !!sweep } };
+    if (after === 'FAILED') {
+      await leads.retryImport(workspace.id, uploaded.importId, actor);
+      await until(async () => await status() === 'COMPLETED' ? true : undefined, 'retried lead import', 300_000);
+      result.afterRetry = { status: await status(), leads: await db().lead.count({ where: { workspaceId: workspace.id } }) };
+    }
+    console.log(JSON.stringify(result));
+    assert.equal(after, 'FAILED', 'an interrupted lead import must become retryable instead of staying RUNNING');
+    assert.deepEqual(result.afterRetry, { status: 'COMPLETED', leads: rows });
+  } finally {
+    await closeWorker(worker);
+  }
+}
+
 async function harness() {
   const scratch = await mkdtemp(join(tmpdir(), 'outvexa-import-redis-'));
   const listener = createServer().listen(0, '127.0.0.1');
@@ -487,6 +677,18 @@ async function harness() {
 
   try {
     await startRedis();
+    if (process.argv.includes('--http-outage')) {
+      await httpOutage({ kill: () => stop(redisProcess, 'SIGKILL'), start: startRedis });
+      return;
+    }
+    if (process.argv.includes('--lead-import-crash')) {
+      await leadImportCrash();
+      return;
+    }
+    if (process.argv.includes('--queue-isolation')) {
+      await queueIsolation();
+      return;
+    }
     if (process.argv.includes('--stage-matrix')) {
       await stageMatrix(async (whileDown) => {
         await stop(redisProcess, 'SIGKILL');
@@ -560,6 +762,8 @@ async function harness() {
 }
 
 assertIsolatedDatabase();
+// The synthetic AI provider listens on localhost; allow it even if this database has sign-up open.
+process.env.AI_ALLOW_PRIVATE_ENDPOINTS = 'true';
 if (process.argv[2] === '--worker') await child();
 else {
   await harness();

@@ -8,6 +8,7 @@ export const IcpSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(4000).nullable().optional(),
   criteria: IcpCriteriaSchema,
+  aiInstructions: z.string().max(5000).nullable().optional(),
   minScore: z.number().int().min(0).max(100).default(60),
   isActive: z.boolean().default(true),
 });
@@ -25,10 +26,10 @@ export async function saveIcpVersion(
     const current = id ? await tx.idealCustomerProfile.findFirst({ where: { id, workspaceId } }) : null;
     if (id && !current) throw NotFound('ICP');
     if (current) {
-      const { name, description, criteria, minScore, isActive } = current;
+      const { name, description, criteria, minScore, isActive, aiInstructions } = current;
       await tx.idealCustomerProfileRevision.upsert({
         where: { icpId_version: { icpId: current.id, version: current.version } },
-        create: { workspaceId, icpId: current.id, version: current.version, data: { name, description, criteria, minScore, isActive }, createdAt: current.updatedAt },
+        create: { workspaceId, icpId: current.id, version: current.version, data: { name, description, criteria, minScore, isActive, aiInstructions }, createdAt: current.updatedAt },
         update: {},
       });
     }

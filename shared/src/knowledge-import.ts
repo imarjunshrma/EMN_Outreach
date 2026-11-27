@@ -1,19 +1,25 @@
 import { z } from 'zod';
 
 export const IMPORT_ENTITIES = {
-  COMPANY_PROFILE: { sheet: 'Company_Profile', fields: 'website positioning mission valueProposition industries geography businessModel differentiators legalEntity companySize' },
-  SERVICE: { sheet: 'Services', fields: 'customerProblems targetCustomerProfiles deliverables methodology desiredOutcomes targetIndustries targetGeographies exclusions eligibilityCriteria commercialBoundaries availability supportingEvidence' },
+  COMPANY_PROFILE: { sheet: 'Company_Profile', fields: 'website positioning mission valueProposition industries geography businessModel differentiators legalEntity companySize targetAudience customerProfiles pricingNotes' },
+  PRODUCT: { sheet: 'Products', fields: '' },
+  SERVICE: { sheet: 'Services', fields: 'customerProblems targetCustomerProfiles deliverables methodology desiredOutcomes targetIndustries excludedIndustries targetGeographies excludedGeographies minEmployeeCount maxEmployeeCount exclusionRules exclusions eligibilityCriteria commercialBoundaries availability supportingEvidence' },
   COMMERCIAL_OFFER: { sheet: 'Commercial_Offers', fields: 'price currency billingModel deliverables duration conditions eligibility availability' },
   TARGET_AUDIENCE: { sheet: 'Target_Audiences', fields: 'industries companySize geography businessModel characteristics challenges buyingTriggers qualificationNotes sourceEvidence' },
   TARGET_PERSONA: { sheet: 'Target_Personas', fields: 'jobTitles seniority responsibilities goals challenges motivations objections buyingTriggers buyingAuthority' },
-  ICP_CRITERIA: { sheet: 'ICP_Criteria', fields: 'requiredConditions optionalConditions negativeConditions characteristics qualificationSignals disqualificationSignals scoringRules weight threshold category evidenceRequirements' },
+  ICP_CRITERIA: { sheet: 'ICP_Criteria', fields: 'titles seniorities industries countries employeeMin employeeMax keywords aiInstructions isActive requiredConditions optionalConditions negativeConditions characteristics qualificationSignals disqualificationSignals scoringRules weight threshold category evidenceRequirements' },
   BUSINESS_OPPORTUNITY: { sheet: 'Business_Opportunities', fields: 'marketProblem marketSignals businessPotential evidence status disqualifyingConditions' },
   COMPETITOR: { sheet: 'Competitors', fields: 'website positioning services marketSegment industries differentiators observations sourceEvidence' },
+  RESEARCH_SETTINGS: { sheet: 'Research_Settings', fields: 'personTopics companyTopics signals recentSignalDays extendedSignalDays minClaims maxEvidenceAgeDays maxSearchQueriesPerRun maxSearchesPerProspect maxPagesPerRun deepResearchScoreThreshold mustNotInfer onMissing customInstructions companyWebsite webSearch newsAndArticles podcastsAndInterviews dataProvider userProvided' },
+  WRITING_SETTINGS: { sheet: 'Writing_Settings', fields: 'tone style minWords maxWords sentenceComplexity personalizationIntensity ctaStyle formality language avoidPhrases forbiddenClaims goodExamples badExamples customInstructions' },
   RESEARCH_RULE: { sheet: 'Research_Rules', fields: 'sources priorities verificationRequirements excludedSources depth evidenceRequirements recencyRequirement confidenceRequirements' },
-  OUTREACH_RULE: { sheet: 'Outreach_Rules', fields: 'tone personalizationRules messagingRestrictions ctaPreferences followUpPolicies prohibitedLanguage channels wordLimits' },
+  PROMPT_PROFILE: { sheet: 'Prompt_Profiles', fields: 'instructions tone style minWords maxWords sentenceComplexity personalizationIntensity ctaStyle formality language avoidPhrases forbiddenClaims goodExamples badExamples customInstructions' },
+  TRAINING_EXAMPLE: { sheet: 'Training_Examples', fields: 'content correctedContent category polarity explanation tags isActive' },
+  OUTREACH_RULE: { sheet: 'Outreach_Rules', fields: 'tone personalizationRules messagingRestrictions ctaPreferences followUpPolicies prohibitedLanguage channels wordLimits category priority condition status triggerTerms' },
   EXCLUSION: { sheet: 'Exclusions', fields: 'industries companyTypes personas geography disqualifyingSignals suppressionConditions reason scope activeStatus' },
+  ACHIEVEMENT: { sheet: 'Achievements', fields: 'sourceEvidence' },
   PROOF_CASE_STUDY: { sheet: 'Proof_Case_Studies', fields: 'client industries startingSituation workPerformed results metrics timePeriod evidence publicationPermission' },
-  CAMPAIGN_PREFERENCE: { sheet: 'Campaign_Preferences', fields: 'objective targetSegments channels messagingPreferences volumeConstraints qualificationRequirements' },
+  CAMPAIGN_PREFERENCE: { sheet: 'Campaign_Preferences', fields: 'objective targetSegments channels messagingPreferences volumeConstraints qualificationRequirements titles seniorities countries keywords personTopics companyTopics signals mustNotInfer avoidPhrases forbiddenClaims goodExamples badExamples triggerTerms tags excludedIndustries excludedGeographies' },
 } as const;
 
 export type ImportEntityType = keyof typeof IMPORT_ENTITIES;
@@ -41,9 +47,9 @@ export const ImportExtractionOutput = z.strictObject({
 export type ImportRelationship = z.infer<typeof ImportExtractionOutput>['items'][number]['relationships'][number];
 
 const LIST_FIELDS = new Set((
-  'industries geography differentiators customerProblems targetCustomerProfiles deliverables desiredOutcomes targetIndustries targetGeographies exclusions eligibilityCriteria commercialBoundaries characteristics challenges buyingTriggers jobTitles responsibilities goals motivations objections requiredConditions optionalConditions negativeConditions qualificationSignals disqualificationSignals scoringRules marketSignals disqualifyingConditions services observations sources priorities verificationRequirements excludedSources personalizationRules messagingRestrictions ctaPreferences followUpPolicies prohibitedLanguage channels companyTypes personas disqualifyingSignals suppressionConditions metrics targetSegments qualificationRequirements'
+  'industries geography differentiators customerProblems targetCustomerProfiles deliverables desiredOutcomes targetIndustries targetGeographies exclusions eligibilityCriteria commercialBoundaries characteristics challenges buyingTriggers jobTitles responsibilities goals motivations objections requiredConditions optionalConditions negativeConditions qualificationSignals disqualificationSignals scoringRules marketSignals disqualifyingConditions services observations sources priorities verificationRequirements excludedSources personalizationRules messagingRestrictions ctaPreferences followUpPolicies prohibitedLanguage channels companyTypes personas disqualifyingSignals suppressionConditions metrics targetSegments qualificationRequirements titles seniorities countries keywords personTopics companyTopics signals mustNotInfer avoidPhrases forbiddenClaims goodExamples badExamples'
 ).split(' '));
-const NUMERIC_FIELDS = new Set(['price', 'weight', 'threshold', 'wordLimits', 'volumeConstraints']);
+const NUMERIC_FIELDS = new Set(['price', 'weight', 'threshold', 'wordLimits', 'volumeConstraints', 'minWords', 'maxWords', 'recentSignalDays', 'extendedSignalDays', 'minClaims', 'maxEvidenceAgeDays', 'maxSearchQueriesPerRun', 'maxSearchesPerProspect', 'maxPagesPerRun', 'deepResearchScoreThreshold', 'employeeMin', 'employeeMax', 'minEmployeeCount', 'maxEmployeeCount']);
 
 export function importFieldKind(key: string) {
   if (LIST_FIELDS.has(key)) return 'list';
@@ -53,7 +59,7 @@ export function importFieldKind(key: string) {
 
 export function importFieldNames(entityType: string) {
   if (!Object.hasOwn(IMPORT_ENTITIES, entityType)) return [];
-  return ['name', 'description', 'externalId', ...IMPORT_ENTITIES[entityType as ImportEntityType].fields.split(' ')];
+  return ['name', 'description', 'externalId', ...IMPORT_ENTITIES[entityType as ImportEntityType].fields.split(' ').filter(Boolean)];
 }
 
 export function importPayloadSchema(entityType: ImportEntityType) {

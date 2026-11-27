@@ -11,7 +11,7 @@ import { assertImportAdmin, enqueueImportStage, importJson, importStages, StageS
 import { applyImportItem, destinationFor, importStableKey, inspectImportItem, syncImportRetrieval } from './knowledge-import-apply.js';
 import { captureImportExtraction, extractImportRows, type ImportExtractedItem, type ImportExtractionSnapshot } from './knowledge-import-extraction.js';
 import { tenantStateForWorkspace } from './entitlements.js';
-import { parseImportFile, type ParsedImportRow } from './knowledge-import-parser.js';
+import { EMPTY_TEMPLATE_NOTICE, parseImportFileDetailed, type ParsedImportRow } from './knowledge-import-parser.js';
 
 const jobData = z.object({ workspaceId: z.uuid(), sessionId: z.uuid(), run: z.number().int().nonnegative() });
 const activeStatus = ['UPLOADED', 'PROCESSING', 'READY'] as const;
@@ -53,8 +53,9 @@ export async function processImportJob(job: Job) {
           const pending = await db().knowledgeImportFile.findFirst({ where: { ...scope, id: file.id, status: 'PENDING', session: currentStage }, select: { content: true } });
           if (!pending) return;
           if (!pending.content) throw new AppError('VALIDATION_FAILED', 'The file has no stored upload to parse.', 400);
-          const rows = await parseImportFile(Buffer.from(pending.content), file.fileName, file.mimeType);
-          if (!rows.length) throw new AppError('VALIDATION_FAILED', 'The file contains no importable rows.', 400);
+          const { rows, emptyTemplate } = await parseImportFileDetailed(Buffer.from(pending.content), file.fileName, file.mimeType);
+          // An unfilled official template is a valid upload with nothing to import; any other empty file is refused.
+          if (!rows.length && !emptyTemplate) throw new AppError('VALIDATION_FAILED', 'The file contains no importable rows.', 400);
           await db().knowledgeImportFile.updateMany({
             where: { ...scope, id: file.id, status: 'PENDING' },
             data: { parsedRows: importJson(rows), status: 'PARSED', content: null, error: null },
@@ -76,15 +77,31 @@ export async function processImportJob(job: Job) {
         select: { id: true },
       });
       if (files.length) {
-        const snapshot = session.extractionRoute as unknown as ImportExtractionSnapshot | null ?? await captureImportExtraction(workspaceId);
-        if (!session.extractionRoute) await db().knowledgeImportSession.updateMany({ where: currentStage, data: { extractionRoute: importJson(snapshot) } });
+        // Captured on first use: an unfilled template has nothing to extract and needs no AI route.
+        let snapshot = session.extractionRoute as unknown as ImportExtractionSnapshot | null;
+        const extractionSnapshot = async () => {
+          if (snapshot) return snapshot;
+          snapshot = await captureImportExtraction(workspaceId);
+          await db().knowledgeImportSession.updateMany({ where: currentStage, data: { extractionRoute: importJson(snapshot) } });
+          return snapshot;
+        };
         for (const [position, file] of files.entries()) {
           const parsed = await db().knowledgeImportFile.findFirst({
             where: { ...scope, id: file.id, status: 'PARSED', session: currentStage }, select: { parsedRows: true },
           });
           if (!parsed) return;
+          const parsedRows = parsed.parsedRows as unknown as ParsedImportRow[];
+          if (!parsedRows.length) {
+            // Only an unfilled official template is accepted with no rows (see the parse stage).
+            await db().knowledgeImportFile.updateMany({
+              where: { ...scope, id: file.id, status: 'PARSED' },
+              data: { extracted: importJson([]), parsedRows: Prisma.DbNull, status: 'EXTRACTED', error: EMPTY_TEMPLATE_NOTICE },
+            });
+            await job.updateProgress(Math.round(100 * (position + 1) / files.length));
+            continue;
+          }
           try {
-            const result = await extractImportRows(workspaceId, parsed.parsedRows as unknown as ParsedImportRow[], sessionId, snapshot);
+            const result = await extractImportRows(workspaceId, parsedRows, sessionId, await extractionSnapshot());
             await db().knowledgeImportFile.updateMany({
               where: { ...scope, id: file.id, status: 'PARSED' },
               data: { extracted: importJson(result), parsedRows: Prisma.DbNull, status: 'EXTRACTED', error: null },
@@ -108,7 +125,7 @@ export async function processImportJob(job: Job) {
     if (stage === 'IMPORT_SCHEMA_VALIDATION' || stage === 'IMPORT_SEMANTIC_MAPPING') {
       const files = await db().knowledgeImportFile.findMany({
         where: { ...scope, status: stage === 'IMPORT_SCHEMA_VALIDATION' ? 'EXTRACTED' : 'VALIDATED' },
-        select: { id: true, extracted: true },
+        select: { id: true, extracted: true, error: true },
       });
       for (const file of files) {
         const items = file.extracted as unknown as ImportExtractedItem[];
@@ -146,7 +163,7 @@ export async function processImportJob(job: Job) {
           });
           await tx.knowledgeImportFile.updateMany({
             where: { ...scope, id: file.id, status: 'VALIDATED' },
-            data: { status: 'REVIEW', extracted: Prisma.DbNull, error: items.length ? null : 'No structured knowledge was identified in this file.' },
+            data: { status: 'REVIEW', extracted: Prisma.DbNull, error: items.length ? null : file.error === EMPTY_TEMPLATE_NOTICE ? EMPTY_TEMPLATE_NOTICE : 'No structured knowledge was identified in this file.' },
           });
         });
       }
@@ -247,8 +264,8 @@ export async function processImportJob(job: Job) {
 }
 
 const dependencyOrder = [
-  'COMPANY_PROFILE', 'SERVICE', 'COMMERCIAL_OFFER', 'TARGET_AUDIENCE', 'TARGET_PERSONA',
-  'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'COMPETITOR', 'RESEARCH_RULE', 'OUTREACH_RULE', 'EXCLUSION', 'PROOF_CASE_STUDY', 'CAMPAIGN_PREFERENCE',
+  'COMPANY_PROFILE', 'PRODUCT', 'SERVICE', 'COMMERCIAL_OFFER', 'TARGET_AUDIENCE', 'TARGET_PERSONA',
+  'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'COMPETITOR', 'RESEARCH_SETTINGS', 'WRITING_SETTINGS', 'RESEARCH_RULE', 'OUTREACH_RULE', 'EXCLUSION', 'PROOF_CASE_STUDY', 'CAMPAIGN_PREFERENCE',
 ];
 
 /**

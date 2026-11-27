@@ -3,9 +3,13 @@ import { expect, type Page } from '@playwright/test';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 
+/** The isolated browser-test stores, with the same defaults as playwright.config.ts (never the development databases). */
+const E2E_DATABASE_URL = process.env.E2E_DATABASE_URL ?? 'postgresql://emn:emn@127.0.0.1:5432/emn_e2e';
+const E2E_REDIS_URL = process.env.E2E_REDIS_URL ?? 'redis://127.0.0.1:6379/14';
+
 /** Direct SQL against the isolated e2e database — used only to grant a platform role, which has no API by design. */
 export async function sql(text: string, params: unknown[] = []) {
-  const c = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL });
+  const c = new pg.Client({ connectionString: E2E_DATABASE_URL });
   await c.connect();
   try { return (await c.query(text, params)).rows; } finally { await c.end(); }
 }
@@ -13,7 +17,7 @@ export async function sql(text: string, params: unknown[] = []) {
 /** The suite signs in far more often than a person would; clear the per-IP login limiter between sign-ins
  *  (the limiter itself is covered by the integration tests). Deletes only login rate-limit keys in the e2e Redis DB. */
 async function resetLoginLimiter() {
-  const r = new Redis(process.env.E2E_REDIS_URL!, { lazyConnect: true, maxRetriesPerRequest: 1 });
+  const r = new Redis(E2E_REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
   try { await r.connect(); const keys = await r.keys('rl:post:/auth/login:*'); if (keys.length) await r.del(...keys); } catch { /* Redis unavailable: let the test show it */ } finally { r.disconnect(); }
 }
 

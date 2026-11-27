@@ -87,4 +87,4 @@ route({ method: 'post', path: '/w/:workspaceId/privacy/requests', tag: 'Privacy'
 route({ method: 'get', path: '/w/:workspaceId/privacy/requests/:id/download', tag: 'Privacy', summary: 'Download a completed export (JSON)', auth: 'workspace', role: 'ADMIN', raw: true,
   handler: async (c) => { const s = await ops.downloadPrivacyExport(c.workspaceId, c.params.id); c.res.setHeader('content-type', 'application/json'); c.res.setHeader('content-disposition', `attachment; filename="privacy-export-${c.params.id}.json"`); s.pipe(c.res); } });
 route({ method: 'get', path: '/w/:workspaceId/export', tag: 'Privacy', summary: 'Full workspace data export (JSON)', auth: 'workspace', role: 'OWNER', raw: true, rateLimit: { limit: 3, windowSec: 3600, key: 'workspace' },
-  handler: async (c) => { const data = await ops.workspaceExport(c.workspaceId, c.actor); c.res.setHeader('content-disposition', `attachment; filename="workspace-export.json"`); c.res.json(data); } });
+  handler: (c) => ops.streamJsonDownload(c.res, 'workspace-export.json', (sink) => ops.writeWorkspaceExport(c.workspaceId, c.actor, sink)) });

@@ -1,9 +1,11 @@
 import { inflateRawSync } from 'node:zlib';
 import { parse } from 'csv-parse/sync';
 import sanitizeHtml from 'sanitize-html';
+import JSZip from 'jszip';
 import readXlsxFile, { readSheetNames } from 'read-excel-file/node';
 import { writeWorkbook, type TemplateSheet } from './knowledge-import-xlsx.js';
 import { AppError } from '../core/errors.js';
+import { logger } from '../core/logger.js';
 import { IMPORT_ENTITIES, importFieldKind, type ImportEntityType } from '../../../shared/src/knowledge-import.js';
 
 export const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
@@ -94,20 +96,35 @@ export function validateImportUpload(buffer: Buffer, name: string, mime?: string
   return extension;
 }
 
-export const TEMPLATE_VERSION = 'outvexa-brain-v2';
+export const TEMPLATE_VERSION = 'outvexa-brain-v3';
 const entries = Object.entries(IMPORT_ENTITIES) as [ImportEntityType, (typeof IMPORT_ENTITIES)[ImportEntityType]][];
 export const TEMPLATE_SHEETS = [...entries.map(([, item]) => item.sheet), 'Instructions'];
 const commonHeaders = ['externalId', 'name', 'description'];
 const relationshipHeaders = ['relatedServiceIds', 'relatedOfferIds', 'relatedAudienceIds', 'relatedPersonaIds'];
 const examples: Record<ImportEntityType, string> = {
-  COMPANY_PROFILE: 'Example Analytics', SERVICE: 'Revenue reporting', COMMERCIAL_OFFER: 'Reporting starter package',
+  COMPANY_PROFILE: 'Example Analytics', PRODUCT: 'Inventory dashboard', SERVICE: 'Revenue reporting', COMMERCIAL_OFFER: 'Reporting starter package',
   TARGET_AUDIENCE: 'Mid-market retailers', TARGET_PERSONA: 'Head of Analytics', ICP_CRITERIA: 'Has a data warehouse',
   BUSINESS_OPPORTUNITY: 'Multi-store forecasting', COMPETITOR: 'Example Reporting Co',
+  PROMPT_PROFILE: 'Consultative onboarding',
+  TRAINING_EXAMPLE: 'Concise opening example',
+  RESEARCH_SETTINGS: 'Workspace research defaults', WRITING_SETTINGS: 'Workspace writing defaults',
   RESEARCH_RULE: 'Verify warehouse usage', OUTREACH_RULE: 'Use concise subject lines', EXCLUSION: 'Exclude public sector',
+  ACHIEVEMENT: 'Published annual report',
   PROOF_CASE_STUDY: 'Inventory reporting rollout', CAMPAIGN_PREFERENCE: 'Analytics discovery campaign',
 };
 
 const fieldExamples: Record<string, string> = {
+  titles: 'Director of Analytics', seniorities: 'director', countries: 'GB', employeeMin: '50', employeeMax: '200',
+  keywords: 'inventory reporting', aiInstructions: 'Check whether the company has multiple stores.', isActive: 'true',
+  style: 'Plain and specific', minWords: '40', maxWords: '100', sentenceComplexity: 'simple',
+  personalizationIntensity: 'medium', ctaStyle: 'soft_question', formality: 'neutral', language: 'English',
+  avoidPhrases: 'Just reaching out', forbiddenClaims: 'Guaranteed results',
+  personTopics: 'Public talks and published interviews', companyTopics: 'Recent product announcements',
+  maxEvidenceAgeDays: '365', minClaims: '2', maxSearchQueriesPerRun: '3', maxSearchesPerProspect: '6', maxPagesPerRun: '7',
+  recentSignalDays: '90', extendedSignalDays: '365', deepResearchScoreThreshold: '65',
+  onMissing: 'hold_for_research', companyWebsite: 'true', webSearch: 'true', newsAndArticles: 'true',
+  podcastsAndInterviews: 'false', dataProvider: 'false', userProvided: 'true', priority: 'PREFERRED',
+  content: 'Is weekly stock reporting a priority for your operations team?', polarity: 'POSITIVE',
   positioning: 'Reporting for independent retailers', mission: 'Make sales trends easier to understand',
   valueProposition: 'Consolidate store reports into one weekly view', industries: 'Retail',
   geography: 'United Kingdom', businessModel: 'Software subscription', differentiators: 'Works with existing point-of-sale exports',
@@ -159,6 +176,9 @@ function describeField(key: string) {
   if (key === 'website') return 'Public website URL, starting with https://.';
   if (key === 'currency') return 'Three-letter ISO currency code.';
   if (key === 'price') return 'Numeric amount without a currency symbol, or clearly state custom pricing.';
+  if (['companyWebsite', 'webSearch', 'newsAndArticles', 'podcastsAndInterviews', 'dataProvider', 'userProvided', 'isActive'].includes(key)) return 'Enter true or false.';
+  if (key === 'exclusionRules') return 'Optional JSON array of structured service exclusions. Use the service exclusion fields and operators.';
+  if (key === 'maxEvidenceAgeDays') return 'Enter the maximum age in days, or null to remove the age limit.';
   const label = key.replace(/[A-Z]/g, character => ` ${character.toLowerCase()}`);
   if (importFieldKind(key) === 'numeric') return `Enter ${label} as a number when available.`;
   if (importFieldKind(key) === 'list') return `Enter ${label} in plain text. Separate multiple entries with line breaks.`;
@@ -167,6 +187,11 @@ function describeField(key: string) {
 
 function exampleField(key: string, type: ImportEntityType) {
   if (key === 'name') return examples[type];
+  if (key === 'category' && type === 'TRAINING_EXAMPLE') return 'EMAIL';
+  if (key === 'category' && type === 'OUTREACH_RULE') return 'PERSONALIZATION';
+  if (key === 'status' && type === 'OUTREACH_RULE') return 'ACTIVE';
+  if (key === 'instructions' && type === 'PROMPT_PROFILE') return 'Write a concise message based on verified business context.';
+  if (key === 'tone' && (type === 'WRITING_SETTINGS' || type === 'PROMPT_PROFILE')) return 'consultative';
   if (key === 'externalId') return `${type.toLowerCase().replaceAll('_', '-')}-01`;
   if (key === 'website') return 'https://example.com';
   if (key === 'currency') return 'USD';
@@ -182,7 +207,7 @@ function exampleField(key: string, type: ImportEntityType) {
 
 export async function templateWorkbook() {
   const instructions: TemplateSheet['rows'] = [
-    ['Outvexa Outreach Brain Template', 'v2'],
+    ['Outvexa Outreach Brain Template', 'v3'],
     ['Guidance', 'Enter records below the field headers. Leave unused sheets and optional fields empty. Examples are for reference.'],
     ['Relationships', 'Use stable externalId values to link records. Use a comma between multiple identifiers.'],
     ['Evidence', 'Include sources for claims and results. Uploaded source statements require review.'],
@@ -191,9 +216,10 @@ export async function templateWorkbook() {
   ];
   const sheets: TemplateSheet[] = [];
   for (const [type, item] of entries) {
-    const headers = [...commonHeaders, ...item.fields.split(' '), ...relationshipHeaders];
+    const headers = [...commonHeaders, ...item.fields.split(' ').filter(Boolean), ...relationshipHeaders];
     const notes = headers.map((key) => {
-      const required = key === 'name' || (type === 'SERVICE' && key === 'description');
+      const required = key === 'name' || (type === 'SERVICE' && key === 'description') ||
+        (type === 'TRAINING_EXAMPLE' && ['content', 'category', 'polarity'].includes(key));
       const description = describeField(key);
       const example = exampleField(key, type);
       instructions.push([item.sheet, key, required ? 'Yes' : 'Optional', description, example]);
@@ -206,10 +232,10 @@ export async function templateWorkbook() {
 }
 
 const v1NameColumns: Record<ImportEntityType, string> = {
-  COMPANY_PROFILE: 'company_name', SERVICE: 'service_name', COMMERCIAL_OFFER: 'offer_name',
+  COMPANY_PROFILE: 'company_name', PRODUCT: 'product_name', SERVICE: 'service_name', COMMERCIAL_OFFER: 'offer_name',
   TARGET_AUDIENCE: 'audience_name', TARGET_PERSONA: 'persona', ICP_CRITERIA: 'criterion',
-  BUSINESS_OPPORTUNITY: 'opportunity', COMPETITOR: 'competitor_name', RESEARCH_RULE: 'research_objective',
-  OUTREACH_RULE: 'communication_style', EXCLUSION: 'name_or_condition', PROOF_CASE_STUDY: 'case_study',
+  BUSINESS_OPPORTUNITY: 'opportunity', COMPETITOR: 'competitor_name', RESEARCH_SETTINGS: 'name', WRITING_SETTINGS: 'name', TRAINING_EXAMPLE: 'name', PROMPT_PROFILE: 'name', RESEARCH_RULE: 'research_objective',
+  OUTREACH_RULE: 'communication_style', EXCLUSION: 'name_or_condition', ACHIEVEMENT: 'name', PROOF_CASE_STUDY: 'case_study',
   CAMPAIGN_PREFERENCE: 'campaign_type',
 };
 
@@ -217,21 +243,104 @@ type Cell = string | number | boolean | Date | null;
 // read-excel-file pads every sheet from A1, so grid index + 1 is the physical worksheet row. Formulas are never
 // evaluated: a formula cell yields its stored value and text such as "=1+1" stays plain text.
 const cellValue = (cell: Cell) => cell instanceof Date ? cell.toISOString().slice(0, 10) : cell;
+const columnLetters = (index: number): string => (index >= 26 ? columnLetters(Math.floor(index / 26) - 1) : '') + String.fromCharCode(65 + (index % 26));
 
-async function workbookRows(buffer: Buffer): Promise<ParsedImportRow[]> {
-  const sheetNames = await readSheetNames(buffer);
+/**
+ * Rewrites inline-string cells into the one layout read-excel-file supports (`<c t="inlineStr"><is><t>text</t></is></c>`).
+ * The OOXML standard also allows, and common writers produce, an empty inline string (openpyxl writes a styled empty
+ * string as `<c s="1" t="inlineStr"></c>`), rich text split into runs (`<is><r><t>a</t></r><r><t>b</t></r></is>`) and
+ * whitespace between elements. read-excel-file throws on all of these. Empty cells become blank cells; runs are joined
+ * into one text (phonetic guides are dropped, as spreadsheet applications do when displaying the value). The text stays
+ * XML-escaped exactly as written, and nothing else in the package changes.
+ */
+const INLINE_STRING_CELL = /<((?:[A-Za-z_][\w.-]*:)?)c\b([^>]*?)\s+t="inlineStr"([^>]*?)(?:\/>|>([\s\S]*?)<\/\1c>)/g;
+const CANONICAL_INLINE = /^<((?:[A-Za-z_][\w.-]*:)?)is><\1t(?:\s[^>]*)?>[^<]*<\/\1t><\/\1is>$/;
+export function normalizeInlineStringCells(xml: string) {
+  let changed = false;
+  const result = xml.replace(INLINE_STRING_CELL, (cell, prefix: string, before: string, after: string, content: string | undefined) => {
+    const attributes = `${before}${after}`.replace(/\s+$/, '');
+    if (content !== undefined && CANONICAL_INLINE.test(content)) return cell;
+    changed = true;
+    const runs = (content ?? '').replace(new RegExp(`<${prefix}rPh\\b[\\s\\S]*?<\\/${prefix}rPh>`, 'g'), '');
+    const texts = [...runs.matchAll(new RegExp(`<${prefix}t\\b[^>]*?(?:\\/>|>([\\s\\S]*?)<\\/${prefix}t>)`, 'g'))].map(match => match[1] ?? '');
+    if (!texts.length) return `<${prefix}c${attributes}/>`;
+    return `<${prefix}c${attributes} t="inlineStr"><${prefix}is><${prefix}t xml:space="preserve">${texts.join('')}</${prefix}t></${prefix}is></${prefix}c>`;
+  });
+  return { xml: result, changed };
+}
+
+async function normalizedWorkbook(buffer: Buffer) {
+  const archive = await JSZip.loadAsync(buffer);
+  let changed = false;
+  for (const entry of Object.values(archive.files)) {
+    if (entry.dir || !/^xl\/worksheets\/[^/]+\.xml$/i.test(entry.name)) continue;
+    const xml = await entry.async('string');
+    if (!xml.includes('inlineStr')) continue;
+    const normalized = normalizeInlineStringCells(xml);
+    if (!normalized.changed) continue;
+    archive.file(entry.name, normalized.xml);
+    changed = true;
+  }
+  return changed ? archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) : buffer;
+}
+
+/** A spreadsheet library error, reduced to text that names no imported content (its messages can quote cell XML). */
+function readerReason(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const cell = /\br="([A-Z]{1,3}\d{1,7})"/.exec(message)?.[1];
+  const reason = message.split(':')[0].replace(/\s+/g, ' ').trim().slice(0, 120) || 'unreadable content';
+  return { cell, reason };
+}
+
+function logParseFailure(extension: string, error: unknown, context: Record<string, unknown> = {}) {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  // The stack and error class, without the message text: parser messages can contain imported business data.
+  logger.warn({ extension, errorName: failure.name, errorCode: (failure as { code?: unknown }).code, stack: failure.stack?.split('\n').slice(1, 12).join('\n'), ...context }, 'knowledge import: file could not be parsed');
+}
+
+/** An official Outvexa template with no records filled in: valid, but nothing to import yet. */
+export interface EmptyTemplate { version: string; sheets: number }
+export const EMPTY_TEMPLATE_NOTICE = 'This is an unfilled Outvexa template: no records yet. Add rows below the headers on the worksheets you need, then upload it again.';
+
+async function workbookRows(original: Buffer): Promise<{ rows: ParsedImportRow[]; emptyTemplate?: EmptyTemplate }> {
+  let buffer: Buffer;
+  let sheetNames: string[];
+  try {
+    buffer = await normalizedWorkbook(original);
+    sheetNames = await readSheetNames(buffer);
+  } catch (error) {
+    logParseFailure('xlsx', error, { step: 'workbook structure' });
+    throw invalid('The XLSX file is not a readable workbook: its package or workbook structure is damaged');
+  }
   if (sheetNames.length > 60) throw invalid('The workbook has too many worksheets');
-  const readSheet = async (sheet: string) => (await readXlsxFile(buffer, { sheet, trim: false }) as Cell[][]).map(row => row.map(cellValue));
+  const readSheet = async (sheet: string) => {
+    let grid: Cell[][];
+    try {
+      grid = await readXlsxFile(buffer, { sheet, trim: false }) as Cell[][];
+    } catch (error) {
+      const { cell, reason } = readerReason(error);
+      logParseFailure('xlsx', error, { step: 'worksheet', sheet, cell });
+      throw invalid(`Worksheet "${sheet}" could not be read${cell ? ` (cell ${cell})` : ''}: ${reason}`);
+    }
+    // A formula error (#DIV/0!, #REF!, #N/A ...) is not a value: refuse it rather than import its error text as a fact.
+    grid.forEach((row, rowIndex) => row.forEach((cell, column) => {
+      const code = typeof cell === 'string' ? /^#ERROR_(#[A-Z0-9/!?.]+)$/.exec(cell)?.[1] : undefined;
+      if (code) throw invalid(`Worksheet "${sheet}" cell ${columnLetters(column)}${rowIndex + 1} contains the spreadsheet error ${code}. Correct the formula or clear the cell, then upload the file again.`);
+    }));
+    return grid.map(row => row.map(cellValue));
+  };
   const instructions = sheetNames.includes('Instructions') ? await readSheet('Instructions') : [];
   const version = instructions[0]?.[0] === 'Outvexa Outreach Brain Template' ? instructions[0]?.[1] : undefined;
-  if (version != null && version !== 'v1' && version !== 'v2') throw invalid('Unsupported workbook template version');
+  if (version != null && !['v1', 'v2', 'v3'].includes(String(version))) throw invalid('Unsupported workbook template version');
   const result: ParsedImportRow[] = [];
+  // Tracks whether the workbook still matches the template contract: every sheet a template sheet, every header known.
+  let templateSheets = 0;
+  let matchesTemplate = version != null;
   for (const sheet of sheetNames) {
     if (sheet === 'Instructions') continue;
     const grid = await readSheet(sheet);
-    if (!grid.length) continue;
     const first = grid.findIndex(row => row.some(cell => cell != null && String(cell).trim()));
-    if (first < 0) continue;
+    if (first < 0) { matchesTemplate = false; continue; }
     if (grid.length - first > MAX_ROWS + 1 || grid.some(row => row.length > 150)) throw invalid('A worksheet exceeds the row or column limit');
     const headerIndex = first;
     const headers = grid[headerIndex].map(cell => String(cell ?? '').trim());
@@ -239,8 +348,10 @@ async function workbookRows(buffer: Buffer): Promise<ParsedImportRow[]> {
     if (new Set(lower).size !== lower.length) throw invalid('Duplicate worksheet header');
     if (lower.some(header => ['__proto__', 'prototype', 'constructor'].includes(header))) throw invalid('Invalid worksheet header');
     const entry = entries.find(([, item]) => item.sheet.toLowerCase() === sheet.toLowerCase());
-    const known = entry ? new Set([...commonHeaders, ...entry[1].fields.split(' '), ...relationshipHeaders].map(field => field.toLowerCase())) : null;
-    const unknownHeaders = version === 'v2' && known ? headers.filter(header => header && !known.has(header.toLowerCase())) : [];
+    const known = entry ? new Set([...commonHeaders, ...entry[1].fields.split(' ').filter(Boolean), ...relationshipHeaders].map(field => field.toLowerCase())) : null;
+    const unknownHeaders = ['v2', 'v3'].includes(String(version)) && known ? headers.filter(header => header && !known.has(header.toLowerCase())) : [];
+    if (!known || headers.some(header => header && !known.has(header.toLowerCase())) || !lower.includes('name')) matchesTemplate = false;
+    else templateSheets++;
     for (let index = headerIndex + 1; index < grid.length; index++) {
       const cells = grid[index];
       const populated = (cell: unknown) => cell != null && String(cell).trim() !== '';
@@ -257,7 +368,8 @@ async function workbookRows(buffer: Buffer): Promise<ParsedImportRow[]> {
       result.push({ value, locator: `${sheet}:row-${row}`, excerpt: JSON.stringify(value).slice(0, 2000), sheet, row, entityType: entry?.[0], warnings });
     }
   }
-  return result;
+  if (!result.length && matchesTemplate && templateSheets > 0) return { rows: result, emptyTemplate: { version: String(version), sheets: templateSheets } };
+  return { rows: result };
 }
 
 function contentRow(text: string, locator: string, provenance: Pick<ParsedImportRow, 'page' | 'paragraph'> = {}): ParsedImportRow {
@@ -289,12 +401,25 @@ async function pdfRows(buffer: Buffer) {
   return rows;
 }
 
-export async function parseImportFile(buffer: Buffer, name: string, mime?: string): Promise<ParsedImportRow[]> {
+/** A short, content-free description of why a file could not be parsed, for the person who uploaded it. */
+function parseFailureDetail(extension: string, error: unknown) {
+  const code = String((error as { code?: unknown })?.code ?? '');
+  if (extension === 'json' && error instanceof SyntaxError) return ': the JSON is not valid';
+  if (error instanceof TypeError && /decode|encoded data/i.test(error.message)) return ': the text is not valid UTF-8';
+  if (code.startsWith('CSV_')) return `: CSV structure error (${code})`;
+  if (extension === 'docx') return ': the Word document structure could not be read';
+  if (extension === 'pdf') return ': the PDF structure could not be read';
+  return '';
+}
+
+/** Parses an upload. Empty files are rejected, except an unfilled official template, which is reported as such. */
+export async function parseImportFileDetailed(buffer: Buffer, name: string, mime?: string): Promise<{ rows: ParsedImportRow[]; emptyTemplate?: EmptyTemplate }> {
   const extension = validateImportUpload(buffer, name, mime);
   let result: ParsedImportRow[];
+  let emptyTemplate: EmptyTemplate | undefined;
   try {
     if (extension === 'xlsx' || extension === 'docx') validateImportUpload(buffer, name, mime, true);
-    if (extension === 'xlsx') result = await workbookRows(buffer);
+    if (extension === 'xlsx') ({ rows: result, emptyTemplate } = await workbookRows(buffer));
     else if (extension === 'pdf') result = await pdfRows(buffer);
     else if (extension === 'docx') {
       const mammoth = await import('mammoth');
@@ -330,9 +455,16 @@ export async function parseImportFile(buffer: Buffer, name: string, mime?: strin
     }
   } catch (error) {
     if (error instanceof AppError) throw error;
-    throw invalid(`Malformed or unreadable ${extension.toUpperCase()} file`);
+    // Keep the cause diagnosable: log the exception and stack, and tell the user what kind of problem it is.
+    logParseFailure(extension, error, { step: 'file' });
+    throw invalid(`Malformed or unreadable ${extension.toUpperCase()} file${parseFailureDetail(extension, error)}`);
   }
+  if (emptyTemplate) return { rows: [], emptyTemplate };
   if (!result.length) throw invalid('The file contains no importable rows or text');
   if (result.length > MAX_ROWS) throw invalid('The file exceeds the import row limit');
-  return result;
+  return { rows: result };
+}
+
+export async function parseImportFile(buffer: Buffer, name: string, mime?: string): Promise<ParsedImportRow[]> {
+  return (await parseImportFileDetailed(buffer, name, mime)).rows;
 }
