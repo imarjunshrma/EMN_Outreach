@@ -16,6 +16,7 @@ export const NAV: NavGroup[] = [
   ] },
   { group: 'Prospects', items: [
     { href: '/prospecting', label: 'Prospect discovery', icon: Telescope, keywords: 'apollo search find' },
+    { href: '/leads/lists', label: 'Lead lists', icon: ListTodo, keywords: 'organize contacts lists upload' },
     { href: '/leads', label: 'Leads', icon: Users, keywords: 'contacts people' },
     { href: '/companies', label: 'Companies', icon: Building2, keywords: 'accounts' },
     { href: '/leads/import', label: 'Import & export', icon: Upload, keywords: 'csv upload' },

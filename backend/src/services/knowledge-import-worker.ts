@@ -9,7 +9,7 @@ import { audit, WORKER_ACTOR } from '../core/audit.js';
 import { ImportEntityTypeSchema, validateImportPayload } from '../../../shared/src/knowledge-import.js';
 import { assertImportAdmin, enqueueImportStage, importJson, importStages, StageSchema } from './knowledge-import.js';
 import { applyImportItem, destinationFor, importStableKey, inspectImportItem, syncImportRetrieval } from './knowledge-import-apply.js';
-import { captureImportExtraction, extractImportRows, type ImportExtractedItem, type ImportExtractionSnapshot } from './knowledge-import-extraction.js';
+import { captureImportExtraction, describeLeftOut, extractImportRowsDetailed, LEFT_OUT_PREFIX, type ImportExtractedItem, type ImportExtractionSnapshot } from './knowledge-import-extraction.js';
 import { tenantStateForWorkspace } from './entitlements.js';
 import { EMPTY_TEMPLATE_NOTICE, parseImportFileDetailed, type ParsedImportRow } from './knowledge-import-parser.js';
 
@@ -101,10 +101,12 @@ export async function processImportJob(job: Job) {
             continue;
           }
           try {
-            const result = await extractImportRows(workspaceId, parsedRows, sessionId, await extractionSnapshot());
+            const { items: result, rejected } = await extractImportRowsDetailed(workspaceId, parsedRows, sessionId, await extractionSnapshot());
+            // Records that failed validation are left out of review; say which, and why, without quoting their content.
+            const note = rejected.length ? `${LEFT_OUT_PREFIX}: ${describeLeftOut(rejected)}` : null;
             await db().knowledgeImportFile.updateMany({
               where: { ...scope, id: file.id, status: 'PARSED' },
-              data: { extracted: importJson(result), parsedRows: Prisma.DbNull, status: 'EXTRACTED', error: null },
+              data: { extracted: importJson(result), parsedRows: Prisma.DbNull, status: 'EXTRACTED', error: note },
             });
           } catch (error) {
             // A file the model cannot extract consistently (output that fails the schema or cites text it was not
@@ -139,7 +141,7 @@ export async function processImportJob(job: Job) {
           }).length;
           await db().knowledgeImportFile.updateMany({
             where: { ...scope, id: file.id, status: 'EXTRACTED' },
-            data: { status: 'VALIDATED', ...(invalid ? { error: `${invalid} extracted record(s) need corrections during review.` } : {}) },
+            data: { status: 'VALIDATED', ...(invalid ? { error: [`${invalid} extracted record(s) need corrections during review.`, file.error?.startsWith(LEFT_OUT_PREFIX) ? file.error : null].filter(Boolean).join(' ').slice(0, 1000) } : {}) },
           });
           continue;
         }
@@ -163,7 +165,8 @@ export async function processImportJob(job: Job) {
           });
           await tx.knowledgeImportFile.updateMany({
             where: { ...scope, id: file.id, status: 'VALIDATED' },
-            data: { status: 'REVIEW', extracted: Prisma.DbNull, error: items.length ? null : file.error === EMPTY_TEMPLATE_NOTICE ? EMPTY_TEMPLATE_NOTICE : 'No structured knowledge was identified in this file.' },
+            data: { status: 'REVIEW', extracted: Prisma.DbNull, error: file.error?.includes(LEFT_OUT_PREFIX) ? file.error.slice(file.error.indexOf(LEFT_OUT_PREFIX))
+              : items.length ? null : file.error === EMPTY_TEMPLATE_NOTICE ? EMPTY_TEMPLATE_NOTICE : 'No structured knowledge was identified in this file.' },
           });
         });
       }

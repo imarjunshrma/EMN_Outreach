@@ -7,6 +7,7 @@ import { Badge, Button, Card, Checkbox, Empty, Field, Input, Notice, PageHeader,
 import { describeError } from '@/lib/api';
 import { fmtDate, titleCase } from '@/lib/format';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
+import { ImportUploader } from '../import-uploader';
 import { importItemName, isProcessing, type ImportFields, type ImportItem, type ImportSession, type ReviewStatus, useCanReviewImports } from '../import-types';
 import { importFieldKind, importFieldNames } from '../../../../../../../shared/src/knowledge-import';
 
@@ -342,7 +343,10 @@ export default function KnowledgeImportPage() {
   const canReview = useCanReviewImports();
   const session = useWsQuery<ImportSession>(`/ai-studio/imports/${id}`, { refetchInterval: 3000 });
   return <>
-    <PageHeader title="Knowledge import" actions={<Link className={linkClass} href={`/w/${ws}/ai-studio/imports`}>Back to import history</Link>} />
+    <PageHeader title="Knowledge import" actions={<div className="flex items-center gap-3">
+      <Link className={linkClass} href={`/w/${ws}/ai-studio/imports`}>Back to import history</Link>
+      {canReview && <ImportUploader label="Upload new files" variant="secondary" hint={false} />}
+    </div>} />
     <QueryView q={session}>{(data) => <ImportDetail key={data.id} session={data} ws={ws} canReview={canReview} />}</QueryView>
   </>;
 }

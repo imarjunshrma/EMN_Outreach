@@ -163,8 +163,8 @@ async function upload(page: Page, base: string, workbook: Buffer, support?: Buff
   await page.goto(`${base}/ai-studio/imports`);
   const files = [{ name: 'synthetic-knowledge.xlsx', mimeType: xlsxMime, buffer: workbook }];
   if (support) files.push({ name: 'unverified-proof.docx', mimeType: docxMime, buffer: support });
+  // Choosing the files starts the upload; there is no separate submit step.
   await page.getByLabel('Choose files').setInputFiles(files);
-  await page.getByRole('button', { name: 'Upload files', exact: true }).click();
   await expect(page).toHaveURL(/\/ai-studio\/imports\/[0-9a-f-]{36}$/, { timeout: 30000 });
   return new URL(page.url()).pathname.split('/').at(-1)!;
 }

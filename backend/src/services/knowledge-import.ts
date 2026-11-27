@@ -82,6 +82,17 @@ export async function createImport(workspaceId: string, files: Array<{ originaln
       const found = await tx.knowledgeImportSession.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } } });
       if (found) return found;
     }
+    // A copy that failed (for example to a parser defect since fixed) must not block a new attempt: re-uploading the same
+    // file would otherwise keep returning the failed session. Retire it in its own session so the upload is processed again.
+    const failed = await tx.knowledgeImportFile.findMany({
+      where: { workspaceId, sha256: { in: [...uploads.keys()] }, status: 'FAILED' }, select: { id: true, error: true },
+    });
+    for (const file of failed) {
+      await tx.knowledgeImportFile.updateMany({
+        where: { workspaceId, id: file.id, status: 'FAILED' },
+        data: { status: 'CANCELLED', content: null, error: `${file.error ?? 'The file could not be processed'} (replaced by a later upload of the same file)`.slice(0, 1000) },
+      });
+    }
     const previous = await tx.knowledgeImportFile.findMany({
       where: { workspaceId, sha256: { in: [...uploads.keys()] }, status: { not: 'CANCELLED' } },
       select: { sha256: true, sessionId: true }, orderBy: { createdAt: 'desc' },

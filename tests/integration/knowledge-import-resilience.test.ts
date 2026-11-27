@@ -180,17 +180,20 @@ describe('Knowledge Importer XLSX uploads', () => {
     expect(view.items).toEqual([]);
   });
 
+  /** Extraction fake for template workbooks: one record per worksheet row, cited from that row. */
+  const worksheetExtractor = () => extractor(fakes.openai as FakeAi, (user) => {
+    const source = /<untrusted_content source="knowledge_import">\n([\s\S]+?)\n<\/untrusted_content>/.exec(user)?.[1] ?? '';
+    return { items: source.split('\n\n').map((fragment) => {
+      const [header, ...lines] = fragment.split('\n');
+      const meta = JSON.parse(header) as { sourceIndex: number; worksheetEntityType: string };
+      const name = lines.find((line) => line.startsWith('name: '))!.slice(6);
+      return { ...item(meta.worksheetEntityType, name, lines[0]), sourceIndex: meta.sourceIndex };
+    }) };
+  });
+
   it('uploads a workbook written by openpyxl and proposes a record from every entity sheet', async () => {
     const s = await workspaceWithAi(`openpyxl-${randomUUID()}@example.test`);
-    extractor(fakes.openai as FakeAi, (user) => {
-      const source = /<untrusted_content source="knowledge_import">\n([\s\S]+?)\n<\/untrusted_content>/.exec(user)?.[1] ?? '';
-      return { items: source.split('\n\n').map((fragment) => {
-        const [header, ...lines] = fragment.split('\n');
-        const meta = JSON.parse(header) as { sourceIndex: number; worksheetEntityType: string };
-        const name = lines.find((line) => line.startsWith('name: '))!.slice(6);
-        return { ...item(meta.worksheetEntityType, name, lines[0]), sourceIndex: meta.sourceIndex };
-      }) };
-    });
+    worksheetExtractor();
     const created = await createImport(s.workspaceId, [await xlsx('openpyxl-agency-workbook.xlsx')], actor(s.userId));
     const settled = await drive(s.workspaceId, created.id);
     expect(settled).toMatchObject({ status: 'REVIEW', errorSummary: null });
@@ -199,6 +202,26 @@ describe('Knowledge Importer XLSX uploads', () => {
     expect(new Set(view.items.map((proposal) => proposal.entityType))).toEqual(new Set(['COMPANY_PROFILE', 'SERVICE', 'COMMERCIAL_OFFER', 'TARGET_AUDIENCE',
       'TARGET_PERSONA', 'ICP_CRITERIA', 'BUSINESS_OPPORTUNITY', 'COMPETITOR', 'RESEARCH_RULE', 'OUTREACH_RULE', 'EXCLUSION', 'PROOF_CASE_STUDY', 'CAMPAIGN_PREFERENCE']));
     expect(view.items).toHaveLength(14);
+  });
+
+  it('re-processes a file whose earlier upload failed instead of returning the failed session', async () => {
+    const s = await workspaceWithAi(`reupload-${randomUUID()}@example.test`);
+    worksheetExtractor();
+    // The state an earlier release left behind: this workbook failed to parse ("Malformed or unreadable XLSX file").
+    const first = await createImport(s.workspaceId, [await xlsx('openpyxl-agency-workbook.xlsx')], actor(s.userId));
+    await db().knowledgeImportFile.updateMany({ where: { sessionId: first.id }, data: { status: 'FAILED', content: null, error: 'Malformed or unreadable XLSX file' } });
+    await db().knowledgeImportSession.update({ where: { id: first.id }, data: { status: 'REVIEW', processingStep: null, progress: 100, errorSummary: 'One or more files could not be processed. See file details.' } });
+
+    const second = await createImport(s.workspaceId, [await xlsx('openpyxl-agency-workbook.xlsx')], actor(s.userId));
+    expect(second.id).not.toBe(first.id);
+    expect(await drive(s.workspaceId, second.id)).toMatchObject({ status: 'REVIEW', errorSummary: null });
+    expect((await getImport(s.workspaceId, second.id)).items).toHaveLength(14);
+    const [replaced] = (await getImport(s.workspaceId, first.id)).files;
+    expect(replaced).toMatchObject({ status: 'CANCELLED', error: 'Malformed or unreadable XLSX file (replaced by a later upload of the same file)' });
+
+    // A file that was processed successfully is still deduplicated.
+    const third = await createImport(s.workspaceId, [await xlsx('openpyxl-agency-workbook.xlsx')], actor(s.userId));
+    expect(third.id).toBe(second.id);
   });
 
   it('reports a damaged worksheet by name instead of a generic malformed-file error', async () => {

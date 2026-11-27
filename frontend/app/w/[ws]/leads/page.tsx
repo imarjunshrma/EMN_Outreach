@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useState } from 'react';
 import { SavedFilters } from '@/components/saved-filters';
 import { qs, type Paged } from '@/lib/api';
 import { useWs, useWsMutation, useWsQuery } from '@/lib/hooks';
@@ -13,14 +14,32 @@ import { LEAD_STATUSES, LAWFUL_BASES as BASES } from '@/lib/constants';
 interface Lead { id: string; email: string; firstName: string | null; lastName: string | null; title: string | null; status: string; emailVerificationStatus: string; verifications?: Array<{ provider: string; createdAt: string }>;  currentScore: number | null; qualificationReview?: string | null; qualificationReviewReason?: string | null; country: string | null; createdAt: string; company: { id: string; name: string } | null; source: { name: string } | null; tags: string[] }
 
 export default function LeadsPage() {
+  return <Suspense fallback={<p role="status">Loading leads…</p>}><LeadListRoute /></Suspense>;
+}
+
+function LeadListRoute() {
+  const listId = useSearchParams().get('listId') ?? '';
+  return <LeadTable listId={listId} />;
+}
+
+function LeadTable({ listId }: { listId: string }) {
   const ws = useWs();
-  const [f, setF] = useState({ q: '', status: '', listId: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', page: 1 });
+  const router = useRouter();
+  const [f, setF] = useState({ q: '', status: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', page: 1 });
   const [selected, setSelected] = useState<string[]>([]);
   const [showNew, setShowNew] = useState(false);
-  const [bulk, setBulk] = useState({ action: 'add_to_list', listId: '', tag: '', status: 'QUALIFIED', lawfulBasis: 'LEGITIMATE_INTEREST', icpId: '', review: 'NEEDS_REVIEW', reviewReason: '' });
-  const query = qs({ ...f, pageSize: 50 });
+  const [bulk, setBulk] = useState({ action: listId ? 'remove_from_list' : 'add_to_list', listId, tag: '', status: 'QUALIFIED', lawfulBasis: 'LEGITIMATE_INTEREST', icpId: '', review: 'NEEDS_REVIEW', reviewReason: '' });
+  useEffect(() => {
+    setSelected([]);
+    setF(current => ({ ...current, page: 1 }));
+    setBulk(current => ({ ...current, action: listId ? 'remove_from_list' : 'add_to_list', listId }));
+  }, [listId]);
+  const query = qs({ ...f, listId, pageSize: 50 });
   const q = useWsQuery<Paged<Lead>>(`/leads${query}`);
   const lists = useWsQuery<Array<{ id: string; name: string; memberCount: number }>>('/lists');
+  const currentList = lists.data?.find(list => list.id === listId);
+  const listUrl = `/w/${ws}/leads`;
+  const importUrl = `${listUrl}/import${qs({ listId })}`;
   const icps = useWsQuery<Array<{ id: string; name: string }>>('/icps');
   const run = useWsMutation<void, { affected?: number; queued?: number }>(() => ({ path: '/leads/bulk', body: { ids: selected, ...bulk, reviewReason: bulk.action === 'review_qualification' ? bulk.reviewReason : undefined, listId: bulk.listId || undefined, icpId: bulk.icpId || undefined } }), {
     success: (r) => (r.queued !== undefined ? `${r.queued} queued` : `${r.affected ?? 0} updated`), onSuccess: () => setSelected([]),
@@ -32,12 +51,12 @@ export default function LeadsPage() {
 
   return (
     <>
-      <PageHeader title="Leads" subtitle="Your contact database. Filter, research, score, verify and add leads to lists for campaigns."
-        actions={<><Link className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/w/${ws}/leads/lists`}>Lists</Link><a className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/api/v1/w/${ws}/leads/export${query}`}>Export CSV</a><Link className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/w/${ws}/leads/import`}>Import CSV</Link><Button onClick={() => setShowNew(true)}>Add lead</Button></>} />
+      <PageHeader title={currentList?.name ?? (listId ? 'Lead list' : 'Leads')} subtitle={listId ? "Manage the leads in this list." : "Browse your workspace contacts or open a lead list."}
+        actions={<><Link className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/w/${ws}/leads/lists`}>Lists</Link><a className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={`/api/v1/w/${ws}/leads/export${query}`}>Export CSV</a><Link className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-sm" href={importUrl}>{listId ? "Upload to this list" : "Upload leads"}</Link>{!listId && <Button onClick={() => setShowNew(true)}>Add lead</Button>}</>} />
       <div className="card mb-4 grid gap-3 p-3 md:grid-cols-7">
         <Input placeholder="Search name, email, company" value={f.q} onChange={(e) => set('q', e.target.value)} className="md:col-span-2" />
         <Select value={f.status} onChange={(e) => set('status', e.target.value)} options={[{ value: '', label: 'Any status' }, ...LEAD_STATUSES.map((s) => ({ value: s, label: s.replace(/_/g, ' ').toLowerCase() }))]} />
-        <Select value={f.listId} onChange={(e) => set('listId', e.target.value)} options={[{ value: '', label: 'Any list' }, ...(lists.data ?? []).map((l) => ({ value: l.id, label: `${l.name} (${l.memberCount})` }))]} />
+        <Select aria-label="Lead list" value={listId} onChange={(e) => router.push(`${listUrl}${qs({ listId: e.target.value })}`)} options={[{ value: '', label: 'All leads' }, ...(lists.data ?? []).map((l) => ({ value: l.id, label: `${l.name} (${l.memberCount})` }))]} />
         <Select value={f.verification} onChange={(e) => set('verification', e.target.value)} options={[{ value: '', label: 'Any verification' }, ...['UNVERIFIED', 'VALID', 'INVALID', 'RISKY', 'CATCH_ALL', 'UNKNOWN'].map((s) => ({ value: s, label: s.toLowerCase() }))]} />
         <Select aria-label="Qualification review" value={f.qualificationReview} onChange={(e) => set('qualificationReview', e.target.value)} options={[
           { value: '', label: 'Any qualification review' }, { value: 'QUALIFIED', label: 'Approved qualification' },
@@ -48,7 +67,10 @@ export default function LeadsPage() {
         ]} />
         <Input placeholder="Min score" type="number" value={f.minScore} onChange={(e) => set('minScore', e.target.value)} />
         <Select value={f.sort} onChange={(e) => set('sort', e.target.value)} options={[{ value: 'createdAt', label: 'Newest' }, { value: 'score', label: 'Highest score' }, { value: 'lastRepliedAt', label: 'Last reply' }, { value: 'email', label: 'Email A–Z' }]} />
-        <div className="md:col-span-7"><SavedFilters entity="leads" current={f} onApply={(q) => setF({ q: '', status: '', listId: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', ...q, page: 1 })} /></div>
+        <div className="md:col-span-7"><SavedFilters entity="leads" current={{ ...f, listId }} onApply={({ listId: savedListId, ...q }) => {
+          if (savedListId !== undefined && savedListId !== listId) router.push(`${listUrl}${qs({ listId: savedListId })}`);
+          setF({ q: '', status: '', qualificationReview: '', research: '', verification: '', minScore: '', country: '', sort: 'createdAt', ...q, page: 1 });
+        }} /></div>
       </div>
       {selected.length > 0 && (
         <div className="card mb-4 flex flex-wrap items-end gap-3 p-3">
@@ -67,7 +89,7 @@ export default function LeadsPage() {
             <Input aria-label="Review reason" placeholder="Review reason" value={bulk.reviewReason} onChange={e => setBulk({ ...bulk, reviewReason: e.target.value })} />
           </>}
           <Button variant={bulk.action === 'delete' ? 'danger' : 'primary'} loading={run.isPending || verify.isPending}
-            disabled={bulk.action === 'review_qualification' && bulk.reviewReason.trim().length < 3}
+            disabled={(bulk.action === 'review_qualification' && bulk.reviewReason.trim().length < 3) || (['add_to_list', 'remove_from_list'].includes(bulk.action) && !bulk.listId)}
             onClick={() => {
               if (bulk.action === 'verify' || bulk.action === 'retry_verify') { verify.mutate(bulk.action === 'retry_verify'); return; }
               if ((bulk.action === 'delete' || bulk.action === 'review_qualification') && !window.confirm(`Apply this change to ${selected.length} leads?`)) return;
@@ -77,7 +99,7 @@ export default function LeadsPage() {
           <Button variant="ghost" onClick={() => setSelected([])}>Clear</Button>
         </div>
       )}
-      <QueryView q={q} isEmpty={(d) => d.total === 0} empty={<Empty title="No leads match" action={<Link className="text-brand-700 underline" href={`/w/${ws}/prospecting`}>Discover prospects</Link>}>Import a CSV, add a lead manually or search a connected data provider.</Empty>}>
+      <QueryView q={q} isEmpty={(d) => d.total === 0} empty={<Empty title={listId ? "No leads match in this list" : "No leads match"} action={<Link className="text-brand-700 underline" href={importUrl}>{listId ? "Upload to this list" : "Upload leads"}</Link>} />}>
         {(d) => (
           <div className="card p-2">
             <Table head={[<input key="all" type="checkbox" aria-label="Select all" checked={d.data.length > 0 && d.data.every((l) => selected.includes(l.id))} onChange={(e) => setSelected(e.target.checked ? d.data.map((l) => l.id) : [])} />, 'Name', 'Company', 'Status', 'Email', 'Score', 'Country', 'Source', 'Added']}>
